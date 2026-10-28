@@ -1,0 +1,297 @@
+// Geopter project serialization translated from OpticalSystem::SaveToFile/LoadFromFile.
+use super::*;
+use serde_json::{Map, Value, json};
+fn number(v: &Value, label: &str) -> Result<f64, String> {
+    v.as_f64()
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| format!("Missing or invalid Geopter {label}"))
+}
+fn array<'a>(v: &'a Value, label: &str) -> Result<&'a Vec<Value>, String> {
+    v.as_array()
+        .ok_or_else(|| format!("Missing Geopter {label} array"))
+}
+fn code(v: &Value, label: &str) -> Result<u64, String> {
+    v.as_u64().ok_or_else(|| format!("Invalid Geopter {label}"))
+}
+pub fn import(text: &str) -> Result<System, String> {
+    let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let a = root["Assembly"]
+        .as_object()
+        .ok_or("Missing Geopter Assembly")?;
+    let mut keys: Vec<usize> = a
+        .keys()
+        .filter_map(|key| key.parse::<usize>().ok())
+        .collect();
+    keys.sort_unstable();
+    if keys.len() < 3 || keys.iter().enumerate().any(|(i, k)| i != *k) {
+        return Err(
+            "Geopter Assembly requires contiguous object, surfaces and image indices".into(),
+        );
+    }
+    let object = &a["0"];
+    if object["Type"] != "SPH" || number(&object["Curvature"], "object curvature")? != 0. {
+        return Err("Curved Geopter object surface is not implemented".into());
+    }
+    if object["Material"] != "AIR" {
+        return Err("Object medium must be AIR".into());
+    }
+    let last = &a[&(keys.len() - 1).to_string()];
+    if last["Type"] != "SPH" || number(&last["Curvature"], "image curvature")? != 0. {
+        return Err("Curved image surface is not implemented".into());
+    }
+    let spec = &root["Spec"];
+    let fs = &spec["Field"];
+    let ws = &spec["Wvl"];
+    let field_type = match code(&fs["Type"], "field type")? {
+        0 => FieldType::Angle,
+        1 => FieldType::ObjectHeight,
+        2 => FieldType::ImageHeight,
+        _ => return Err("Unknown Geopter field type".into()),
+    };
+    let xs = array(&fs["X"], "field X")?;
+    let ys = array(&fs["Y"], "field Y")?;
+    let weights = array(&fs["Weight"], "field weights")?;
+    if xs.len() != ys.len() || xs.len() != weights.len() {
+        return Err("Unequal Geopter field arrays".into());
+    }
+    let mut fields = vec![];
+    for i in 0..xs.len() {
+        let mut v = [0.; 4];
+        for (k, label) in ["VUY", "VLY", "VUX", "VLX"].iter().enumerate() {
+            let data = array(&fs[label], label)?;
+            if data.len() != xs.len() {
+                return Err(format!("Unequal Geopter {label} array"));
+            }
+            v[k] = number(&data[i], label)?;
+        }
+        fields.push(Field {
+            x: number(&xs[i], "field X")?,
+            y: number(&ys[i], "field Y")?,
+            weight: number(&weights[i], "field weight")?,
+            vignetting: v,
+        })
+    }
+    let waves = array(&ws["Value"], "wavelength values")?;
+    let weights = array(&ws["Weight"], "wavelength weights")?;
+    if waves.len() != weights.len() {
+        return Err("Unequal Geopter wavelength arrays".into());
+    }
+    let wavelengths = waves
+        .iter()
+        .zip(weights)
+        .map(|(w, t)| {
+            Ok(Wavelength {
+                value: number(w, "wavelength")?,
+                weight: number(t, "wavelength weight")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let pupil = Pupil {
+        kind: match code(&spec["Pupil"]["Type"], "pupil type")? {
+            0 => PupilType::EntrancePupilDiameter,
+            1 => PupilType::FNumber,
+            2 => PupilType::ObjectNa,
+            3 => PupilType::ImageNa,
+            _ => return Err("Unknown Geopter pupil type".into()),
+        },
+        value: number(&spec["Pupil"]["Value"], "pupil value")?,
+    };
+    let mut surfaces = vec![];
+    for i in 1..keys.len() - 1 {
+        let value = &a[&i.to_string()];
+        let c = number(&value["Curvature"], "surface curvature")?;
+        let mut surface = Surface::sphere(
+            if c == 0. { 0. } else { 1. / c },
+            number(&value["Thickness"], "thickness")?,
+            value["Material"]
+                .as_str()
+                .ok_or("Missing Geopter material")?,
+            1.,
+        );
+        surface.label = value["Label"].as_str().unwrap_or("").into();
+        match value["Type"]
+            .as_str()
+            .ok_or("Missing Geopter surface type")?
+        {
+            "SPH" => {}
+            "ASP" | "ODD" => {
+                surface.conic = number(&value["Conic"], "conic")?;
+                let coefs = array(&value["Coefs"], "asphere coefficients")?
+                    .iter()
+                    .map(|v| number(v, "asphere coefficient"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if value["Type"] == "ASP" {
+                    surface.even = coefs
+                } else {
+                    surface.odd = coefs
+                }
+            }
+            other => return Err(format!("Unknown Geopter surface profile {other}")),
+        }
+        if let Some(ap) = value.get("Aperture") {
+            if ap["Type"] != "Circular" {
+                return Err("Geopter aperture must be Circular".into());
+            }
+            surface.aperture = number(&ap["Radius"], "aperture radius")?;
+        } else {
+            surface.clear_aperture = false;
+        }
+        surfaces.push(surface);
+    }
+    let distance = number(&object["Thickness"], "object thickness")?;
+    let stop = code(&a["Stop"], "stop index")? as usize;
+    if stop == 0 || stop >= keys.len() - 1 {
+        return Err("Geopter stop must be a physical surface".into());
+    }
+    let mut system = System {
+        name: root["Title"]
+            .as_str()
+            .ok_or("Missing Geopter Title")?
+            .into(),
+        note: root["Note"].as_str().unwrap_or("").into(),
+        surfaces,
+        wavelengths,
+        reference_wavelength: code(&ws["RefIndex"], "reference wavelength")? as usize,
+        fields,
+        field_type,
+        pupil,
+        pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+        object_distance: Some(distance),
+        stop_index: stop - 1,
+        temperature: 25.,
+        pressure: 101325.,
+        custom_glasses: vec![],
+    };
+    system.update()?;
+    Ok(system)
+}
+pub fn export(s: &System) -> Result<Value, String> {
+    if s.surfaces
+        .iter()
+        .any(|surface| !surface.gap_solve.is_fixed())
+    {
+        return Err("Geopter JSON does not store gap solve relationships; export native JSON to preserve them".into());
+    }
+    if s.pupil_mapping != PupilMapping::ReferenceEntrancePupil {
+        return Err("Geopter projects use reference entrance-pupil mapping; select that mapping or export native JSON".into());
+    }
+    if !s.custom_glasses.is_empty() {
+        return Err("Geopter projects cannot embed custom glass catalogs; export native JSON to preserve them".into());
+    }
+    if s.temperature != 25. || s.pressure != 101325. {
+        return Err("Geopter projects do not store environmental conditions; set 25 C and 101325 Pa or export native JSON".into());
+    }
+    let mut assembly = Map::new();
+    assembly.insert("0".into(),json!({"Type":"SPH","Curvature":0.,"Thickness":s.object_distance.ok_or("Geopter JSON requires a finite object gap")?,"Material":"AIR","Label":"Object"}));
+    for (i, surface) in s.surfaces.iter().enumerate() {
+        if surface.interaction != Interaction::Refract {
+            return Err("Geopter project export requires refractive surfaces".into());
+        }
+        if !surface.even.is_empty() && !surface.odd.is_empty() {
+            return Err(
+                "Geopter project profiles cannot combine even and odd coefficient lists".into(),
+            );
+        }
+        let mut value = json!({"Type":if !surface.odd.is_empty(){"ODD"}else if !surface.even.is_empty()||surface.conic!=0.{"ASP"}else{"SPH"},"Curvature":if surface.radius==0.{0.}else{1./surface.radius},"Thickness":surface.thickness,"Material":surface.material,"Label":surface.label,"Aperture":{"Type":"Circular","Radius":surface.aperture}});
+        if !surface.clear_aperture {
+            value.as_object_mut().unwrap().remove("Aperture");
+        }
+        if value["Type"] != "SPH" {
+            value["Conic"] = json!(surface.conic);
+            value["Coefs"] = json!(if !surface.odd.is_empty() {
+                &surface.odd
+            } else {
+                &surface.even
+            });
+        }
+        assembly.insert((i + 1).to_string(), value);
+    }
+    assembly.insert(
+        (s.surfaces.len() + 1).to_string(),
+        json!({"Type":"SPH","Curvature":0.,"Thickness":0.,"Material":"AIR","Label":"Image"}),
+    );
+    assembly.insert("Stop".into(), json!(s.stop_index + 1));
+    let field = |axis: usize| {
+        s.fields
+            .iter()
+            .map(|f| if axis == 0 { f.x } else { f.y })
+            .collect::<Vec<_>>()
+    };
+    let vig = |i: usize| s.fields.iter().map(|f| f.vignetting[i]).collect::<Vec<_>>();
+    Ok(
+        json!({"Title":s.name,"Note":s.note,"Assembly":assembly,"Spec":{"Pupil":{"Type":match s.pupil.kind{PupilType::EntrancePupilDiameter=>0,PupilType::FNumber=>1,PupilType::ObjectNa=>2,PupilType::ImageNa=>3},"Value":s.pupil.value},"Field":{"Type":match s.field_type{FieldType::Angle=>0,FieldType::ObjectHeight=>1,FieldType::ImageHeight=>2},"X":field(0),"Y":field(1),"Weight":s.fields.iter().map(|f|f.weight).collect::<Vec<_>>(),"VUY":vig(0),"VLY":vig(1),"VUX":vig(2),"VLX":vig(3),"Color":s.fields.iter().map(|_|[0.,0.,0.,1.]).collect::<Vec<_>>()},"Wvl":{"RefIndex":s.reference_wavelength,"Value":s.wavelengths.iter().map(|w|w.value).collect::<Vec<_>>(),"Weight":s.wavelengths.iter().map(|w|w.weight).collect::<Vec<_>>(),"Color":s.wavelengths.iter().map(|_|[0.,0.,0.,1.]).collect::<Vec<_>>()}}}),
+    )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn upstream_triplet_import_and_trace() {
+        let s = import(include_str!(
+            "../../../reference/upstream/example/book/sasian_triplet.json"
+        ))
+        .unwrap();
+        assert_eq!(s.surfaces.len(), 6);
+        assert_eq!(s.stop_index, 2);
+        assert_eq!(s.pupil_mapping, PupilMapping::ReferenceEntrancePupil);
+        assert!((s.paraxial(s.reference()).unwrap()["efl"].as_f64().unwrap() - 50.).abs() < 1.);
+        for f in &s.fields {
+            let ray = s.trace_field(0., 0., f, s.reference()).unwrap();
+            assert!(ray.image()[1].is_finite());
+        }
+    }
+    #[test]
+    fn project_round_trip_preserves_spec() {
+        let s = import(include_str!(
+            "../../../reference/upstream/example/book/sasian_triplet.json"
+        ))
+        .unwrap();
+        let text = export(&s).unwrap().to_string();
+        let again = import(&text).unwrap();
+        assert_eq!(
+            serde_json::to_value(s).unwrap(),
+            serde_json::to_value(again).unwrap()
+        );
+    }
+    #[test]
+    fn all_upstream_examples_import_size_trace_and_round_trip() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../reference/upstream/example");
+        let mut files = vec![];
+        fn collect(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(&path, files);
+                } else if path.extension().is_some_and(|e| e == "json") {
+                    files.push(path);
+                }
+            }
+        }
+        collect(&root, &mut files);
+        assert_eq!(files.len(), 10);
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let s = import(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let report = super::super::aperture::semi_diameters(&s).unwrap();
+            assert!(
+                report.surfaces.iter().all(|p| p.reached_rays > 0),
+                "{}: {report:?}",
+                path.display()
+            );
+            for field in &s.fields {
+                let ray = s
+                    .trace_field(0., 0., field, s.reference())
+                    .unwrap_or_else(|e| panic!("{} chief: {e}", path.display()));
+                assert!(ray.image().iter().all(|v| v.is_finite()));
+            }
+            let again = import(&export(&s).unwrap().to_string()).unwrap();
+            assert_eq!(
+                serde_json::to_value(s).unwrap(),
+                serde_json::to_value(again).unwrap(),
+                "{}",
+                path.display()
+            );
+        }
+    }
+}
