@@ -1,0 +1,541 @@
+export type Interaction = 'refract' | 'reflect' | 'dummy';
+export type FieldType = 'angle' | 'object_height' | 'image_height';
+export type PupilMapping = 'reference_entrance_pupil' | 'real_stop';
+export type PupilKind = 'entrance_pupil_diameter' | 'f_number' | 'object_na' | 'image_na';
+
+/**
+ * Relation controlling the thickness AFTER a surface. Every index is zero-based.
+ * `overall_length` sums the half-open gap interval [first, last).
+ */
+export type GapSolve =
+  | { kind: 'fixed' }
+  | { kind: 'pickup'; source: number; scale: number; offset: number }
+  | { kind: 'edge_thickness'; height: number; value: number }
+  | { kind: 'overall_length'; first: number; last: number; value: number }
+  | { kind: 'marginal_height'; value: number; zone: number };
+
+export interface Surface {
+  label: string;
+  radius: number;
+  /** Distance to the next surface; the resolved value when `gap_solve` is active. */
+  thickness: number;
+  gap_solve: GapSolve;
+  material: string;
+  /** Physical circular clear radius in mm; blocks rays only when `clear_aperture` is true. */
+  aperture: number;
+  /** true: `aperture` is a physical circular aperture that blocks rays; false: it never clips. */
+  clear_aperture: boolean;
+  /**
+   * Derived, read-only drawing radius in mm (>= 0): chief plus four field-local pupil rim rays at the
+   * reference wavelength across all stored fields. Recomputed by the backend on every model update.
+   */
+  semi_diameter: number;
+  conic: number;
+  even: number[];
+  odd: number[];
+  interaction: Interaction;
+}
+
+export interface Wavelength {
+  value: number;
+  weight: number;
+}
+
+/** vignetting order: [upper y, lower y, upper x, lower x]; any finite value < 1 (positive trims, negative enlarges, 0 nominal). */
+export type Vignetting = [number, number, number, number];
+
+export interface Field {
+  x: number;
+  y: number;
+  weight: number;
+  vignetting: Vignetting;
+}
+
+export interface Pupil {
+  kind: PupilKind;
+  value: number;
+}
+
+/** Wavelength range is in micrometers; thermal is D0,D1,D2,E0,E1,Ltk,Tref. */
+export interface Glass {
+  name: string;
+  catalog: string;
+  formula: number;
+  coefficients: number[];
+  nd: number;
+  vd: number;
+  wavelength_range: [number, number] | null;
+  thermal: [number, number, number, number, number, number, number] | null;
+  transmission: [number, number, number][];
+  comment: string;
+}
+
+export interface OpticalSystem {
+  name: string;
+  note: string;
+  surfaces: Surface[];
+  wavelengths: Wavelength[];
+  reference_wavelength: number;
+  fields: Field[];
+  field_type: FieldType;
+  pupil: Pupil;
+  /** How pupil coordinates map to rays; part of the saved model, no default when omitted. */
+  pupil_mapping: PupilMapping;
+  object_distance: number | null;
+  stop_index: number;
+  temperature: number;
+  pressure: number;
+  custom_glasses: Glass[];
+}
+
+export interface SystemSnapshot {
+  system: OpticalSystem;
+  revision: number;
+}
+
+export type Point3 = [number, number, number];
+
+export interface Paraxial {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  efl: number;
+  bfl: number;
+  f_number: number;
+  matrix: number[];
+  image_distance: number;
+  magnification: number | null;
+  entrance_pupil_distance: number;
+  entrance_pupil_radius: number;
+  stop_radius: number;
+  exit_pupil_distance: number | null;
+  exit_pupil_radius: number | null;
+  image_index: number;
+}
+
+export interface Ray {
+  points: Point3[];
+  field: number;
+  field_x: number;
+  wavelength: number;
+  opl: number;
+}
+
+export interface RejectedRay {
+  field: number;
+  pupil: number;
+  error: string;
+}
+
+export interface Layout {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  rays: Ray[];
+  rejected: RejectedRay[];
+}
+
+/** Pupil ray pattern for geometric analyses; weights are normalized nominal-pupil areas. */
+export type PupilSampling =
+  | { kind: 'grid'; count: number }
+  | { kind: 'hexapolar'; rings: number };
+
+export type Spectrum = { kind: 'monochromatic'; wavelength: number } | { kind: 'polychromatic' };
+
+/** One positive-weight wavelength; effective_weight = weight * transmitted_fraction (sampled aperture transmission only). */
+export interface SpectralComponent {
+  wavelength: number;
+  weight: number;
+  pupil_samples: number;
+  transmitted_samples: number;
+  transmitted_fraction: number;
+  effective_weight: number;
+}
+
+export interface ComplexOtf {
+  real: number[];
+  imaginary: number[];
+}
+
+/** Captured when a request starts, so labels never follow live controls. */
+export interface RunInfo {
+  revision: number;
+  field: string;
+  wavelength: number;
+  mapping: PupilMapping;
+}
+
+export interface SpotDiagram {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  points: [number, number][];
+  /** Nominal pupil area weight of each transmitted point. */
+  weights: number[];
+  centroid: [number, number];
+  rms_radius: number;
+  geometric_radius: number;
+  blocked: number;
+  missed: number;
+  total_internal_reflection: number;
+  backend: string;
+  sampling: PupilSampling;
+  sampled_rays: number;
+  transmitted_weight: number;
+  units: 'mm';
+}
+
+/** All stored wavelengths with positive weight; weights are wavelength weight times nominal pupil area weight. */
+export interface PolychromaticSpot {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  points: [number, number][];
+  weights: number[];
+  wavelengths: number[];
+  centroid: [number, number];
+  rms_radius: number;
+  transmitted_weight: number;
+  sampling: PupilSampling;
+  sampled_rays: number;
+  failures: {
+    wavelength: number;
+    weight: number;
+    transmitted: number;
+    rejected: number;
+    transmitted_fraction: number;
+    effective_weight: number;
+  }[];
+  units: string;
+}
+
+export type SolveKind = GapSolve['kind'];
+
+/** Installs or replaces the relation of one gap; `{ kind: 'fixed' }` removes it and keeps the resolved thickness. */
+export interface SolveArgs {
+  gap: number;
+  definition: GapSolve;
+  revision: number;
+}
+
+export interface GapSolveEntry {
+  gap: number;
+  thickness: number;
+  definition: GapSolve;
+}
+
+export interface SolveResult {
+  revision: number;
+  solve: GapSolveEntry;
+}
+
+export interface SolveRecalculateResult {
+  revision: number;
+  /** Active (non-fixed) definitions only. */
+  solves: GapSolveEntry[];
+}
+
+export interface ApertureSurfaceReport {
+  surface: number;
+  semi_diameter: number;
+  aperture: number;
+  clear_aperture: boolean;
+  reached_rays: number;
+}
+
+export interface ApertureFailure {
+  field_index: number;
+  /** Field-local pupil coordinates [p_T, p_S]. */
+  pupil: [number, number];
+  surface: number | null;
+  reached_surfaces: number;
+  kind: string;
+  error: string;
+}
+
+/** Read-only coverage of the derived drawing semi-diameters. Every index is zero-based. */
+export interface ApertureReport {
+  revision: number;
+  wavelength: number;
+  sampling: string;
+  sampled_rays: number;
+  failed_rays: number;
+  surfaces: ApertureSurfaceReport[];
+  failures: ApertureFailure[];
+}
+
+export type VignettingDirection = 'upper_y' | 'lower_y' | 'upper_x' | 'lower_x';
+
+export interface VignettingBoundary {
+  direction: VignettingDirection;
+  pupil_scale: number;
+  limiting_surface: number | null;
+  status: 'aperture' | 'unlimited';
+}
+
+export interface VignettingFieldResult {
+  field_index: number;
+  vignetting: Vignetting;
+  boundaries: VignettingBoundary[];
+}
+
+export interface VignettingUpdateResult {
+  revision: number;
+  wavelength: number;
+  iterations: number;
+  tolerance: number;
+  fields: VignettingFieldResult[];
+}
+
+export interface GeometricMtf {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  frequencies: number[];
+  mtf: number[];
+  backend: string;
+  rays: number;
+  spectrum: Spectrum;
+  sampling: PupilSampling;
+  axis: MtfAxis;
+  origin: [number, number];
+  components: SpectralComponent[];
+  transmitted_weight: number;
+  normalization: string;
+  units: 'cycles/mm';
+  otf: ComplexOtf;
+}
+
+export type MtfAxis = 'x' | 'y';
+
+// ---- materials -----------------------------------------------------------
+
+export interface GlassSummary {
+  key: string;
+  name: string;
+  catalog: string;
+  nd: number;
+  vd: number;
+  formula: number;
+  wavelength_range: [number, number] | null;
+}
+
+/** Non-fatal catalog diagnostic; `line` is 1-based in the source catalog text. */
+export interface CatalogWarning {
+  catalog: string;
+  glass: string;
+  line: number;
+  message: string;
+}
+
+export interface MaterialSearchResult {
+  total: number;
+  glasses: GlassSummary[];
+  /** Diagnostics from loading the source catalogs; always present, possibly empty. */
+  warnings: CatalogWarning[];
+}
+
+export interface CatalogImportResult {
+  revision: number;
+  glasses_imported: number;
+  warnings: CatalogWarning[];
+}
+
+// ---- analysis results ----------------------------------------------------
+
+/** Unit axes in global image/pupil x,y; +y on-axis is tangential. */
+export interface FieldFrame {
+  tangential: [number, number];
+  sagittal: [number, number];
+}
+
+export interface RayFanPoint {
+  pupil: number;
+  tangential_error: number | null;
+  sagittal_error: number | null;
+  error: string | null;
+}
+export interface RayFan {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  frame: FieldFrame;
+  tangential: RayFanPoint[];
+  sagittal: RayFanPoint[];
+  chief_image: Point3;
+  wavelength: number;
+  units: string;
+}
+
+export interface OpdPoint {
+  pupil: number;
+  opd: number | null;
+  error: string | null;
+}
+export interface OpdFan {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  frame: FieldFrame;
+  reference: string;
+  tangential: OpdPoint[];
+  sagittal: OpdPoint[];
+  units: string;
+  wavelength: number;
+}
+
+export interface ChromaticPoint {
+  wavelength: number;
+  focus: number | null;
+  shift: number | null;
+  error: string | null;
+}
+export interface ChromaticFocus {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  reference_wavelength: number;
+  reference_focus: number;
+  points: ChromaticPoint[];
+  units: string;
+}
+
+export interface LongitudinalPoint {
+  pupil: number;
+  focus: number | null;
+  shift: number | null;
+  error: string | null;
+}
+export interface LongitudinalAberration {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  wavelength: number;
+  paraxial_focus: number;
+  points: LongitudinalPoint[];
+  units: string;
+}
+
+export interface Astigmatism {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  frame: FieldFrame;
+  sagittal_focus: number;
+  tangential_focus: number;
+  sagittal_shift: number;
+  tangential_shift: number;
+  astigmatism: number;
+  chief_direction: Point3;
+  units: string;
+}
+
+export interface Distortion {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  /** Definition of the ideal point (paraxial chief-ray intercept at the stored image plane). */
+  reference: string;
+  ideal: [number, number];
+  actual: [number, number];
+  distortion_percent: number | null;
+  units: string;
+}
+
+export interface Wavefront {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  grid: number;
+  opd: (number | null)[];
+  pupils: [number, number][];
+  rms: number;
+  peak_to_valley: number;
+  mean: number;
+  wavelength: number;
+  units: string;
+  valid: number;
+  failed: number;
+  reference: string;
+}
+
+export interface DiffractionPsf {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  intensity: number[];
+  grid: number;
+  pixel_size: number;
+  strehl: number;
+  wavelength: number;
+  normalization: string;
+  model: string;
+  failed_pupil_rays: number;
+  units: string;
+}
+
+export interface DiffractionMtf {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  frame: FieldFrame;
+  frequencies: number[];
+  sagittal: number[];
+  tangential: number[];
+  units: string;
+  failed_pupil_rays: number;
+  model: string;
+  spectrum: Spectrum;
+  components: (SpectralComponent & { pixel_size: number; sampling_cutoff: number; chief_image: [number, number] })[];
+  origin: [number, number];
+  transmitted_weight: number;
+  normalization: string;
+  pupil_grid: number;
+  sampling_limit: number;
+  max_frequency: number;
+  sagittal_otf: ComplexOtf;
+  tangential_otf: ComplexOtf;
+}
+
+export interface EncircledEnergy {
+  /** Saved-model revision the engine held while computing this reply. */
+  revision: number;
+  center: [number, number];
+  points: { radius: number; fraction: number }[];
+  rays: number;
+  sampling: PupilSampling;
+  sampled_rays: number;
+  transmitted_weight: number;
+  normalization: string;
+  units: string;
+}
+
+export interface AnalysisResults {
+  ray_fan: RayFan;
+  opd_fan: OpdFan;
+  chromatic_focus: ChromaticFocus;
+  longitudinal_aberration: LongitudinalAberration;
+  astigmatism: Astigmatism;
+  distortion: Distortion;
+  wavefront: Wavefront;
+  diffraction_psf: DiffractionPsf;
+  diffraction_mtf: DiffractionMtf;
+  encircled_energy: EncircledEnergy;
+}
+export type AnalysisKind = keyof AnalysisResults;
+/** A result tagged with the analysis that produced it, for narrowing in templates. */
+export type AnalysisOutcome = { [K in AnalysisKind]: { kind: K; data: AnalysisResults[K] } }[AnalysisKind];
+
+export type ImportFormat = 'geopter' | 'hissabeth';
+
+export interface AgentInfo {
+  name: string;
+  installed: boolean;
+  executable: string | null;
+}
+
+export interface AgentRegistration {
+  name: string;
+  success?: boolean;
+  message?: string;
+  status?: string;
+}
+
+export const TABS = [
+  'Layout',
+  'Spot diagram',
+  'MTF',
+  'Analysis',
+  'Materials',
+  'Import / Export',
+  'Prescription',
+  'Prescription JSON',
+  'Agent connections',
+] as const;
+export type Tab = (typeof TABS)[number];
