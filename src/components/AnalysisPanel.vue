@@ -16,7 +16,15 @@ const CURVE_SAMPLES = 33;
 const WAVEFRONT_GRID = 17;
 const DIFFRACTION_GRID = 32;
 
-interface Params { fieldIndex: number; wavelength: number; lower: number; upper: number; sampling: PupilSampling; spectrum: Spectrum }
+const CURVATURE_MIN = 2;
+const CURVATURE_MAX = 257;
+const FIELD_CURVATURE_ID: AnalysisKind = 'field_curvature';
+
+interface Params {
+  fieldIndex: number; wavelength: number; lower: number; upper: number; sampling: PupilSampling; spectrum: Spectrum;
+  /** Field curvature only: sweep samples and the optional endpoint (omitted means +Y at the largest field). */
+  curvatureSamples: number; fieldEnd: [number, number] | undefined;
+}
 interface Def {
   id: AnalysisKind;
   label: string;
@@ -44,7 +52,9 @@ const DEFS: Def[] = [
     run: async (p) => ({ kind: 'longitudinal_aberration', data: await callTool('longitudinal_aberration', { wavelength: p.wavelength, samples: CURVE_SAMPLES }) }) },
   { id: 'spherochromatism', label: 'Spherochromatism', help: 'Longitudinal focus of every stored wavelength, zero weights included, against normalized pupil height. Curves share one reference focus, so longitudinal chromatic focus stays visible. This is a diagnostic, not a weighted spectrum.', field: false, wavelength: false, sampling: `${CURVE_SAMPLES} pupil heights per wavelength`,
     run: async () => ({ kind: 'spherochromatism', data: await callTool('spherochromatism', { samples: CURVE_SAMPLES }) }) },
-  { id: 'astigmatism', label: 'Astigmatism', help: 'Sagittal and tangential focus for the chief ray.', field: true, wavelength: true, sampling: 'differential rays',
+  { id: 'field_curvature', label: 'Field curvature', help: 'Sagittal (solid) and tangential (dashed) focus shift against field radius for every stored wavelength, zero weights and duplicates included. The focus is global z relative to the stored image vertex, with no refocusing per wavelength. Computed from the real chief ray with an analytic infinitesimal bundle; the chief ray is clipped by physical apertures, off-chief rays are not.', field: false, wavelength: false, sampling: 'analytic bundle along a radial sweep',
+    run: async (p) => ({ kind: 'field_curvature', data: await callTool('field_curvature', p.fieldEnd ? { samples: p.curvatureSamples, field_end: p.fieldEnd } : { samples: p.curvatureSamples }) }) },
+  { id: 'astigmatism', label: 'Astigmatism', help: 'Sagittal and tangential focus for the chief ray, from an analytic infinitesimal bundle that differentiates the real intersections, normals and refraction or reflection laws; no neighboring rays are traced.', field: true, wavelength: true, sampling: 'analytic infinitesimal bundle',
     run: async (p) => ({ kind: 'astigmatism', data: await callTool('astigmatism', { field_index: p.fieldIndex, wavelength: p.wavelength }) }) },
   { id: 'distortion', label: 'Distortion', help: 'Chief-ray image position against the paraxial chief-ray intercept at the stored image plane.', field: true, wavelength: true, sampling: 'chief ray',
     run: async (p) => ({ kind: 'distortion', data: await callTool('distortion', { field_index: p.fieldIndex, wavelength: p.wavelength }) }) },
@@ -64,6 +74,25 @@ const wavelengthIndex = ref(props.system.reference_wavelength);
 const spectralMode = ref<SpectralMode>('mono');
 /** Kept across revisions and analysis kinds; changes only on user action. */
 const energySampling = ref<PupilSampling>({ ...GEOMETRIC_SAMPLING });
+/** Field slice: 'default' omits the endpoint; 'x+', 'y-' etc. are maxima on an axis; 'f<n>' is stored field n. */
+const slice = ref('default');
+/** Applied sweep sample count (drives requests) and the raw text being edited; only Apply moves text into the count. */
+const curvatureSamples = ref(33);
+const samplesText = ref(String(curvatureSamples.value));
+const parsedSamples = computed(() => {
+  const t = samplesText.value.trim();
+  const n = t === '' ? NaN : Number(t);
+  return Number.isInteger(n) && n >= CURVATURE_MIN && n <= CURVATURE_MAX ? n : null;
+});
+const samplesValid = computed(() => parsedSamples.value !== null);
+const samplesUnapplied = computed(() => samplesValid.value && parsedSamples.value !== curvatureSamples.value);
+/** Commits a valid whole number; the existing key watcher then runs the analysis once. Invalid text sends nothing. */
+function applySamples(): void {
+  const n = parsedSamples.value;
+  if (n === null) return;
+  curvatureSamples.value = n;
+  samplesText.value = String(n);
+}
 const outcome = ref<AnalysisOutcome | null>(null);
 const error = ref('');
 const loading = ref(false);
@@ -75,7 +104,9 @@ let token = 0;
 const def = computed(() => DEFS.find((d) => d.id === kind.value)!);
 const showWavelength = computed(() => def.value.wavelength || (def.value.spectral && spectralMode.value === 'mono'));
 const samplingText = computed(() =>
-  def.value.rays ? `${describeSampling(energySampling.value)}, ${def.value.sampling}` : def.value.sampling);
+  def.value.rays ? `${describeSampling(energySampling.value)}, ${def.value.sampling}`
+  : kind.value === FIELD_CURVATURE_ID ? `${curvatureSamples.value} samples, ${sliceText(props.system)}, ${def.value.sampling}`
+  : def.value.sampling);
 
 // Keep the chosen wavelength by value when a revision reorders or edits the wavelength list.
 let selectedValue = props.system.wavelengths[wavelengthIndex.value]?.value;
@@ -86,6 +117,31 @@ watch(() => props.system, (sys) => {
   const kept = sys.wavelengths.findIndex((w) => w.value === selectedValue);
   wavelengthIndex.value = kept >= 0 ? kept : sys.reference_wavelength;
 });
+const isCurvature = computed(() => kind.value === FIELD_CURVATURE_ID);
+const maxField = (sys: OpticalSystem): number => Math.max(...sys.fields.map((f) => Math.hypot(f.x, f.y)));
+/** Endpoint for the request; undefined omits it so the backend uses +Y at the largest field. */
+function sliceEnd(sys: OpticalSystem): [number, number] | undefined {
+  const m = maxField(sys);
+  switch (slice.value) {
+    case 'x+': return [m, 0];
+    case 'x-': return [-m, 0];
+    case 'y-': return [0, -m];
+    case 'default': return undefined;
+    default: {
+      const f = sys.fields[Number(slice.value.slice(1))];
+      return f ? [f.x, f.y] : undefined;
+    }
+  }
+}
+const sliceText = (sys: OpticalSystem): string => {
+  if (slice.value.startsWith('f')) return `stored field ${fieldLabel(sys, Number(slice.value.slice(1)))}`;
+  return ({ default: '+Y maximum', 'x+': '+X maximum', 'x-': '-X maximum', 'y-': '-Y maximum' } as Record<string, string>)[slice.value] ?? '+Y maximum';
+};
+// A stored-field slice must keep addressing an existing field after the prescription changes.
+watch(() => props.system, (sys) => {
+  if (slice.value.startsWith('f') && Number(slice.value.slice(1)) >= sys.fields.length) slice.value = 'default';
+});
+const curvatureKey = computed(() => (isCurvature.value ? `${slice.value}|${curvatureSamples.value}` : ''));
 const range = computed(() => {
   const v = props.system.wavelengths.map((w) => w.value);
   return { lower: Math.min(...v), upper: Math.max(...v) };
@@ -117,6 +173,8 @@ async function run(): Promise<void> {
       lower: range.value.lower,
       upper: range.value.upper,
       sampling: { ...energySampling.value },
+      curvatureSamples: curvatureSamples.value,
+      fieldEnd: sliceEnd(sys),
       spectrum: spectralMode.value === 'poly'
         ? { kind: 'polychromatic' }
         : { kind: 'monochromatic', wavelength },
@@ -146,7 +204,7 @@ async function run(): Promise<void> {
 // Any input change drops the previous result and in-flight request immediately so a mismatched view is never shown.
 // The wavelength only matters when it is part of the request.
 watch(
-  [kind, fieldIndex, () => (showWavelength.value ? wavelengthIndex.value : -1), spectralMode, energySampling, () => props.revision, () => props.online],
+  [kind, fieldIndex, () => (showWavelength.value ? wavelengthIndex.value : -1), spectralMode, energySampling, curvatureKey, () => props.revision, () => props.online],
   () => { token++; loading.value = false; outcome.value = null; error.value = ''; void run(); },
   { immediate: true },
 );
@@ -184,10 +242,27 @@ watch(
             <option v-for="(w, i) in system.wavelengths" :key="i" :value="i">{{ i + 1 }}: {{ w.value }} nm</option>
           </select>
         </label>
+        <label v-if="isCurvature">Field slice
+          <select v-model="slice" class="wide-select">
+            <option value="default">+Y maximum</option>
+            <option value="x+">+X maximum</option>
+            <option value="y-">-Y maximum</option>
+            <option value="x-">-X maximum</option>
+            <option v-for="(_, i) in system.fields" :key="i" :value="`f${i}`">Stored field {{ fieldLabel(system, i) }}</option>
+          </select>
+        </label>
+        <form v-if="isCurvature" class="controls" @submit.prevent="applySamples">
+          <label>Field samples
+            <input type="number" min="2" max="257" step="1" required :value="samplesText" @input="samplesText = ($event.target as HTMLInputElement).value" />
+          </label>
+          <button type="submit" :disabled="!samplesValid || !samplesUnapplied">Apply samples</button>
+        </form>
         <RaySamplingControl v-if="def.rays" v-model="energySampling" />
         <span v-if="def.range">Wavelengths {{ range.lower }}–{{ range.upper }} nm (saved range)</span>
-        <button type="button" :disabled="!online || loading" @click="run()">Recompute</button>
+        <button type="button" :disabled="!online || loading || (isCurvature && (!samplesValid || samplesUnapplied))" @click="run()">Recompute</button>
       </div>
+      <p v-if="isCurvature && !samplesValid" class="note warn-text" role="status">Field samples must be a whole number from {{ CURVATURE_MIN }} to {{ CURVATURE_MAX }}. Nothing is sent until it is valid and applied.</p>
+      <p v-else-if="isCurvature && samplesUnapplied" class="note" role="status">Showing {{ curvatureSamples }} samples; press Apply samples (or Enter) to use {{ parsedSamples }}.</p>
       <p id="an-help" class="note">{{ def.help }} Sampling: {{ samplingText }}.</p>
     </div>
     <div v-if="error" role="alert" class="banner error inset">{{ error }}</div>

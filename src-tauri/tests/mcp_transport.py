@@ -60,6 +60,99 @@ def tool(name, args=None, error=False):
     return result if error else json.loads(result["content"][0]["text"])
 
 
+def field_curvature():
+    global engine
+    import copy
+    initial=tool("system_get");revision=initial["revision"]
+    result=tool("field_curvature",dict(samples=17))
+    assert result["revision"]==revision and result["field_end"]==[0,5]
+    assert len(result["curves"])==3 and all(len(c["points"])==17 for c in result["curves"])
+    assert tool("capabilities")["scope"]["continuous_field_curvature"]
+    for args in [{},dict(samples=1),dict(samples=258),dict(samples=17,field_end=[1]),dict(samples=17,wavelength=550)]:
+        tool("field_curvature",args,error=True)
+    assert tool("system_get")["revision"]==revision
+    system=copy.deepcopy(initial["system"])
+    duplicate=copy.deepcopy(system["wavelengths"][0]);duplicate.update(weight=0,color=[.8,.2,.6,.25])
+    system["wavelengths"].append(duplicate)
+    system["fields"]=[dict(system["fields"][0],x=3,y=4)]
+    revision=tool("system_set",dict(system=system,revision=revision))["revision"]
+    args=dict(samples=17,field_end=[3,4])
+    result=tool("field_curvature",args)
+    assert len(result["curves"])==4
+    assert result["curves"][3]["weight"]==0 and result["curves"][3]["color"]==duplicate["color"]
+    assert result["curves"][0]["points"]==result["curves"][3]["points"]
+    for curve in result["curves"]:
+        for i in [0,8,16]:
+            point=curve["points"][i]
+            assert point["field"]==[3*i/16,4*i/16]
+            direct=tool("astigmatism",dict(field_x=point["field"][0],field=point["field"][1],wavelength=curve["wavelength"]))
+            for branch in ["sagittal","tangential"]:
+                assert point[branch]["error"] is None
+                assert abs(point[branch]["shift"]-direct[branch+"_shift"])<1e-10
+    system["image_surface"].update(clear_aperture=True,aperture=.2)
+    revision=tool("system_set",dict(system=system,revision=revision))["revision"]
+    clipped=tool("field_curvature",args)
+    for curve in clipped["curves"]:
+        assert len(curve["points"])==17
+        assert curve["points"][0]["sagittal"]["error"] is None
+        assert any(p["sagittal"]["error"] for p in curve["points"][1:])
+        for point in curve["points"]:
+            if point["sagittal"]["error"]:
+                assert point["sagittal"]["shift"] is None
+                assert point["sagittal"]["error"]["endpoint"]=="image"
+    engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink();engine=start_engine()
+    recovered=tool("field_curvature",args)
+    assert recovered["curves"]==clipped["curves"] and recovered["revision"]!=revision
+    system["image_surface"]["clear_aperture"]=False
+    system["surfaces"]=[dict(system["surfaces"][0],radius=0,conic=0,even=[],odd=[],interaction="dummy",thickness=10)]
+    system["stop_index"]=0
+    tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
+    empty=tool("field_curvature",dict(samples=2,field_end=[0,0]))
+    assert empty["max_field"]==0
+    for curve in empty["curves"]:
+        for point in curve["points"]:
+            for branch in ["sagittal","tangential"]:
+                assert point[branch]["shift"] is None and point[branch]["error"]["kind"]=="at_infinity"
+    print("PASS: real field-curvature schemas, all spectral entries, skew sampling, shared analytic astigmatism values, retained chief failures and all-infinite/zero-field diagnostics, read-only revisions and same-relay recovery")
+
+
+def curvature_oracles():
+    import copy
+    initial=tool("system_get")["system"]
+    catalogs=[str(p) for p in (ROOT/"data/glass").iterdir() if p.suffix.lower()==".agf"]
+    maximum=0.;count=0
+    cases=[("sphere-infinite",1e10,None),("sphere-finite",200,None),("even-off-axis-infinite",1e10,"even"),("odd-off-axis-finite",200,"odd")]
+    if "--curvature-oracles-aspheres" in sys.argv: cases=cases[2:]
+    for label,distance,terms in cases:
+        system=copy.deepcopy(initial);system.update(object_distance=distance,temperature=25,pupil_mapping="reference_entrance_pupil")
+        system["pupil"]=dict(kind="entrance_pupil_diameter",value=5)
+        for surface in system["surfaces"]:surface.update(conic=0,even=[],odd=[],gap_solve=dict(kind="fixed"),clear_aperture=True,aperture=12.5)
+        if terms:
+            system["surfaces"][1]["conic"]=-.4
+            system["surfaces"][1][terms]=[1e-6,-1e-8]
+        tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
+        text=tool("project_export",dict(format="geopter"))["text"]
+        path=ROOT/"target"/("curvature-oracle-"+label+".json");path.write_text(text)
+        reference=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--curvature",str(path),*catalogs],capture_output=True,text=True,check=True,timeout=30).stdout)
+        actual=tool("field_curvature",dict(samples=17))
+        assert len(reference["curves"])==2*len(actual["curves"])
+        case_max=0.
+        for wi,curve in enumerate(actual["curves"]):
+            for bi,branch in enumerate(["sagittal","tangential"]):
+                oracle=reference["curves"][2*wi+bi]
+                assert len(oracle["shifts"])==len(oracle["fields"])==17,(label,oracle)
+                for point,expected,radius in zip(curve["points"],oracle["shifts"],oracle["fields"]):
+                    assert point[branch]["error"] is None,(label,point)
+                    assert abs(point["radius"]-radius)<1e-12
+                    error=abs(point[branch]["shift"]-expected)
+                    case_max=max(case_max,error)
+                    assert error<2e-4,(label,wi,branch,point["field"],point[branch]["shift"],expected,error)
+                    count+=1
+        maximum=max(maximum,case_max)
+        print("PASS: C++ Geopter Coddington",label,"all3wavelengths17fields2branches; max error",case_max,flush=True)
+    print("PASS: C++ field-curvature workflow",count,"matched focal shifts; maximum absolute mm error",maximum)
+
+
 def ray_inspection():
     global engine
     snapshot = tool("system_get")
@@ -858,6 +951,12 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--field-curvature" in sys.argv:
+        field_curvature()
+        raise SystemExit(0)
+    if "--curvature-oracles" in sys.argv or "--curvature-oracles-aspheres" in sys.argv:
+        curvature_oracles()
+        raise SystemExit(0)
     if "--ray-inspection" in sys.argv:
         ray_inspection()
         raise SystemExit(0)

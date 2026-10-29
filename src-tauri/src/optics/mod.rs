@@ -2,6 +2,7 @@
 // Optical algorithms translated from Geopter, Copyright (C) 2021 Hiiragi.
 pub mod analysis;
 pub mod aperture;
+pub mod focus;
 pub mod inspection;
 pub mod material;
 pub mod math;

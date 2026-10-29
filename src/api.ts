@@ -10,6 +10,7 @@ import type {
   DiffractionPsf,
   Distortion,
   EncircledEnergy,
+  FieldCurvature,
   GeometricMtf,
   ImportFormat,
   InspectLaunch,
@@ -103,6 +104,7 @@ interface ToolMap {
     result: LongitudinalAberration;
   };
   spherochromatism: { args: { samples: number }; result: Spherochromatism };
+  field_curvature: { args: { samples: number; field_end?: [number, number] }; result: FieldCurvature };
   astigmatism: { args: FieldArgs; result: Astigmatism };
   distortion: { args: FieldArgs; result: Distortion };
   wavefront: { args: FieldArgs & { grid: number }; result: Wavefront };
