@@ -15,8 +15,8 @@
         "title": "Hissabeth \u2014 Optical Workbench",
         "width": 1440,
         "height": 940,
-        "minWidth": 980,
-        "minHeight": 700
+        "minWidth": 640,
+        "minHeight": 480
       }
     ],
     "security": {

@@ -4,10 +4,12 @@ import { chromium, expect } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, rmdir } from 'node:fs/promises';
 import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { defaultPreferences } from './ui_preferences.mjs';
+let preferencesSnapshot = {preferences:{...structuredClone(defaultPreferences),locale:'en-US'},revision:0};
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const target = resolve(root, 'src-tauri/target');
 const workspace = resolve(target, 'ui-workspace');
@@ -150,17 +152,198 @@ try {
       }
       return result;
     }
+    if (command === 'get_preferences') return structuredClone(preferencesSnapshot);
+    if (command === 'set_preferences') return preferencesSnapshot = {preferences:structuredClone(args.preferences),revision:preferencesSnapshot.revision+1};
+    if (command === 'plugin:event|listen') return args.handler;
+    if (command === 'plugin:event|unlisten' || command === 'open_settings') return;
     if (command === 'detect_agents') return [];
     if (command === 'configure_agents') return [];
     throw new Error('Unexpected Tauri command: ' + command);
   });
-  await page.addInitScript(() => { globalThis.isTauri = true; window.__TAURI_INTERNALS__ = { invoke: (command, args) => window.__opticalInvoke(command, args) }; });
+  await page.addInitScript(() => { globalThis.isTauri = true; let callbackId=0; window.__TAURI_INTERNALS__ = { invoke: (command, args) => window.__opticalInvoke(command, args),transformCallback:()=>++callbackId,unregisterCallback:()=>{} }; window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}}; });
+  if(process.argv.includes('--project-exchange')) await page.addInitScript(()=>{
+    const original=File.prototype.arrayBuffer;
+    globalThis.__heldProjectFiles=[];globalThis.__holdProjectFiles=[];
+    File.prototype.arrayBuffer=function(){
+      if(!globalThis.__holdProjectFiles.includes(this.name)) return original.call(this);
+      const file=this;
+      return new Promise((resolve,reject)=>globalThis.__heldProjectFiles.push({name:file.name,release:()=>original.call(file).then(resolve,reject)}));
+    };
+  });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   if(process.argv.includes('--workspace-recovery')) {
     await expect(page.locator('.header-actions').getByRole('status')).toContainText(/Workspace recovery/);
     await expect(page.locator('.header-actions .status-dot.offline')).toHaveCount(0);
   } else await expect(page.getByText('Engine connected', { exact: true })).toBeVisible();
   if(!process.argv.includes('--workspace-recovery')) await expect(page.getByRole('img').first()).toBeVisible();
+  if (process.argv.includes('--project-current-entry-recovery')) {
+    await expect(page.locator('.header-actions').getByRole('status')).toHaveText('Engine connected · Workspace recovery');
+    await expect(page.getByRole('region',{name:'Workspace recovery',exact:true})).toBeVisible();
+    await expect(page.getByRole('button',{name:'New system',exact:true})).toHaveCount(0);
+    assert.equal(uiRequests.filter(r=>r.name==='project_new').length,0);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: latest App recovery status string, connected recovery entry and hidden ready-project actions');
+  } else
+  if (process.argv.includes('--project-current-entry')) {
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
+    const create=page.getByRole('button',{name:'New system',exact:true});
+    await create.click();await expect(page.getByRole('group',{name:'Create a blank system?',exact:true})).toBeVisible();
+    await page.getByRole('button',{name:'Cancel new system',exact:true}).click();
+    assert.equal(uiRequests.filter(r=>r.name==='project_new').length,0);
+    const before=await optical('system_get');
+    await page.getByRole('button',{name:'Export saved system',exact:true}).click();
+    await expect(page.getByRole('button',{name:'Download file',exact:true})).toBeEnabled();
+    assert.equal(lastUiResult('project_export').revision,before.revision);
+    assert.equal(JSON.parse(await page.getByRole('textbox',{name:'Project text',exact:true}).inputValue()).name,before.system.name);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: latest formatted App project props/confirmation/cancel/export entry with current saved revision');
+  } else
+  if (process.argv.includes('--project-lifecycle')) {
+    let current=await optical('system_get');
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
+    const newButton=page.getByRole('button',{name:'New system',exact:true});
+    const confirm=page.getByRole('group',{name:'Create a blank system?',exact:true});
+    const create=page.getByRole('button',{name:'Create blank system',exact:true});
+    const calls=()=>uiRequests.filter(r=>r.name==='project_new').length;
+    await newButton.click();await expect(confirm).toBeVisible();assert.equal(calls(),0);
+    await page.getByRole('button',{name:'Cancel new system',exact:true}).click();
+    await expect(confirm).toHaveCount(0);await expect(newButton).toBeFocused();assert.equal(calls(),0);
+    assert.deepEqual(await optical('system_get'),current);
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();
+    const editor=page.getByRole('textbox',{name:'Full prescription',exact:true});
+    const draft=JSON.parse(await editor.inputValue());draft.name='Unapplied project';
+    await editor.fill(JSON.stringify(draft));
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
+    await expect(newButton).toBeDisabled();
+    await page.getByRole('button',{name:'Export saved system',exact:true}).click();
+    const text=page.getByRole('textbox',{name:'Project text',exact:true});
+    await expect.poll(async()=>{try{return JSON.parse(await text.inputValue()).name;}catch{return null;}}).toBe(current.system.name);
+    const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download file',exact:true}).click();
+    let artifact=await download;assert.equal(await readFile(await artifact.path(),'utf8'),await text.inputValue());
+    assert.equal(artifact.suggestedFilename(),'BK7_singlet.hissabeth.json');
+    await page.getByRole('button',{name:'Revert',exact:true}).click();await expect(newButton).toBeEnabled();
+    await newButton.click();
+    const changed=structuredClone(current.system);changed.name='Externally changed project';
+    const updated=await optical('system_set',{system:changed,revision:current.revision});
+    await expect.poll(()=>lastUiResult('system_get')?.revision).toBe(updated.revision);
+    await expect(confirm).toHaveCount(0);assert.equal(calls(),0);current=await optical('system_get');
+    // Failed persistence leaves the saved project and exchange text intact.
+    const keptText=await text.inputValue();const bytes=await readFile(resolve(workspace,'system.json'));
+    await mkdir(resolve(workspace,'system.pending'));
+    try {
+      await newButton.click();await create.click();
+      await expect(page.locator('#ie-error')).toContainText('Creating a blank system failed');
+      await expect(newButton).toBeEnabled();assert.equal(calls(),1);
+      assert.deepEqual(await optical('system_get'),current);assert.deepEqual(await readFile(resolve(workspace,'system.json')),bytes);
+      assert.equal(await text.inputValue(),keptText);
+    } finally { await rmdir(resolve(workspace,'system.pending')); }
+    // A confirmed creation whose refresh fails cannot be repeated.
+    await newButton.click();failRefreshAfter='project_new';await create.click();
+    const pending=page.getByRole('alert').filter({hasText:/Your change was saved, but the view could not refresh/});
+    await expect(pending).toBeVisible();await expect(newButton).toBeDisabled();
+    await expect(page.locator('#ie-status')).toContainText('Created a blank system');
+    assert.equal(calls(),2);
+    const blank=await optical('system_get');assert.equal(blank.system.surfaces.length,1);assert.equal(blank.system.name,'Untitled system');
+    assert.equal(blank.revision,current.revision+1);assert.deepEqual(blank.system.custom_glasses,[]);
+    assert.equal(blank.system.surfaces[0].thickness,0);assert.equal(blank.system.object_distance,null);
+    resumeUiReads();await expect(pending).toHaveCount(0);
+    await expect(page.getByRole('heading',{name:'Untitled system',exact:true})).toBeVisible();assert.equal(calls(),2);
+    await page.getByRole('button',{name:'Export saved system',exact:true}).click();
+    await expect.poll(async()=>{try{return JSON.parse(await text.inputValue()).name;}catch{return null;}}).toBe('Untitled system');
+    // The new project remains editable through the normal prescription and row editor.
+    await page.getByRole('tab',{name:'Prescription',exact:true}).click();
+    await page.getByRole('textbox',{name:'Name',exact:true}).fill('Fresh lens design');
+    await page.getByRole('spinbutton',{name:'Surface 1 radius',exact:true}).fill('50');
+    await page.getByRole('spinbutton',{name:'Surface 1 thickness',exact:true}).fill('5');
+    await page.getByLabel('Surface 1 material',{exact:true}).fill('N-BK7_SCHOTT');
+    await page.getByRole('button',{name:'+ Surface',exact:true}).click();
+    await expect(page.getByRole('combobox',{name:'Surface 2 interaction',exact:true})).toBeVisible();
+    await page.getByRole('combobox',{name:'Surface 2 interaction',exact:true}).selectOption('refract');
+    await page.getByRole('spinbutton',{name:'Surface 2 radius',exact:true}).fill('-50');
+    await page.getByRole('spinbutton',{name:'Surface 2 thickness',exact:true}).fill('46.64');
+    await page.getByLabel('Surface 2 material',{exact:true}).fill('AIR');
+    await page.getByRole('button',{name:'Apply changes',exact:true}).click();
+    await expect(page.getByRole('button',{name:'Save system',exact:true})).toBeVisible();
+    const design=await optical('system_get');assert.equal(design.system.name,'Fresh lens design');assert.equal(design.system.surfaces.length,2);
+    assert.ok(Number.isFinite((await optical('paraxial')).efl));
+    await page.screenshot({path:resolve(target,'project-new-design.png'),fullPage:true});
+    engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
+    await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();await expect(newButton).toBeDisabled();
+    await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});await startEngine();
+    await expect(page.getByText('Engine connected',{exact:true})).toBeVisible();
+    assert.deepEqual((await optical('system_get')).system,design.system);assert.equal(calls(),2);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: explicit New confirmation/cancel, dirty-draft saved export, changed-revision cancellation, failed-write atomicity, confirmed creation without refresh/retry, editable blank-to-lens design and restart');
+  } else
+  if (process.argv.includes('--project-exchange')) {
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
+    const text=page.getByRole('textbox',{name:'Project text',exact:true});
+    const format=page.getByRole('combobox',{name:'Format',exact:true});
+    const exportButton=page.getByRole('button',{name:'Export saved system',exact:true});
+    const downloadButton=page.getByRole('button',{name:'Download file',exact:true});
+    const file=page.getByLabel('Open file',{exact:true});
+    const status=page.locator('#ie-status');
+    async function holdFile(name){await page.evaluate(name=>globalThis.__holdProjectFiles.push(name),name);}
+    async function held(name){await expect.poll(()=>page.evaluate(name=>globalThis.__heldProjectFiles.some(x=>x.name===name),name)).toBe(true);}
+    async function releaseFile(name){await page.evaluate(name=>{const i=globalThis.__heldProjectFiles.findIndex(x=>x.name===name);globalThis.__heldProjectFiles.splice(i,1)[0].release();},name);await page.evaluate(()=>new Promise(requestAnimationFrame));}
+    async function pick(name,body){await file.setInputFiles({name,mimeType:'application/json',buffer:Buffer.isBuffer(body)?body:Buffer.from(body)});}
+    await text.fill('Original editable text');
+    analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    await text.fill('Newer typed text');resumeAnalysis();await expect(exportButton).toBeEnabled();
+    await expect(text).toHaveValue('Newer typed text');
+    analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    await format.selectOption('geopter');await format.selectOption('hissabeth');resumeAnalysis();
+    await expect(exportButton).toBeEnabled();await expect(text).toHaveValue('Newer typed text');await expect(downloadButton).toBeDisabled();
+    // Engine-ahead data must not be stamped with the old name before polling catches up.
+    holdUiReads=true;await expect.poll(()=>dispatchingUiReads).toBe(0);
+    analysisGate={stage:'before',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    let saved=await optical('system_get');saved.system.name='Current saved export';
+    await optical('system_set',{system:saved.system,revision:saved.revision});resumeAnalysis();
+    await expect(status).toContainText('export was discarded');await expect(text).toHaveValue('Newer typed text');
+    resumeUiReads();await expect(page.getByRole('heading',{name:'Current saved export',exact:true})).toBeVisible();
+    await exportButton.click();await expect.poll(async()=>{try{return JSON.parse(await text.inputValue()).name;}catch{return null;}}).toBe('Current saved export');
+    let pendingDownload=page.waitForEvent('download');await downloadButton.click();let artifact=await pendingDownload;
+    assert.equal(artifact.suggestedFilename(),'Current_saved_export.hissabeth.json');
+    assert.equal(await readFile(await artifact.path(),'utf8'),await text.inputValue());
+    await holdFile('older.json');await pick('older.json','older file');await held('older.json');
+    await pick('newer.json','newer file');await expect(text).toHaveValue('newer file');await releaseFile('older.json');await expect(text).toHaveValue('newer file');
+    await holdFile('typing.json');await pick('typing.json','obsolete file');await held('typing.json');
+    await text.fill('Typed during read');await releaseFile('typing.json');await expect(text).toHaveValue('Typed during read');await expect(status).not.toContainText('Reading');
+    await holdFile('format.json');await pick('format.json','obsolete format');await held('format.json');
+    await format.selectOption('geopter');await releaseFile('format.json');await expect(text).toHaveValue('Typed during read');await expect(downloadButton).toBeDisabled();
+    await format.selectOption('hissabeth');
+    await holdFile('before-export.json');await pick('before-export.json','earlier read');await held('before-export.json');
+    await exportButton.click();await expect.poll(async()=>{try{return JSON.parse(await text.inputValue()).name;}catch{return null;}}).toBe('Current saved export');
+    const exported=await text.inputValue();await releaseFile('before-export.json');await expect(text).toHaveValue(exported);
+    analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    await pick('external project.json','file selected after export');await expect(text).toHaveValue('file selected after export');
+    resumeAnalysis();await expect(text).toHaveValue('file selected after export');
+    pendingDownload=page.waitForEvent('download');await downloadButton.click();artifact=await pendingDownload;
+    assert.equal(artifact.suggestedFilename(),'external_project.hissabeth.json');
+    assert.equal(await readFile(await artifact.path(),'utf8'),'file selected after export');
+    const bom=Buffer.from('\ufeff{\r\n "name": "BOM project"\r\n}\n');
+    await pick('utf8-bom.json',bom);await expect(text).toHaveValue(bom.toString('utf8').replace(/\r\n/g,'\n'));
+    pendingDownload=page.waitForEvent('download');await downloadButton.click();artifact=await pendingDownload;
+    assert.deepEqual(await readFile(await artifact.path()),bom);
+    await pick('invalid-utf8.json',Buffer.from([0xc3,0x28]));await expect(page.locator('#ie-error')).toContainText('not valid UTF-8');
+    await expect(text).toHaveValue(bom.toString('utf8').replace(/\r\n/g,'\n'));await expect(downloadButton).toBeEnabled();
+    // Import supersedes a pending export without replacing its retained source text.
+    saved=await optical('system_get');const imported=structuredClone(saved.system);imported.name='Imported current source';
+    const importText=JSON.stringify(imported);await text.fill(importText);
+    analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    await page.getByRole('button',{name:'Import (replaces saved system)',exact:true}).click();
+    await expect(page.getByRole('heading',{name:imported.name,exact:true})).toBeVisible();resumeAnalysis();await expect(text).toHaveValue(importText);
+    await page.screenshot({path:resolve(target,'project-exchange.png'),fullPage:true});
+    analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();resumeAnalysis();
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();await expect(text).toHaveValue('');await expect(downloadButton).toBeDisabled();
+    await holdFile('unmounted.json');await pick('unmounted.json','unmounted source');await held('unmounted.json');
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();await releaseFile('unmounted.json');await expect(text).toHaveValue('');
+    assert.deepEqual(errors,[]);
+    console.log('PASS: export typing/format/engine-ahead/unmount guards, file-read overlap/typing/format/export/import cancellation, exact UTF-8/BOM download, invalid UTF-8 retention and artifact-based file naming');
+  } else
   if (process.argv.includes('--surface-edit-actions')) {
     const initial=await optical('system_get');
     const rows=page.getByRole('region',{name:'Lens prescription',exact:true}).first();
