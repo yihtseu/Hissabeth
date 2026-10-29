@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { fmt, wavelengthColor } from '../chart';
+import { fmt } from '../chart';
+import { rgbCss } from '../color';
 import { percent } from '../sampling';
+import type { RGBA } from '../types';
 
 export interface LedgerRow {
   wavelength: number;
@@ -10,6 +12,8 @@ export interface LedgerRow {
   sampled: number;
   fraction: number;
   effective: number;
+  /** Saved RGBA of the wavelength entry (RGB is drawn; alpha is metadata). */
+  color: RGBA;
   /** Diffraction components only: PSF pixel pitch and sampling cutoff. */
   pixelSize?: number;
   cutoff?: number;
@@ -32,7 +36,7 @@ const totalEffective = computed(() => props.rows.reduce((a, r) => a + r.effectiv
     </thead>
     <tbody>
       <tr v-for="(r, i) in rows" :key="i">
-        <td><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" :fill="wavelengthColor(r.wavelength)" /></svg> {{ r.wavelength }}</td>
+        <td><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" :fill="rgbCss(r.color)" /></svg> {{ r.wavelength }}</td>
         <td>{{ fmt(r.weight, 4) }}</td>
         <td>{{ r.transmitted }} / {{ r.sampled }}</td>
         <td>{{ percent(r.fraction) }}</td>

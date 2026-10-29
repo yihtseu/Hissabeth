@@ -95,7 +95,8 @@ impl System {
             entrance_opl,
             launch_direction: v,
         };
-        let (mut p, mut v, mut vertex, mut n) = (p, v, 0., 1.);
+        let n0 = self.object_index(w).map_err(TraceFailure::launch)?;
+        let (mut p, mut v, mut vertex, mut n) = (p, v, 0., n0);
         for (i, s) in self.surfaces.iter().enumerate().take(last + 1) {
             if v[2].abs() < 1e-14 {
                 return Err(TraceFailure::path(
@@ -283,7 +284,7 @@ impl System {
         let effective = [pupil[0] * radius, pupil[1] * radius];
         // Signed stop magnification preserves an inverted pupil orientation.
         let target = [effective[0] * ep.a, effective[1] * ep.a];
-        let shift = ep.b / ep.a;
+        let shift = self.entrance_pupil_distance(w)?;
         let mut first = if let Some(d) = self.object_distance {
             let obj = self.object_point(field, w)?;
             let den = d + shift;
@@ -372,7 +373,7 @@ impl System {
             if ep.a.abs() < 1e-14 {
                 return Err("Entrance pupil lies at infinity".into());
             }
-            let den = distance + ep.b / ep.a;
+            let den = distance + self.entrance_pupil_distance(reference)?;
             if den.abs() < 1e-12 {
                 return Err("Object lies at entrance pupil".into());
             }

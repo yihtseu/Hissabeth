@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
-import { wavelengthColor } from '../chart';
+import type { RGBA } from '../types';
 
 const props = defineProps<{
   points: [number, number][];
   centroid: [number, number];
-  /** Per-point wavelength (nm) for coloring; when absent every point uses `color`. */
-  wavelengths?: number[];
+  /** Saved RGBA per point, aligned with `points`; when absent every point uses `color`. */
+  colors?: RGBA[];
   color?: string;
   opacity: number;
   label: string;
@@ -20,12 +20,6 @@ const TAU = Math.PI * 2;
 
 const canvas = ref<HTMLCanvasElement | null>(null);
 const cssWidth = ref(W);
-const colorCache = new Map<number, string>();
-const colorOf = (nm: number): string => {
-  let c = colorCache.get(nm);
-  if (c === undefined) { c = wavelengthColor(nm); colorCache.set(nm, c); }
-  return c;
-};
 
 let frame = 0;
 let observer: ResizeObserver | undefined;
@@ -50,7 +44,10 @@ function draw(): void {
 
   // Raw arrays: reactive proxies would make every element access of a very large reply slow.
   const pts = toRaw(props.points);
-  const wl = props.wavelengths ? toRaw(props.wavelengths) : undefined;
+  const cols = props.colors ? toRaw(props.colors) : undefined;
+  // Fill styles keyed by packed RGB, rebuilt per draw so nothing outlives the frame.
+  const styles = new Map<number, string>();
+  let currentKey = -1;
   const [mx, my] = props.centroid;
   let maxR = 0.001; // streaming maximum: spreading hundreds of thousands of values exceeds argument limits
   for (let i = 0; i < pts.length; i++) {
@@ -63,8 +60,20 @@ function draw(): void {
   ctx.globalAlpha = props.opacity;
   let current = '';
   for (let i = 0; i < pts.length; i++) {
-    const fill = wl ? colorOf(wl[i]!) : (props.color ?? '#327c9f');
-    if (fill !== current) { ctx.fillStyle = fill; current = fill; }
+    if (cols) {
+      const c = cols[i]!;
+      const r = Math.round(c[0] * 255), g = Math.round(c[1] * 255), b = Math.round(c[2] * 255);
+      const key = (r << 16) | (g << 8) | b;
+      if (key !== currentKey) {
+        let fill = styles.get(key);
+        if (fill === undefined) { fill = `rgb(${r},${g},${b})`; styles.set(key, fill); }
+        ctx.fillStyle = fill;
+        currentKey = key;
+      }
+    } else if (current === '') {
+      ctx.fillStyle = props.color ?? '#327c9f';
+      current = 'set';
+    }
     const p = pts[i]!;
     const x = CX + (p[0] - mx) * k, y = CY - (p[1] - my) * k;
     if (round) { ctx.beginPath(); ctx.arc(x, y, RADIUS, 0, TAU); ctx.fill(); }
@@ -95,7 +104,7 @@ onBeforeUnmount(() => {
   observer?.disconnect();
 });
 watch(
-  [() => props.points, () => props.centroid, () => props.wavelengths, () => props.color, () => props.opacity, cssWidth],
+  [() => props.points, () => props.centroid, () => props.colors, () => props.color, () => props.opacity, cssWidth],
   schedule,
 );
 </script>

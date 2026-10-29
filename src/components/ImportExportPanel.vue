@@ -22,11 +22,29 @@ const status = ref('');
 const error = ref('');
 const working = ref(false);
 
+/** Stored conditions the Geopter format cannot hold; the engine still reports anything else it cannot represent. */
+const geopterBlock = computed(() => {
+  const sys = props.system;
+  if (sys.pupil_mapping === 'real_stop')
+    return 'Geopter always uses the reference entrance pupil mapping. Apply “Reference entrance pupil” as the pupil ray mapping, or export the Hissabeth project format.';
+  if (sys.object_distance === null) return 'Geopter needs a finite object distance. Use the Hissabeth project format for an object at infinity.';
+  if (sys.custom_glasses.length > 0) return 'Geopter cannot store custom glass catalogs. Use the Hissabeth project format.';
+  const builtIn = (where: string): string => `${where} is FUSED_SILICA, a built-in material that cannot be stored in a Geopter project. Use the Hissabeth project format.`;
+  if (sys.object_material === 'FUSED_SILICA') return builtIn('Object material');
+  const silica = sys.surfaces.findIndex((x) => x.material === 'FUSED_SILICA');
+  if (silica >= 0) return builtIn(`Surface ${silica + 1} material`);
+  if (sys.temperature !== 25 || sys.pressure !== 101325) return 'Geopter needs the standard environment: set temperature to 25 °C and pressure to 101325 Pa, or use the Hissabeth project format.';
+  const nonRefract = sys.surfaces.findIndex((x) => x.interaction !== 'refract');
+  if (nonRefract >= 0) return `Geopter supports refracting surfaces only: set surface ${nonRefract + 1} to refract, or use the Hissabeth project format.`;
+  const mixed = sys.surfaces.findIndex((x) => x.even.length > 0 && x.odd.length > 0);
+  if (mixed >= 0) return `Geopter cannot store both even and odd asphere coefficients on one surface: clear one list on surface ${mixed + 1}, or use the Hissabeth project format.`;
+  if (sys.surfaces.some((x) => x.gap_solve.kind !== 'fixed')) return 'Geopter does not store gap solves. Use the Hissabeth project format.';
+  return '';
+});
 const exportBlock = computed(() =>
   !props.online ? 'Engine offline.'
-  : format.value === 'geopter' && props.system.pupil_mapping === 'real_stop'
-    ? 'Geopter always uses the reference entrance pupil mapping. Apply “Reference entrance pupil” as the pupil ray mapping, or export the Hissabeth project format.'
-    : '',
+  : format.value === 'geopter' ? geopterBlock.value
+  : '',
 );
 const importBlock = computed(() =>
   !props.online ? 'Engine offline.'
@@ -114,7 +132,7 @@ async function doImport(): Promise<void> {
         <button type="button" :disabled="!text" @click="download">Download file</button>
         <button type="button" class="primary" :disabled="!!importBlock || busy" @click="doImport">Import (replaces saved system)</button>
       </div>
-      <p v-if="format === 'geopter'" class="note">Geopter files do not store gap solves. Exporting a system with active solves fails; use the Hissabeth project format to keep them. Geopter also requires the Reference entrance pupil ray mapping; Real stop aiming cannot be exported to it.</p>
+      <p v-if="format === 'geopter'" class="note">Geopter files keep the object medium, endpoint labels and field and wavelength colors, but need a finite object distance, the Reference entrance pupil ray mapping and the standard environment, and cannot store gap solves or custom catalogs. Use the Hissabeth project format to keep those.</p>
       <p v-if="format === 'geopter' && online && exportBlock" class="note">{{ exportBlock }}</p>
       <p v-if="importBlock" class="note">{{ importBlock }}</p>
       <p id="ie-status" role="status" class="note">{{ status }}</p>

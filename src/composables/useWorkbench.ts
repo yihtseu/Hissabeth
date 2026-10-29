@@ -13,6 +13,7 @@ import type {
   SystemSnapshot,
 } from '../types';
 import { GEOMETRIC_SAMPLING, SPOT_SAMPLING, type SpectralMode } from '../sampling';
+import { FALLBACK_COLOR } from '../color';
 import { checkRevision, savedSystemChanged } from '../provenance';
 import { clone, fieldLabel, validateSystem } from '../validation';
 
@@ -45,7 +46,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
   const mtfSpectralMode = ref<SpectralMode>('mono');
 
   const paraxial = ref<Paraxial | null>(null);
-  const layout = ref<Layout>({ rays: [], rejected: [], revision: -1 });
+  const layout = ref<Layout>({ rays: [], field_indices: [], rejected: [], revision: -1 });
   const spot = ref<SpotDiagram | null>(null);
   const mtf = ref<GeometricMtf | null>(null);
   /** Request provenance captured when the call started; null whenever the result is cleared. */
@@ -147,15 +148,18 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     analysisError.value = [...errorSlots.values()].join(' · ');
   }
 
+  /** Saved color of the selected wavelength entry, captured at dispatch. */
+  const selectedColor = (sys: OpticalSystem) => sys.wavelengths[wavelengthIndex.value]?.color ?? FALLBACK_COLOR;
+
   async function analyze(): Promise<void> {
     const token = ++analysisToken;
     const captured = revision.value;
     // Paraxial depends on the wavelength; the layout only on the revision, so it stays while the revision matches.
     paraxial.value = null;
-    if (layout.value.revision !== captured) layout.value = { rays: [], rejected: [], revision: -1 };
+    if (layout.value.revision !== captured) layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
     setError('core', '');
     if (!online.value || !system.value) {
-      layout.value = { rays: [], rejected: [], revision: -1 };
+      layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
       return;
     }
     const w = wavelength.value;
@@ -177,7 +181,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     paraxial.value = take(p, 'Paraxial');
     const lay = take(l, 'Layout');
     if (lay) layout.value = lay;
-    else if (l.status === 'fulfilled') layout.value = { rays: [], rejected: [], revision: -1 }; // reply from another revision
+    else if (l.status === 'fulfilled') layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 }; // reply from another revision
     setError('core', errors.join(' · '));
   }
 
@@ -189,7 +193,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     spotPending.value = false;
     setError('spot', '');
     if (!online.value || !system.value) return;
-    const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, mapping: system.value.pupil_mapping };
+    const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, color: selectedColor(system.value), mapping: system.value.pupil_mapping };
     spotPending.value = true;
     try {
       const result = await callTool('spot_diagram', {
@@ -227,7 +231,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     mtfPending.value = false;
     setError('mtf', '');
     if (!online.value || !system.value || !wantMtf.value) return;
-    const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, mapping: system.value.pupil_mapping };
+    const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, color: selectedColor(system.value), mapping: system.value.pupil_mapping };
     mtfPending.value = true;
     try {
       const result = await callTool('geometric_mtf', {

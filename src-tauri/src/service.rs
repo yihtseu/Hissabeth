@@ -37,6 +37,7 @@ pub fn field_argument(s: &System, args: &Value) -> Result<Field, String> {
             y: args["field"].as_f64().unwrap_or(0.),
             weight: 1.,
             vignetting: [0.; 4],
+            color: Field::meridional(0.).color,
         });
     }
     Ok(s.fields[0].clone())
@@ -220,13 +221,26 @@ impl Engine {
             ),
             "longitudinal_aberration" => analysis::longitudinal(&self.system, w, samples),
             "spherochromatism" => {
+                let reference_wavelength = self.system.reference();
+                let reference_focus = self.system.paraxial(reference_wavelength)?["image_distance"]
+                    .as_f64()
+                    .unwrap();
                 let curves: Vec<_> = self
                     .system
                     .wavelengths
                     .iter()
-                    .map(|wv| analysis::longitudinal(&self.system, wv.value, samples))
+                    .enumerate()
+                    .map(|(index, wv)| -> Result<Value, String> {
+                        let mut curve = analysis::longitudinal(&self.system, wv.value, samples)?;
+                        curve["color"] = json!(wv.color);
+                        curve["weight"] = json!(wv.weight);
+                        curve["wavelength_index"] = json!(index);
+                        Ok(curve)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(json!({"curves":curves}))
+                Ok(
+                    json!({"curves":curves,"reference_focus":reference_focus,"reference_wavelength":reference_wavelength,"units":"mm"}),
+                )
             }
             "astigmatism" => analysis::astigmatism(&self.system, &field, w),
             "distortion" => analysis::distortion(&self.system, &field, w),
@@ -320,7 +334,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"internal_stop_aiming":true,"centered_surfaces":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -412,12 +426,12 @@ pub fn system_schema() -> Value {
         ],
     );
     let field = object(
-        json!({"x":finite,"y":finite,"weight":nonnegative,"vignetting":array(json!({"type":"number","exclusiveMaximum":1.}),4,4)}),
-        &["x", "y", "weight", "vignetting"],
+        json!({"x":finite,"y":finite,"weight":nonnegative,"vignetting":array(json!({"type":"number","exclusiveMaximum":1.}),4,4),"color":array(num(0.,1.),4,4)}),
+        &["x", "y", "weight", "vignetting", "color"],
     );
     let wavelength = object(
-        json!({"value":num(100.,20000.),"weight":nonnegative}),
-        &["value", "weight"],
+        json!({"value":num(100.,20000.),"weight":nonnegative,"color":array(num(0.,1.),4,4)}),
+        &["value", "weight", "color"],
     );
     let glass = object(
         json!({"name":string(),"catalog":string(),"formula":integer(1,13),"coefficients":array(finite.clone(),0,20),"nd":finite,"vd":finite,"wavelength_range":{"type":["array","null"],"items":num(0.,100.),"minItems":2,"maxItems":2},"thermal":{"type":["array","null"],"items":finite,"minItems":7,"maxItems":7},"transmission":array(array(finite.clone(),3,3),0,10000),"comment":string()}),
@@ -435,7 +449,7 @@ pub fn system_schema() -> Value {
         ],
     );
     object(
-        json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
+        json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"object_material":string(),"object_label":string(),"image_label":string(),"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
         &[
             "name",
             "note",
@@ -447,6 +461,9 @@ pub fn system_schema() -> Value {
             "pupil",
             "pupil_mapping",
             "object_distance",
+            "object_material",
+            "object_label",
+            "image_label",
             "stop_index",
             "temperature",
             "pressure",
@@ -828,7 +845,7 @@ pub fn rpc(request: Value, engine: &mut Engine) -> Option<Value> {
             );
             Ok(match r {
                 Ok(v) => {
-                    json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":if v.is_object(){v}else{json!({"result":v})},"isError":false})
+                    json!({"content":[{"type":"text","text":v.to_string()}],"isError":false})
                 }
                 Err(e) => json!({"content":[{"type":"text","text":e}],"isError":true}),
             })
@@ -945,7 +962,7 @@ pub fn relay() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
             let mut result = String::new();
-            BufReader::new(stream.take(64_000_000))
+            BufReader::new(stream)
                 .read_line(&mut result)
                 .map_err(|e| e.to_string())?;
             serde_json::from_str(&result).map_err(|e| e.to_string())
@@ -968,6 +985,103 @@ mod tests {
             .join(format!("{label}-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Engine::open(path).unwrap()
+    }
+    #[test]
+    fn mcp_tool_payload_is_one_json_text_document() {
+        let mut e = engine("mcp-json-payload");
+        for (index, name) in ["system_get", "materials_list"].iter().enumerate() {
+            let response = rpc(json!({"jsonrpc":"2.0","id":index,"method":"tools/call","params":{"name":name,"arguments":{}}}), &mut e).unwrap();
+            let result = &response["result"];
+            assert_eq!(result.as_object().unwrap().len(), 2);
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["content"].as_array().unwrap().len(), 1);
+            assert_eq!(result["content"][0]["type"], "text");
+            let value: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            if *name == "system_get" {
+                assert_eq!(value["system"]["object_material"], "AIR");
+                assert_eq!(
+                    value["system"]["wavelengths"][0]["color"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    4
+                );
+            } else {
+                assert!(value.as_array().unwrap().contains(&json!("AIR")));
+            }
+        }
+    }
+    #[test]
+    fn project_metadata_and_spherochromatism_persist_with_strict_atomic_edits() {
+        use crate::optics::Wavelength;
+        let mut e = engine("project-metadata");
+        let mut system = e.system.clone();
+        system.object_material = "1.500000:60.000000".into();
+        system.object_label = "Submerged emitter".into();
+        system.image_label = "Measured detector".into();
+        system.wavelengths = vec![
+            Wavelength {
+                color: [0.9, 0.1, 0.2, 0.],
+                ..Wavelength::new(656.273, 1.)
+            },
+            Wavelength {
+                color: [0.1, 0.8, 0.2, 0.25],
+                ..Wavelength::new(587.562, 1.)
+            },
+            Wavelength {
+                color: [0.1, 0.2, 0.9, 1.],
+                ..Wavelength::new(486.133, 0.)
+            },
+            Wavelength {
+                color: [0.9, 0.7, 0.1, 0.5],
+                ..Wavelength::new(587.562, 2.)
+            },
+        ];
+        system.reference_wavelength = 1;
+        let revision = e.revision;
+        e.call("system_set", json!({"system":system,"revision":revision}))
+            .unwrap();
+        let response = e.call("spherochromatism", json!({"samples":5})).unwrap();
+        let curves = response["curves"].as_array().unwrap();
+        assert_eq!(curves.len(), 4);
+        assert_eq!(response["reference_wavelength"], 587.562);
+        assert_eq!(response["revision"], e.revision);
+        for (index, curve) in curves.iter().enumerate() {
+            assert_eq!(curve["wavelength_index"], index);
+            assert_eq!(curve["color"], json!(system.wavelengths[index].color));
+            assert_eq!(curve["weight"], system.wavelengths[index].weight);
+            assert_eq!(curve["points"][0]["shift"], 0.);
+        }
+        let reference = response["reference_focus"].as_f64().unwrap();
+        assert!((curves[1]["points"][0]["focus"].as_f64().unwrap() - reference).abs() < 1e-12);
+        assert!((curves[0]["points"][0]["focus"].as_f64().unwrap() - reference).abs() > 1e-5);
+        let saved = std::fs::read(&e.path).unwrap();
+        let current = serde_json::to_value(&e.system).unwrap();
+        for mutation in 0..5 {
+            let mut broken = current.clone();
+            match mutation {
+                0 => {
+                    broken.as_object_mut().unwrap().remove("object_material");
+                }
+                1 => {
+                    broken["fields"][0].as_object_mut().unwrap().remove("color");
+                }
+                2 => broken["wavelengths"][0]["color"] = json!([0., 0., 0.]),
+                3 => broken["wavelengths"][0]["color"] = json!([0., 0., 0., 1.1]),
+                _ => broken["object_material"] = json!("UNKNOWN_OBJECT_MATERIAL"),
+            }
+            assert!(
+                e.call("system_set", json!({"system":broken,"revision":e.revision}))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&e.path).unwrap(), saved);
+            assert_eq!(serde_json::to_value(&e.system).unwrap(), current);
+        }
+        let path = e.path.clone();
+        drop(e);
+        let reopened = Engine::open(path).unwrap();
+        assert_eq!(serde_json::to_value(reopened.system).unwrap(), current);
     }
     #[test]
     fn discovery_matches_dispatch() {

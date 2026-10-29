@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { fmt, niceTicks, type ChartSeries } from '../chart';
+import { rgbCss } from '../color';
 import { describeSampling, describeSpectrum, percent } from '../sampling';
-import type { AnalysisOutcome } from '../types';
+import type { AnalysisOutcome, RGBA } from '../types';
 import HeatMap from './HeatMap.vue';
 import LineChart from './LineChart.vue';
 import SpectralLedger, { type LedgerRow } from './SpectralLedger.vue';
 
-const props = defineProps<{ outcome: AnalysisOutcome; /** Field the result was computed for, e.g. "2: (0, 5)°". */ fieldText?: string }>();
+const props = defineProps<{ outcome: AnalysisOutcome; /** Field the result was computed for, e.g. "2: (0, 5)°". */ fieldText?: string; /** Saved color of the selected wavelength entry captured at dispatch. */ color?: RGBA }>();
 
 const BLUE = '#286c8d', ORANGE = '#c76a3d';
 const o = computed(() => props.outcome);
@@ -66,6 +67,24 @@ const longitudinal = computed(() => {
   };
 });
 
+// ---- spherochromatism ----------------------------------------------------------------
+const sphero = computed(() => {
+  const r = o.value;
+  if (r.kind !== 'spherochromatism') return null;
+  const ref = r.data.reference_focus;
+  const label = (c: (typeof r.data.curves)[number]): string =>
+    `${c.wavelength_index + 1}: ${c.wavelength} nm${c.weight === 0 ? ' (weight 0)' : ''}`;
+  const series: ChartSeries[] = r.data.curves.map((c) => ({
+    label: label(c),
+    color: rgbCss(c.color),
+    dashed: c.weight === 0,
+    // Offset from the common reference focus, not the curve's own shift, so longitudinal color stays visible.
+    points: c.points.map((p) => ({ x: p.pupil, y: p.focus === null ? null : p.focus - ref })),
+  }));
+  const invalid = [...new Set(r.data.curves.flatMap((c) => c.points.filter((p) => p.focus === null || p.error !== null).map((p) => p.pupil)))];
+  return { series, invalid, label };
+});
+
 // ---- astigmatism ------------------------------------------------------------
 const astig = computed(() => {
   const r = o.value;
@@ -118,6 +137,7 @@ const diffRows = computed<LedgerRow[]>(() => {
     sampled: c.pupil_samples,
     fraction: c.transmitted_fraction,
     effective: c.effective_weight,
+    color: r.data.spectrum.kind === 'monochromatic' && props.color ? props.color : c.color,
     pixelSize: c.pixel_size,
     cutoff: c.sampling_cutoff,
   }));
@@ -137,6 +157,9 @@ const problems = computed<Problem[]>(() => {
   if (r.kind === 'opd_fan')
     return (['tangential', 'sagittal'] as const).flatMap((axis) =>
       r.data[axis].filter((p) => p.error).map((p) => ({ where: axis, at: `${axis === 'tangential' ? 'p_T' : 'p_S'} ${fmt(p.pupil)}`, error: p.error! })));
+  if (r.kind === 'spherochromatism' && sphero.value)
+    return r.data.curves.flatMap((c) =>
+      c.points.filter((p) => p.error).map((p) => ({ where: sphero.value!.label(c), at: fmt(p.pupil), error: p.error! })));
   if (r.kind === 'chromatic_focus')
     return r.data.points.filter((p) => p.error).map((p) => ({ where: 'wavelength', at: `${fmt(p.wavelength)} nm`, error: p.error! }));
   if (r.kind === 'longitudinal_aberration')
@@ -182,6 +205,26 @@ const raw = computed(() =>
     <template v-else-if="longitudinal && o.kind === 'longitudinal_aberration'">
       <LineChart title="Longitudinal spherical aberration" :series="longitudinal.series" x-label="Normalized pupil height" y-label="Axial focus shift (mm)" include-zero :invalid-x="longitudinal.invalid" />
       <dl class="kv"><div><dt>Paraxial focus</dt><dd>{{ fmt(o.data.paraxial_focus, 6) }} mm</dd></div><div><dt>Wavelength</dt><dd>{{ o.data.wavelength }} nm</dd></div></dl>
+    </template>
+
+    <!-- spherochromatism -->
+    <template v-else-if="sphero && o.kind === 'spherochromatism'">
+      <LineChart title="Spherochromatism" :series="sphero.series" x-label="Normalized pupil height" y-label="Focus offset from reference focus (mm)" include-zero :invalid-x="sphero.invalid" />
+      <dl class="kv">
+        <div><dt>Reference wavelength</dt><dd>{{ o.data.reference_wavelength }} nm</dd></div>
+        <div><dt>Reference focus</dt><dd>{{ fmt(o.data.reference_focus, 6) }} mm</dd></div>
+      </dl>
+      <table class="wide-table ledger">
+        <caption>Stored wavelengths (all entries, zero weights included)</caption>
+        <thead><tr><th scope="col">#</th><th scope="col">λ (nm)</th><th scope="col">Weight</th><th scope="col">Paraxial focus − reference (mm)</th></tr></thead>
+        <tbody>
+          <tr v-for="c in o.data.curves" :key="c.wavelength_index">
+            <td><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" :fill="rgbCss(c.color)" /></svg> {{ c.wavelength_index + 1 }}</td>
+            <td>{{ c.wavelength }}</td><td>{{ fmt(c.weight, 4) }}</td><td>{{ fmt(c.paraxial_focus - o.data.reference_focus, 4) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">Each curve is its marginal-ray focus minus the single reference focus, so chromatic focus differences between wavelengths are preserved. Every stored wavelength is shown; this is a diagnostic, not a weighted spectrum.</p>
     </template>
 
     <!-- astigmatism -->

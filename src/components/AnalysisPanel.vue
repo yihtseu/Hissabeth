@@ -3,7 +3,8 @@ import { computed, ref, watch } from 'vue';
 import { callTool, errorMessage } from '../api';
 import { checkRevision, savedSystemChanged } from '../provenance';
 import { describeSampling, GEOMETRIC_SAMPLING, type SpectralMode } from '../sampling';
-import type { AnalysisKind, AnalysisOutcome, OpticalSystem, PupilSampling, Spectrum } from '../types';
+import { FALLBACK_COLOR } from '../color';
+import type { AnalysisKind, AnalysisOutcome, OpticalSystem, PupilSampling, RGBA, Spectrum } from '../types';
 import { fieldLabel } from '../validation';
 import AnalysisResult from './AnalysisResult.vue';
 import RaySamplingControl from './RaySamplingControl.vue';
@@ -41,6 +42,8 @@ const DEFS: Def[] = [
     run: async (p) => ({ kind: 'chromatic_focus', data: await callTool('chromatic_focus', { lower: p.lower, upper: p.upper, samples: CURVE_SAMPLES }) }) },
   { id: 'longitudinal_aberration', label: 'Longitudinal aberration', help: 'On-axis focus shift versus pupil height.', field: false, wavelength: true, sampling: `${CURVE_SAMPLES} pupil heights`,
     run: async (p) => ({ kind: 'longitudinal_aberration', data: await callTool('longitudinal_aberration', { wavelength: p.wavelength, samples: CURVE_SAMPLES }) }) },
+  { id: 'spherochromatism', label: 'Spherochromatism', help: 'Longitudinal focus of every stored wavelength, zero weights included, against normalized pupil height. Curves share one reference focus, so longitudinal chromatic focus stays visible. This is a diagnostic, not a weighted spectrum.', field: false, wavelength: false, sampling: `${CURVE_SAMPLES} pupil heights per wavelength`,
+    run: async () => ({ kind: 'spherochromatism', data: await callTool('spherochromatism', { samples: CURVE_SAMPLES }) }) },
   { id: 'astigmatism', label: 'Astigmatism', help: 'Sagittal and tangential focus for the chief ray.', field: true, wavelength: true, sampling: 'differential rays',
     run: async (p) => ({ kind: 'astigmatism', data: await callTool('astigmatism', { field_index: p.fieldIndex, wavelength: p.wavelength }) }) },
   { id: 'distortion', label: 'Distortion', help: 'Chief-ray image position against the paraxial chief-ray intercept at the stored image plane.', field: true, wavelength: true, sampling: 'chief ray',
@@ -66,6 +69,7 @@ const error = ref('');
 const loading = ref(false);
 const ranField = ref('');
 const ranRevision = ref(props.revision);
+const ranColor = ref<RGBA>(FALLBACK_COLOR);
 let token = 0;
 
 const def = computed(() => DEFS.find((d) => d.id === kind.value)!);
@@ -77,6 +81,8 @@ const samplingText = computed(() =>
 let selectedValue = props.system.wavelengths[wavelengthIndex.value]?.value;
 watch(wavelengthIndex, (i) => { selectedValue = props.system.wavelengths[i]?.value; });
 watch(() => props.system, (sys) => {
+  // Keep the current entry when it still holds the selected value, so duplicate values keep their own index and color.
+  if (sys.wavelengths[wavelengthIndex.value]?.value === selectedValue) return;
   const kept = sys.wavelengths.findIndex((w) => w.value === selectedValue);
   wavelengthIndex.value = kept >= 0 ? kept : sys.reference_wavelength;
 });
@@ -102,6 +108,7 @@ async function run(): Promise<void> {
   const field = fieldIndex.value;
   const fieldText = fieldLabel(sys, field);
   const wavelength = sys.wavelengths[wavelengthIndex.value]!.value;
+  const color = sys.wavelengths[wavelengthIndex.value]!.color;
   loading.value = true;
   try {
     const result = await d.run({
@@ -125,6 +132,7 @@ async function run(): Promise<void> {
     outcome.value = result;
     ranRevision.value = revisionAtRequest;
     ranField.value = fieldText;
+    ranColor.value = color;
     error.value = '';
   } catch (e) {
     if (mine !== token) return;
@@ -186,7 +194,7 @@ watch(
     <p v-if="loading && !outcome" class="empty" role="status">Computing…</p>
     <p v-else-if="!outcome && !error" class="empty">{{ online ? 'No result yet.' : 'Engine offline.' }}</p>
     <div v-if="outcome" class="analysis-body" :aria-busy="loading">
-      <AnalysisResult :outcome="outcome" :field-text="def.field ? ranField : undefined" />
+      <AnalysisResult :outcome="outcome" :field-text="def.field ? ranField : undefined" :color="ranColor" />
     </div>
   </section>
 </template>

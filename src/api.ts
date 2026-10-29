@@ -26,6 +26,7 @@ import type {
   SolveRecalculateResult,
   SolveResult,
   Spectrum,
+  Spherochromatism,
   SpotDiagram,
   SystemSnapshot,
   VignettingUpdateResult,
@@ -96,6 +97,7 @@ interface ToolMap {
     args: WavelengthArgs & { samples: number };
     result: LongitudinalAberration;
   };
+  spherochromatism: { args: { samples: number }; result: Spherochromatism };
   astigmatism: { args: FieldArgs; result: Astigmatism };
   distortion: { args: FieldArgs; result: Distortion };
   wavefront: { args: FieldArgs & { grid: number }; result: Wavefront };

@@ -145,10 +145,9 @@ fn marginal_thickness(s: &System, gap: usize, target: f64, zone: f64) -> Result<
     let w = s.reference();
     let radius = s.pupil_radius(w)?;
     if zone.abs() < f64::EPSILON {
-        let ep = s.pupil_matrix(w)?;
         let (height, reduced_slope) = if let Some(distance) = s.object_distance {
-            let slope = radius / (distance + ep.b / ep.a);
-            (distance * slope, slope)
+            let slope = radius / (distance + s.entrance_pupil_distance(w)?);
+            (distance * slope, s.object_index(w)? * slope)
         } else {
             (radius, 0.)
         };

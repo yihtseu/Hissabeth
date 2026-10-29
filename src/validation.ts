@@ -1,3 +1,4 @@
+import { paletteColor } from './color';
 import type {
   Field,
   FieldType,
@@ -9,6 +10,7 @@ import type {
   PupilMapping,
   Surface,
   Vignetting,
+  RGBA,
   Wavelength,
 } from './types';
 
@@ -46,8 +48,10 @@ export function newSurface(): Surface {
     interaction: 'refract',
   };
 }
-export const newField = (): Field => ({ x: 0, y: 0, weight: 1, vignetting: [0, 0, 0, 0] });
-export const newWavelength = (): Wavelength => ({ value: 587.5618, weight: 1 });
+export const newField = (n = 0): Field => ({ x: 0, y: 0, weight: 1, vignetting: [0, 0, 0, 0], color: paletteColor(n) });
+export const newWavelength = (n = 0): Wavelength => ({ value: 587.5618, weight: 1, color: paletteColor(n) });
+
+const isRgba = (v: unknown): v is RGBA => isTuple(v, 4) && v.every((c) => c >= 0 && c <= 1);
 
 /** Custom glasses are addressed as NAME_CATALOG, matching the backend's Glass::key. */
 export const glassKey = (g: Glass): string => `${g.name}_${g.catalog}`;
@@ -60,15 +64,15 @@ function exactKeys(o: Record<string, unknown>, keys: readonly string[], where: s
 }
 
 const SURFACE_KEYS = ['label', 'radius', 'thickness', 'gap_solve', 'material', 'aperture', 'clear_aperture', 'semi_diameter', 'conic', 'even', 'odd', 'interaction'];
-const FIELD_KEYS = ['x', 'y', 'weight', 'vignetting'];
-const WAVELENGTH_KEYS = ['value', 'weight'];
+const FIELD_KEYS = ['x', 'y', 'weight', 'vignetting', 'color'];
+const WAVELENGTH_KEYS = ['value', 'weight', 'color'];
 const GLASS_KEYS = [
   'name', 'catalog', 'formula', 'coefficients', 'nd', 'vd',
   'wavelength_range', 'thermal', 'transmission', 'comment',
 ];
 const SYSTEM_KEYS = [
   'name', 'note', 'surfaces', 'wavelengths', 'reference_wavelength', 'fields', 'field_type',
-  'pupil', 'pupil_mapping', 'object_distance', 'stop_index', 'temperature', 'pressure', 'custom_glasses',
+  'pupil', 'pupil_mapping', 'object_distance', 'object_material', 'object_label', 'image_label', 'stop_index', 'temperature', 'pressure', 'custom_glasses',
 ];
 
 const isIndex = (v: unknown): v is number => isNum(v) && Number.isInteger(v) && v >= 0;
@@ -165,6 +169,11 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     return `"field_type" must be one of ${FIELD_TYPES.join(', ')}`;
   if (v.object_distance !== null && !isNum(v.object_distance))
     return '"object_distance" must be a number or null';
+  if (typeof v.object_material !== 'string') return '"object_material" must be a string';
+  if (typeof v.object_label !== 'string' || v.object_label.length > 256)
+    return '"object_label" must be a string of at most 256 characters';
+  if (typeof v.image_label !== 'string' || v.image_label.length > 256)
+    return '"image_label" must be a string of at most 256 characters';
   if (!isNum(v.temperature) || !isNum(v.pressure)) return '"temperature" and "pressure" must be numbers';
   if (!isRecord(v.pupil)) return '"pupil" must be an object';
   const pupilBad = exactKeys(v.pupil, ['kind', 'value'], 'Pupil');
@@ -206,7 +215,8 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     const bad = exactKeys(w, WAVELENGTH_KEYS, `Wavelength ${i + 1}`);
     if (bad) return bad;
     if (!isNum(w.value) || !isNum(w.weight)) return `Wavelength ${i + 1}: value and weight must be numbers`;
-    wavelengths.push({ value: w.value, weight: w.weight });
+    if (!isRgba(w.color)) return `Wavelength ${i + 1}: color must be 4 numbers in 0..1 [r, g, b, a]`;
+    wavelengths.push({ value: w.value, weight: w.weight, color: w.color });
   }
   const fields: Field[] = [];
   for (const [i, f] of v.fields.entries()) {
@@ -215,7 +225,8 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     if (bad) return bad;
     if (!isNum(f.x) || !isNum(f.y) || !isNum(f.weight)) return `Field ${i + 1}: x, y and weight must be numbers`;
     if (!isTuple(f.vignetting, 4)) return `Field ${i + 1}: vignetting must be 4 numbers [upper y, lower y, upper x, lower x]`;
-    fields.push({ x: f.x, y: f.y, weight: f.weight, vignetting: f.vignetting as Vignetting });
+    if (!isRgba(f.color)) return `Field ${i + 1}: color must be 4 numbers in 0..1 [r, g, b, a]`;
+    fields.push({ x: f.x, y: f.y, weight: f.weight, vignetting: f.vignetting as Vignetting, color: f.color });
   }
   const glasses: Glass[] = [];
   for (const [i, g] of v.custom_glasses.entries()) {
@@ -234,6 +245,9 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     pupil: { kind: v.pupil.kind as PupilKind, value: v.pupil.value },
     pupil_mapping: v.pupil_mapping as PupilMapping,
     object_distance: v.object_distance,
+    object_material: v.object_material,
+    object_label: v.object_label,
+    image_label: v.image_label,
     stop_index: v.stop_index,
     temperature: v.temperature,
     pressure: v.pressure,
@@ -255,7 +269,9 @@ export function validateSystem(s: OpticalSystem): string[] {
   if (s.reference_wavelength >= s.wavelengths.length) p.push('Reference wavelength must select a listed wavelength.');
   if (s.stop_index >= s.surfaces.length) p.push('Stop must select an existing surface.');
   if (!(s.pupil.value > 0)) p.push('Pupil value must be positive.');
-  if (s.pupil.kind === 'object_na' && s.pupil.value >= 1) p.push('Object NA must be smaller than 1.');
+  if (s.object_label.length > 256) p.push('Object label is longer than 256 characters.');
+  if (s.image_label.length > 256) p.push('Image label is longer than 256 characters.');
+  if (s.object_material.trim() === '') p.push('Object material must not be empty.');
   if (s.object_distance !== null && !(s.object_distance > 0))
     p.push('Object distance must be positive (use infinity for none).');
   if (s.field_type !== 'angle' && s.object_distance === null)

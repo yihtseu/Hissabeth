@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import { FALLBACK_COLOR, rgbCss } from '../color';
 import type { Layout, OpticalSystem, Ray, Surface } from '../types';
 import { fieldLabel } from '../validation';
 
 const props = defineProps<{ system: OpticalSystem; layout: Layout; wavelength: number }>();
 
-const COLORS = ['#c76a3d', '#327c9f', '#8d70b3', '#4c9d88', '#b08a2e', '#a94f78'];
-const colorFor = (i: number): string => COLORS[i % COLORS.length] ?? COLORS[0]!;
+/** Saved field color by field number; rays use the returned field index, so duplicate fields keep their own color. */
+const fieldColor = (i: number | undefined): string => rgbCss((i === undefined ? undefined : props.system.fields[i]?.color) ?? FALLBACK_COLOR);
+const objectCaption = computed(() => `${props.system.object_label || 'Object'} in ${props.system.object_material}`);
+const imageCaption = computed(() => props.system.image_label || 'Image');
 
 const W = 900, H = 460, MX = 45, CY = H / 2, HALF = 190;
 
@@ -41,10 +44,6 @@ const exaggeration = computed(() => sy.value / sx.value);
 const px = (z: number): number => MX + (z - bounds.value.zmin) * sx.value;
 const py = (y: number): number => CY - y * sy.value;
 
-const fieldColorIndex = (ray: Ray): number => {
-  const i = props.system.fields.findIndex((f) => f.y === ray.field && f.x === ray.field_x);
-  return Math.max(0, i);
-};
 const rayPath = (ray: Ray): string => ray.points.map((p) => `${px(p[2])},${py(p[1])}`).join(' ');
 
 /** Sag matching the backend: conic base + even terms r^(4+2i) + odd terms r^(3+i). */
@@ -91,16 +90,19 @@ const style = (i: Surface['interaction']): { stroke: string; width: number; dash
       <defs><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#dfe7ed" stroke-width=".5" /></pattern></defs>
       <rect :width="W" :height="H" fill="url(#grid)" />
       <line :x1="10" :y1="CY" :x2="W - 10" :y2="CY" stroke="#a7bac7" stroke-dasharray="6 5" />
-      <polyline v-for="(r, i) in layout.rays" :key="`r${i}`" :points="rayPath(r)" fill="none" :stroke="colorFor(fieldColorIndex(r))" stroke-width="1.15" opacity=".8" />
+      <polyline v-for="(r, i) in layout.rays" :key="`r${i}`" :points="rayPath(r)" fill="none" :stroke="fieldColor(layout.field_indices[i])" stroke-width="1.15" opacity=".8" />
       <g v-for="(s, i) in surfaceShapes" :key="`s${i}`">
         <polyline :points="s.points" fill="none" :stroke="style(s.interaction).stroke" :stroke-width="style(s.interaction).width" :stroke-dasharray="style(s.interaction).dash" />
         <line v-for="(c, k) in s.clips" :key="k" :x1="c.x - 5" :y1="c.y" :x2="c.x + 5" :y2="c.y" stroke="#c0392b" stroke-width="2.4" />
         <text :x="s.x" :y="s.top" font-size="9" fill="#5d7584" text-anchor="middle">{{ i + 1 }}{{ i === system.stop_index ? ' STOP' : '' }}</text>
       </g>
+      <text x="10" y="16" font-size="11" fill="#3f5868">{{ objectCaption }}</text>
+      <text :x="px(imageZ)" :y="CY - HALF - 6" font-size="11" fill="#3f5868" text-anchor="middle">{{ imageCaption }}</text>
       <line :x1="px(imageZ)" :y1="CY - HALF" :x2="px(imageZ)" :y2="CY + HALF" stroke="#75989c" stroke-width="2" />
     </svg>
     <ul class="legend" aria-label="Layout legend">
-      <li v-for="(_f, i) in system.fields" :key="i" :style="{ color: colorFor(i) }">━ field {{ fieldLabel(system, i) }}</li>
+      <li v-for="(_f, i) in system.fields" :key="i" :style="{ color: fieldColor(i) }">━ field {{ fieldLabel(system, i) }}</li>
+      <li>Object: {{ objectCaption }} · Image: {{ imageCaption }}</li>
       <li>λ {{ wavelength }} nm</li>
       <li><span class="reflect-key">Red ticks</span>: physical clear radius (only where Clip rays is on); surface curves extend to the derived draw semi-diameter, which never clips</li>
       <li>Solid: refract · <span class="reflect-key">Thick: reflect</span> · Dashed: dummy</li>

@@ -70,16 +70,7 @@ mod spectral_tests {
         s.stop_index = 1;
         s.pupil.value = 0.00001;
         s.fields = vec![Field::meridional(5.)];
-        s.wavelengths = vec![
-            Wavelength {
-                value: 486.1327,
-                weight: 1.,
-            },
-            Wavelength {
-                value: 656.2725,
-                weight: 1.,
-            },
-        ];
+        s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 1.)];
         s.reference_wavelength = 0;
         s.update().unwrap();
         s

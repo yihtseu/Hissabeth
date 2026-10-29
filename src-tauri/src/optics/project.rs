@@ -13,6 +13,22 @@ fn array<'a>(v: &'a Value, label: &str) -> Result<&'a Vec<Value>, String> {
 fn code(v: &Value, label: &str) -> Result<u64, String> {
     v.as_u64().ok_or_else(|| format!("Invalid Geopter {label}"))
 }
+fn color(v: &Value) -> Result<[f64; 4], String> {
+    let values = array(v, "color")?;
+    if values.len() != 4 {
+        return Err("Geopter color requires four RGBA components".into());
+    }
+    let rgba = [
+        number(&values[0], "color")?,
+        number(&values[1], "color")?,
+        number(&values[2], "color")?,
+        number(&values[3], "color")?,
+    ];
+    if !valid_color(rgba) {
+        return Err("Geopter RGBA components must be in 0–1".into());
+    }
+    Ok(rgba)
+}
 pub fn import(text: &str) -> Result<System, String> {
     let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let a = root["Assembly"]
@@ -32,9 +48,6 @@ pub fn import(text: &str) -> Result<System, String> {
     if object["Type"] != "SPH" || number(&object["Curvature"], "object curvature")? != 0. {
         return Err("Curved Geopter object surface is not implemented".into());
     }
-    if object["Material"] != "AIR" {
-        return Err("Object medium must be AIR".into());
-    }
     let last = &a[&(keys.len() - 1).to_string()];
     if last["Type"] != "SPH" || number(&last["Curvature"], "image curvature")? != 0. {
         return Err("Curved image surface is not implemented".into());
@@ -51,7 +64,8 @@ pub fn import(text: &str) -> Result<System, String> {
     let xs = array(&fs["X"], "field X")?;
     let ys = array(&fs["Y"], "field Y")?;
     let weights = array(&fs["Weight"], "field weights")?;
-    if xs.len() != ys.len() || xs.len() != weights.len() {
+    let field_colors = array(&fs["Color"], "field colors")?;
+    if xs.len() != ys.len() || xs.len() != weights.len() || xs.len() != field_colors.len() {
         return Err("Unequal Geopter field arrays".into());
     }
     let mut fields = vec![];
@@ -69,20 +83,24 @@ pub fn import(text: &str) -> Result<System, String> {
             y: number(&ys[i], "field Y")?,
             weight: number(&weights[i], "field weight")?,
             vignetting: v,
+            color: color(&field_colors[i])?,
         })
     }
     let waves = array(&ws["Value"], "wavelength values")?;
     let weights = array(&ws["Weight"], "wavelength weights")?;
-    if waves.len() != weights.len() {
+    let wave_colors = array(&ws["Color"], "wavelength colors")?;
+    if waves.len() != weights.len() || waves.len() != wave_colors.len() {
         return Err("Unequal Geopter wavelength arrays".into());
     }
     let wavelengths = waves
         .iter()
         .zip(weights)
-        .map(|(w, t)| {
+        .zip(wave_colors)
+        .map(|((w, t), c)| {
             Ok(Wavelength {
                 value: number(w, "wavelength")?,
                 weight: number(t, "wavelength weight")?,
+                color: color(c)?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -108,7 +126,10 @@ pub fn import(text: &str) -> Result<System, String> {
                 .ok_or("Missing Geopter material")?,
             1.,
         );
-        surface.label = value["Label"].as_str().unwrap_or("").into();
+        surface.label = value["Label"]
+            .as_str()
+            .ok_or("Missing Geopter surface label")?
+            .into();
         match value["Type"]
             .as_str()
             .ok_or("Missing Geopter surface type")?
@@ -157,6 +178,18 @@ pub fn import(text: &str) -> Result<System, String> {
         pupil,
         pupil_mapping: PupilMapping::ReferenceEntrancePupil,
         object_distance: Some(distance),
+        object_material: object["Material"]
+            .as_str()
+            .ok_or("Missing Geopter object material")?
+            .into(),
+        object_label: object["Label"]
+            .as_str()
+            .ok_or("Missing Geopter object label")?
+            .into(),
+        image_label: last["Label"]
+            .as_str()
+            .ok_or("Missing Geopter image label")?
+            .into(),
         stop_index: stop - 1,
         temperature: 25.,
         pressure: 101325.,
@@ -181,9 +214,21 @@ pub fn export(s: &System) -> Result<Value, String> {
     if s.temperature != 25. || s.pressure != 101325. {
         return Err("Geopter projects do not store environmental conditions; set 25 C and 101325 Pa or export native JSON".into());
     }
+    if s.object_material == "FUSED_SILICA" {
+        return Err(
+            "Geopter cannot store the built-in FUSED_SILICA object material; export native JSON"
+                .into(),
+        );
+    }
     let mut assembly = Map::new();
-    assembly.insert("0".into(),json!({"Type":"SPH","Curvature":0.,"Thickness":s.object_distance.ok_or("Geopter JSON requires a finite object gap")?,"Material":"AIR","Label":"Object"}));
+    assembly.insert("0".into(),json!({"Type":"SPH","Curvature":0.,"Thickness":s.object_distance.ok_or("Geopter JSON requires a finite object gap")?,"Material":s.object_material,"Label":s.object_label}));
     for (i, surface) in s.surfaces.iter().enumerate() {
+        if surface.material == "FUSED_SILICA" {
+            return Err(format!(
+                "Geopter cannot store the built-in FUSED_SILICA material on surface {}; export native JSON",
+                i + 1
+            ));
+        }
         if surface.interaction != Interaction::Refract {
             return Err("Geopter project export requires refractive surfaces".into());
         }
@@ -208,7 +253,7 @@ pub fn export(s: &System) -> Result<Value, String> {
     }
     assembly.insert(
         (s.surfaces.len() + 1).to_string(),
-        json!({"Type":"SPH","Curvature":0.,"Thickness":0.,"Material":"AIR","Label":"Image"}),
+        json!({"Type":"SPH","Curvature":0.,"Thickness":0.,"Material":"AIR","Label":s.image_label}),
     );
     assembly.insert("Stop".into(), json!(s.stop_index + 1));
     let field = |axis: usize| {
@@ -219,12 +264,78 @@ pub fn export(s: &System) -> Result<Value, String> {
     };
     let vig = |i: usize| s.fields.iter().map(|f| f.vignetting[i]).collect::<Vec<_>>();
     Ok(
-        json!({"Title":s.name,"Note":s.note,"Assembly":assembly,"Spec":{"Pupil":{"Type":match s.pupil.kind{PupilType::EntrancePupilDiameter=>0,PupilType::FNumber=>1,PupilType::ObjectNa=>2,PupilType::ImageNa=>3},"Value":s.pupil.value},"Field":{"Type":match s.field_type{FieldType::Angle=>0,FieldType::ObjectHeight=>1,FieldType::ImageHeight=>2},"X":field(0),"Y":field(1),"Weight":s.fields.iter().map(|f|f.weight).collect::<Vec<_>>(),"VUY":vig(0),"VLY":vig(1),"VUX":vig(2),"VLX":vig(3),"Color":s.fields.iter().map(|_|[0.,0.,0.,1.]).collect::<Vec<_>>()},"Wvl":{"RefIndex":s.reference_wavelength,"Value":s.wavelengths.iter().map(|w|w.value).collect::<Vec<_>>(),"Weight":s.wavelengths.iter().map(|w|w.weight).collect::<Vec<_>>(),"Color":s.wavelengths.iter().map(|_|[0.,0.,0.,1.]).collect::<Vec<_>>()}}}),
+        json!({"Title":s.name,"Note":s.note,"Assembly":assembly,"Spec":{"Pupil":{"Type":match s.pupil.kind{PupilType::EntrancePupilDiameter=>0,PupilType::FNumber=>1,PupilType::ObjectNa=>2,PupilType::ImageNa=>3},"Value":s.pupil.value},"Field":{"Type":match s.field_type{FieldType::Angle=>0,FieldType::ObjectHeight=>1,FieldType::ImageHeight=>2},"X":field(0),"Y":field(1),"Weight":s.fields.iter().map(|f|f.weight).collect::<Vec<_>>(),"VUY":vig(0),"VLY":vig(1),"VUX":vig(2),"VLX":vig(3),"Color":s.fields.iter().map(|f|f.color).collect::<Vec<_>>()},"Wvl":{"RefIndex":s.reference_wavelength,"Value":s.wavelengths.iter().map(|w|w.value).collect::<Vec<_>>(),"Weight":s.wavelengths.iter().map(|w|w.weight).collect::<Vec<_>>(),"Color":s.wavelengths.iter().map(|w|w.color).collect::<Vec<_>>()}}}),
     )
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn geopter_export_rejects_unstored_builtin_dispersion_for_each_medium() {
+        let mut s = System::default();
+        s.object_distance = Some(300.);
+        s.temperature = 25.;
+        s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
+        for position in 0..=s.surfaces.len() {
+            let mut trial = s.clone();
+            if position == 0 {
+                trial.object_material = "FUSED_SILICA".into();
+            } else {
+                trial.surfaces[position - 1].material = "FUSED_SILICA".into();
+            }
+            trial.update().unwrap();
+            let before = serde_json::to_value(&trial).unwrap();
+            assert!(export(&trial).unwrap_err().contains("FUSED_SILICA"));
+            assert_eq!(serde_json::to_value(trial).unwrap(), before);
+        }
+    }
+    #[test]
+    fn geopter_object_medium_labels_and_rgba_round_trip_without_rewriting() {
+        let mut source: Value = serde_json::from_str(include_str!(
+            "../../../reference/upstream/example/book/sasian_triplet.json"
+        ))
+        .unwrap();
+        source["Assembly"]["0"]["Material"] = json!("1.500000:60.000000");
+        source["Assembly"]["0"]["Label"] = json!("Submerged object");
+        source["Assembly"]["7"]["Label"] = json!("Detector");
+        source["Spec"]["Field"]["Color"] = json!([
+            [0.123456789, 0.2, 0.3, 0.],
+            [0.4, 0.5, 0.6, 0.7],
+            [0.8, 0.9, 1., 0.25]
+        ]);
+        source["Spec"]["Wvl"]["Color"] = json!([
+            [0.7, 0.1, 0.2, 0.],
+            [0.2, 0.8, 0.3, 0.5],
+            [0.3, 0.4, 0.9, 1.]
+        ]);
+        let system = import(&source.to_string()).unwrap();
+        let output = export(&system).unwrap();
+        for (section, keys) in [("0", vec!["Material", "Label"]), ("7", vec!["Label"])] {
+            for key in keys {
+                assert_eq!(
+                    source["Assembly"][section][key],
+                    output["Assembly"][section][key]
+                );
+            }
+        }
+        for spec in ["Field", "Wvl"] {
+            assert_eq!(source["Spec"][spec]["Color"], output["Spec"][spec]["Color"]);
+        }
+        let restored = import(&output.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(system).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+        for invalid in [
+            json!([0., 0., 0.]),
+            json!([0., 1.1, 0., 1.]),
+            json!([0., 0., 0., -0.1]),
+        ] {
+            let mut broken = source.clone();
+            broken["Spec"]["Wvl"]["Color"][1] = invalid;
+            assert!(import(&broken.to_string()).is_err());
+        }
+    }
     #[test]
     fn upstream_triplet_import_and_trace() {
         let s = import(include_str!(
