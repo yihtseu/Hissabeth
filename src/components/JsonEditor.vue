@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import type { OpticalSystem } from '../types';
-import { parseSystem } from '../validation';
+import { canonicalJson, parseSystem } from '../validation';
 
 const props = defineProps<{ modelValue: OpticalSystem }>();
 const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
@@ -9,15 +9,16 @@ const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
 const pretty = (s: OpticalSystem): string => JSON.stringify(s, null, 2);
 const text = ref(pretty(props.modelValue));
 const parseError = ref('');
-let lastEmitted = JSON.stringify(props.modelValue);
+let lastEmitted = canonicalJson(props.modelValue);
 
 watch(
   () => props.modelValue,
   (v) => {
-    if (JSON.stringify(v) !== lastEmitted) {
+    // Property order is irrelevant: a semantically equal draft never overwrites what the user typed.
+    if (canonicalJson(v) !== lastEmitted) {
       text.value = pretty(v);
       parseError.value = '';
-      lastEmitted = JSON.stringify(v);
+      lastEmitted = canonicalJson(v);
     }
   },
 );
@@ -31,7 +32,7 @@ function onInput(e: Event): void {
       return;
     }
     parseError.value = '';
-    lastEmitted = JSON.stringify(parsed);
+    lastEmitted = canonicalJson(parsed);
     emit('update:modelValue', parsed);
   } catch (err) {
     parseError.value = err instanceof Error ? err.message : String(err);

@@ -39,6 +39,19 @@ export interface Surface {
 /** Four finite values in 0..1. Plots use RGB; alpha is stored metadata. */
 export type RGBA = [number, number, number, number];
 
+/** Profile and aperture of the object or image endpoint: same conventions as an internal surface, without gap, material or interaction. */
+export interface EndpointSurface {
+  radius: number;
+  conic: number;
+  even: number[];
+  odd: number[];
+  /** Physical circular clear radius in mm; blocks rays only when `clear_aperture` is true. */
+  aperture: number;
+  clear_aperture: boolean;
+  /** Derived, read-only drawing radius in mm (>= 0); 0 for an object at infinity. */
+  semi_diameter: number;
+}
+
 export interface Wavelength {
   value: number;
   weight: number;
@@ -91,6 +104,10 @@ export interface OpticalSystem {
   object_material: string;
   object_label: string;
   image_label: string;
+  /** Source profile with its vertex at z = -object_distance; must be planar when the object is at infinity. */
+  object_surface: EndpointSurface;
+  /** Image profile with its vertex at the sum of the internal thicknesses (signed). */
+  image_surface: EndpointSurface;
   stop_index: number;
   temperature: number;
   pressure: number;
@@ -125,8 +142,27 @@ export interface Paraxial {
   front_focal_distance: number;
 }
 
+/** Terminal hit on the image surface; no refraction, so the indices before and after are equal. */
+export interface Segment {
+  point: Point3;
+  incoming: Point3;
+  direction: Point3;
+  normal: Point3;
+  n_before: number;
+  n_after: number;
+  /** Cumulative optical path length. */
+  opl: number;
+}
+
 export interface Ray {
+  /** Internal surfaces only; points[0] is the launch point near the first surface, not the finite object. */
   points: Point3[];
+  /** Segments at the internal surfaces only; the image hit is `image_hit`. */
+  segments: Segment[];
+  /** Point on the source profile for a finite object; null at infinity. */
+  object_point: Point3 | null;
+  /** Terminal image-surface hit; null for rays that did not reach it. */
+  image_hit: Segment | null;
   field: number;
   field_x: number;
   wavelength: number;
@@ -260,7 +296,19 @@ export interface ApertureSurfaceReport {
   reached_rays: number;
 }
 
+/** Object and image records of the aperture report (they have no internal surface index). */
+export interface ApertureEndpointReport {
+  semi_diameter: number;
+  aperture: number;
+  clear_aperture: boolean;
+  reached_rays: number;
+}
+
+export type Endpoint = 'object' | 'image';
+
 export interface ApertureFailure {
+  /** Set when the failure happened at an endpoint; `surface` is then null. */
+  endpoint: Endpoint | null;
   field_index: number;
   /** Field-local pupil coordinates [p_T, p_S]. */
   pupil: [number, number];
@@ -277,6 +325,8 @@ export interface ApertureReport {
   sampling: string;
   sampled_rays: number;
   failed_rays: number;
+  object: ApertureEndpointReport;
+  image: ApertureEndpointReport;
   surfaces: ApertureSurfaceReport[];
   failures: ApertureFailure[];
 }
@@ -286,7 +336,9 @@ export type VignettingDirection = 'upper_y' | 'lower_y' | 'upper_x' | 'lower_x';
 export interface VignettingBoundary {
   direction: VignettingDirection;
   pupil_scale: number;
+  /** Null for an endpoint hit (see `limiting_endpoint`) or an unlimited boundary. */
   limiting_surface: number | null;
+  limiting_endpoint: Endpoint | null;
   status: 'aperture' | 'unlimited';
 }
 
@@ -480,6 +532,8 @@ export interface DiffractionPsf {
   model: string;
   failed_pupil_rays: number;
   units: string;
+  /** How the image surface enters the computation, as reported by the engine. */
+  image_sampling: string;
 }
 
 export interface DiffractionMtf {
@@ -500,6 +554,8 @@ export interface DiffractionMtf {
   pupil_grid: number;
   sampling_limit: number;
   max_frequency: number;
+  /** How the image surface enters the computation, as reported by the engine. */
+  image_sampling: string;
   sagittal_otf: ComplexOtf;
   tangential_otf: ComplexOtf;
 }

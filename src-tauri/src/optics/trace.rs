@@ -32,6 +32,7 @@ pub(super) struct TraceFailure {
     pub point: Option<V3>,
     pub ray: Option<Ray>,
     pub message: String,
+    pub endpoint: Option<&'static str>,
 }
 impl TraceFailure {
     fn launch(message: String) -> Self {
@@ -41,6 +42,7 @@ impl TraceFailure {
             point: None,
             ray: None,
             message,
+            endpoint: None,
         }
     }
     fn path(
@@ -56,7 +58,12 @@ impl TraceFailure {
             point,
             ray: Some(ray),
             message,
+            endpoint: None,
         }
+    }
+    fn at(mut self, endpoint: &'static str) -> Self {
+        self.endpoint = Some(endpoint);
+        self
     }
 }
 impl fmt::Display for TraceFailure {
@@ -84,7 +91,17 @@ impl System {
         check_apertures: bool,
         image: bool,
     ) -> Result<Ray, TraceFailure> {
+        let object_point = if self.object_distance.is_some() {
+            Some(
+                self.object_point(field, w)
+                    .map_err(|e| TraceFailure::launch(e).at("object"))?,
+            )
+        } else {
+            None
+        };
         let mut ray = Ray {
+            object_point,
+            image_hit: None,
             points: vec![p],
             segments: vec![],
             opl: 0.,
@@ -95,6 +112,20 @@ impl System {
             entrance_opl,
             launch_direction: v,
         };
+        if check_apertures && self.object_surface.clear_aperture {
+            if let Some(point) = object_point {
+                if point[0].hypot(point[1]) > self.object_surface.aperture + 1e-9 {
+                    return Err(TraceFailure::path(
+                        FailureKind::Blocked,
+                        None,
+                        Some(point),
+                        ray,
+                        "Ray blocked at object aperture".into(),
+                    )
+                    .at("object"));
+                }
+            }
+        }
         let n0 = self.object_index(w).map_err(TraceFailure::launch)?;
         let (mut p, mut v, mut vertex, mut n) = (p, v, 0., n0);
         for (i, s) in self.surfaces.iter().enumerate().take(last + 1) {
@@ -107,41 +138,19 @@ impl System {
                     format!("Ray parallel to surface {i}"),
                 ));
             }
-            let intersection = (|| -> Result<(V3, f64, f64), String> {
-                let mut t = (vertex - p[2]) / v[2];
-                for _ in 0..50 {
-                    let hit = add(p, scale(v, t));
-                    let r = hit[0].hypot(hit[1]);
-                    let (z, slope) = sag(s, r).map_err(|e| format!("Surface {i}: {e}"))?;
-                    let error = hit[2] - vertex - z;
-                    if error.abs() < 1e-10 {
-                        return Ok((hit, slope, t));
-                    }
-                    let grad = if r > 1e-15 {
-                        slope * (hit[0] * v[0] + hit[1] * v[1]) / r
-                    } else {
-                        0.
-                    };
-                    let den = v[2] - grad;
-                    if den.abs() < 1e-14 || error.abs() < 1e-10 {
-                        break;
-                    }
-                    t -= error / den;
-                }
-                Err(format!("Intersection failed at surface {i}"))
-            })();
-            let (hit, slope, t) = match intersection {
-                Ok(v) => v,
+            let intersection = match s.profile().intersect(p, v, vertex) {
+                Ok(hit) => hit,
                 Err(e) => {
                     return Err(TraceFailure::path(
                         FailureKind::Intersection,
                         Some(i),
                         None,
                         ray,
-                        e,
+                        format!("Surface {i}: {e}"),
                     ));
                 }
             };
+            let hit = intersection.point;
             if check_apertures && s.clear_aperture && hit[0].hypot(hit[1]) > s.aperture + 1e-9 {
                 return Err(TraceFailure::path(
                     FailureKind::Blocked,
@@ -151,25 +160,9 @@ impl System {
                     format!("Ray blocked at surface {i}"),
                 ));
             }
-            ray.opl += t * n;
+            ray.opl += intersection.distance * n;
             ray.points.push(hit);
-            let r = hit[0].hypot(hit[1]);
-            let normal = match unit(if r > 1e-15 {
-                [-slope * hit[0] / r, -slope * hit[1] / r, 1.]
-            } else {
-                [0., 0., 1.]
-            }) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(TraceFailure::path(
-                        FailureKind::Intersection,
-                        Some(i),
-                        Some(hit),
-                        ray,
-                        e,
-                    ));
-                }
-            };
+            let normal = intersection.normal;
             let incoming = v;
             let before = n;
             match s.interaction {
@@ -232,18 +225,43 @@ impl System {
             vertex += s.thickness;
         }
         if image {
-            if v[2].abs() < 1e-14 {
+            let hit = match self.image_surface.profile().intersect(p, v, vertex) {
+                Ok(hit) => hit,
+                Err(e) => {
+                    return Err(TraceFailure::path(
+                        FailureKind::Image,
+                        None,
+                        None,
+                        ray,
+                        format!("Image surface: {e}"),
+                    )
+                    .at("image"));
+                }
+            };
+            if check_apertures
+                && self.image_surface.clear_aperture
+                && hit.point[0].hypot(hit.point[1]) > self.image_surface.aperture + 1e-9
+            {
                 return Err(TraceFailure::path(
-                    FailureKind::Image,
+                    FailureKind::Blocked,
                     None,
-                    None,
+                    Some(hit.point),
                     ray,
-                    "Ray parallel to image plane".into(),
-                ));
+                    "Ray blocked at image aperture".into(),
+                )
+                .at("image"));
             }
-            let t = (vertex - p[2]) / v[2];
-            ray.opl += t * n;
-            ray.points.push(add(p, scale(v, t)));
+            ray.opl += hit.distance * n;
+            ray.points.push(hit.point);
+            ray.image_hit = Some(Segment {
+                point: hit.point,
+                incoming: v,
+                direction: v,
+                normal: hit.normal,
+                n_before: n,
+                n_after: n,
+                opl: ray.opl,
+            });
         }
         Ok(ray)
     }
@@ -285,8 +303,9 @@ impl System {
         // Signed stop magnification preserves an inverted pupil orientation.
         let target = [effective[0] * ep.a, effective[1] * ep.a];
         let shift = self.entrance_pupil_distance(w)?;
-        let mut first = if let Some(d) = self.object_distance {
+        let mut first = if self.object_distance.is_some() {
             let obj = self.object_point(field, w)?;
+            let d = -obj[2];
             let den = d + shift;
             if den.abs() < 1e-12 {
                 return Err("Object lies at entrance pupil".into());
@@ -368,7 +387,8 @@ impl System {
                 };
         }
         let reference_radius = self.pupil_radius(reference)?;
-        let scale = if let Some(distance) = self.object_distance {
+        let scale = if self.object_distance.is_some() {
+            let distance = -self.object_point(field, reference)?[2];
             let ep = self.pupil_matrix(reference)?;
             if ep.a.abs() < 1e-14 {
                 return Err("Entrance pupil lies at infinity".into());
@@ -399,6 +419,10 @@ impl System {
             return Err(TraceFailure::launch(
                 "Surface index outside prescription".into(),
             ));
+        }
+        if self.object_distance.is_some() {
+            self.object_point(field, w)
+                .map_err(|e| TraceFailure::launch(e).at("object"))?;
         }
         let (p, v, e) = self
             .aimed_launch(x, y, field, w, options.vignetting)

@@ -311,6 +311,218 @@ def spectrum_sampling():
     print("PASS: weighted hexapolar spot/energy, strict spectral/sampling arguments, real lateral-color OTF cancellation, diffraction physical frequencies/complex components, skipped zero weights, positive-weight failure without mutation, engine analysis revisions")
 
 
+def endpoints():
+    import copy
+    global engine
+    initial=tool("system_get");system=copy.deepcopy(initial["system"])
+    plane=copy.deepcopy(system["surfaces"][0])
+    plane.update(radius=0,thickness=20,material="AIR",aperture=10,clear_aperture=True,conic=0,even=[],odd=[],gap_solve=dict(kind="fixed"))
+    system.update(surfaces=[plane],object_distance=100,object_material="AIR",object_label="Curved emitter",image_label="Curved detector",
+                  field_type="object_height",fields=[dict(x=1,y=2,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],stop_index=0,
+                  pupil=dict(kind="entrance_pupil_diameter",value=2),pupil_mapping="reference_entrance_pupil",
+                  wavelengths=[dict(value=587.562,weight=1,color=[.7,.8,0,1])],reference_wavelength=0,temperature=25)
+    system["object_surface"].update(radius=50,clear_aperture=True,aperture=3)
+    system["image_surface"].update(radius=40)
+    tool("system_set",dict(system=system,revision=initial["revision"]))
+    for gap in (20,-20):
+        saved=tool("system_get");saved["system"]["surfaces"][0]["thickness"]=gap
+        tool("system_set",dict(system=saved["system"],revision=saved["revision"]))
+        ray=tool("trace_ray",dict(field_index=0,x=.25,y=-.1))
+        source=[1,2,-50-math.sqrt(2495)]
+        assert max(abs(a-b) for a,b in zip(ray["object_point"],source))<1e-11
+        center=[0,0,gap+40];first=ray["segments"][0]["point"];direction=ray["direction"]
+        delta=[a-b for a,b in zip(first,center)];b=sum(a*d for a,d in zip(delta,direction))
+        root=math.sqrt(b*b-(sum(a*a for a in delta)-1600))
+        t=min([-b-root,-b+root],key=lambda t:abs(t-gap/direction[2]))
+        expected=[a+t*d for a,d in zip(first,direction)]
+        assert max(abs(a-b) for a,b in zip(ray["points"][-1],expected))<1e-10
+        assert abs(ray["opl"]+ray["entrance_opl"]-(math.dist(source,first)+t))<1e-10
+        assert ray["image_hit"]["point"]==ray["points"][-1]
+        assert ray["image_hit"]["n_before"]==ray["image_hit"]["n_after"]==1
+    for odd_object in (False,True):
+        saved=tool("system_get");saved["system"]["surfaces"][0]["thickness"]=20
+        for key in ("object_surface","image_surface"):
+            saved["system"][key].update(conic=-1,even=[],odd=[])
+        saved["system"]["object_surface"]["odd" if odd_object else "even"]=[.000001]
+        saved["system"]["image_surface"]["even" if odd_object else "odd"]=[.0001]
+        tool("system_set",dict(system=saved["system"],revision=saved["revision"]))
+        expected=tool("system_get")["system"]
+        for format in ("hissabeth","geopter"):
+            text=tool("project_export",dict(format=format))["text"]
+            tool("project_import",dict(format=format,text=text,revision=tool("system_get")["revision"]))
+            actual=tool("system_get")["system"]
+            for key in ("object_surface","image_surface","object_label","image_label"):
+                shape=copy.deepcopy(expected[key])
+                if format=="geopter" and isinstance(shape,dict):
+                    for terms in ("even","odd"):
+                        if shape[terms]: shape[terms]+=[0]*(10-len(shape[terms]))
+                assert actual[key]==shape,(format,key)
+    report=tool("aperture_report")
+    assert abs(report["object"]["semi_diameter"]-math.sqrt(5))<1e-12
+    assert report["object"]["reached_rays"]==report["image"]["reached_rays"]==5
+    saved=tool("system_get");saved["system"]["object_surface"]["aperture"]=1
+    tool("system_set",dict(system=saved["system"],revision=saved["revision"]))
+    state=tool("system_get");stored=(DATA/"system.json").read_bytes()
+    error=tool("trace_ray",dict(field_index=0),error=True)
+    assert "object aperture" in error["content"][0]["text"].lower()
+    tool("vignetting_update",dict(revision=state["revision"]),error=True)
+    assert tool("system_get")==state and (DATA/"system.json").read_bytes()==stored
+    saved=tool("system_get");system=saved["system"]
+    system.update(object_distance=None,field_type="angle",fields=[dict(x=0,y=0,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])])
+    system["object_surface"]=copy.deepcopy(initial["system"]["object_surface"])
+    system["image_surface"].update(radius=10,conic=0,even=[],odd=[],clear_aperture=True,aperture=.55)
+    system["surfaces"][0]["clear_aperture"]=False
+    tool("system_set",dict(system=system,revision=saved["revision"]))
+    args=dict(field_index=0,sampling=dict(kind="grid",count=9))
+    spot=tool("spot_diagram",args)
+    assert spot["sampled_rays"]==49 and spot["blocked"]==36 and len(spot["points"])==13
+    assert abs(spot["transmitted_weight"]-13/49)<1e-12
+    report=tool("aperture_report");assert report["image"]["semi_diameter"]==1 and report["image"]["reached_rays"]==5
+    update=tool("vignetting_update",dict(revision=tool("system_get")["revision"]))
+    assert all(abs(f-.45)<2e-9 for f in update["fields"][0]["vignetting"])
+    assert all(b["limiting_endpoint"]=="image" and b["limiting_surface"] is None for b in update["fields"][0]["boundaries"])
+    changed=tool("spot_diagram",args);spot.pop("revision");changed.pop("revision");assert changed==spot
+    system=copy.deepcopy(initial["system"])
+    system.update(object_distance=300,temperature=25,pupil_mapping="reference_entrance_pupil")
+    system["object_surface"].update(radius=500)
+    system["image_surface"].update(radius=100,conic=-1,even=[.0001])
+    tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
+    definition=dict(kind="edge_thickness",height=3,value=5)
+    tool("solve",dict(gap=1,definition=definition,revision=tool("system_get")["revision"]))
+    saved=tool("system_get")
+    expected=5-50+math.sqrt(2491)-9/200-.0001*81
+    assert abs(saved["system"]["surfaces"][1]["thickness"]-expected)<1e-11
+    saved["system"]["image_surface"]["even"]=[.0002]
+    tool("system_set",dict(system=saved["system"],revision=saved["revision"]))
+    saved=tool("system_get");expected=5-50+math.sqrt(2491)-9/200-.0002*81
+    assert abs(saved["system"]["surfaces"][1]["thickness"]-expected)<1e-11
+    psf=tool("diffraction_psf",dict(field_index=0,grid=16))
+    assert abs(sum(psf["intensity"])-1)<1e-10 and "Planar lateral" in psf["image_sampling"]
+    mtf=tool("diffraction_mtf",dict(field_index=0,grid=16,spectrum=dict(kind="polychromatic")))
+    assert "Planar lateral" in mtf["image_sampling"] and len(mtf["components"])==3
+    stored=(DATA/"system.json").read_bytes()
+    for mutation in range(4):
+        broken=copy.deepcopy(saved["system"])
+        if mutation==0: del broken["object_surface"]
+        elif mutation==1: broken["image_surface"]["thickness"]=2
+        elif mutation==2: broken["image_surface"]["semi_diameter"]=-1
+        else: broken["object_distance"]=None
+        tool("project_import",dict(format="hissabeth",text=json.dumps(broken),revision=saved["revision"]),error=True)
+        assert tool("system_get")==saved and (DATA/"system.json").read_bytes()==stored
+    engine.terminate();engine.wait(timeout=5)
+    stale=copy.deepcopy(saved["system"])
+    stale["object_surface"]["semi_diameter"]=stale["image_surface"]["semi_diameter"]=999
+    stale["surfaces"][1]["thickness"]=999
+    (DATA/"system.json").write_text(json.dumps(stale));(DATA/"endpoint.json").unlink(missing_ok=True)
+    engine=start_engine()
+    recovered=tool("system_get")["system"]
+    assert abs(recovered["surfaces"][1]["thickness"]-expected)<1e-11
+    assert json.loads((DATA/"system.json").read_text())==recovered
+    recovered["surfaces"][1]["thickness"]=saved["system"]["surfaces"][1]["thickness"]
+    assert recovered==saved["system"]
+    print("PASS: real MCP curved source/detector signed intersections and OPL, endpoint SPH/ASP/ODD exchange, object/image clipping and coverage, image-limited vignetting, final edge solve and profile edit reapplication, planar FFT model, atomic strict edits and same-relay stale-envelope/gap recovery")
+
+
+def endpoint_oracles():
+    import copy
+    catalogs=[str(p) for p in (ROOT/"data/glass").iterdir() if p.suffix.lower()==".agf"]
+    cases=0;rays=0;maximum=0.;branch_differences=0
+    def sag(profile,point):
+        r=math.hypot(point[0],point[1]);c=0 if profile["radius"]==0 else 1/profile["radius"]
+        return c*r*r/(1+math.sqrt(1-(1+profile["conic"])*c*c*r*r))+sum(a*r**(4+2*i) for i,a in enumerate(profile["even"]))+sum(a*r**(3+i) for i,a in enumerate(profile["odd"]))
+    def compare(project,label):
+        nonlocal cases,rays,maximum,branch_differences
+        path=ROOT/"target"/("endpoint-oracle-"+label+".json")
+        path.write_text(json.dumps(project))
+        tool("project_import",dict(format="geopter",text=path.read_text(),revision=tool("system_get")["revision"]))
+        system=tool("system_get")["system"]
+        radius=tool("paraxial")["entrance_pupil_radius"]
+        reference=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--rays",str(path),*catalogs],capture_output=True,text=True,check=True,timeout=30).stdout)
+        print("Oracle case:",label,"statuses",[r["status"] for r in reference],flush=True)
+        assert len(reference)==4
+        if label=="clipped-image": assert any(r["status"]==0 for r in reference) and any(r["status"]==0x2001 for r in reference)
+        for item in reference:
+            args=dict(field_index=0,wavelength=item["wavelength"],x=item["pupil"][0]*radius,y=item["pupil"][1]*radius)
+            vertices=[];z=0
+            for surface in system["surfaces"]: vertices.append(z);z+=surface["thickness"]
+            if item["status"]!=0:
+                result=request("tools/call",dict(name="trace_ray",arguments=args))
+                if not result["isError"]:
+                    # The original undamped asphere Newton iteration can select a different
+                    # radial-profile crossing. Prove both roots and the native vertex-sheet
+                    # choice, and validate native Snell conservation without claiming parity.
+                    actual=json.loads(result["content"][0]["text"])
+                    mismatch=None
+                    for i,segment in enumerate(actual["segments"]):
+                        other=item["points"][i+1];point=segment["point"]
+                        if max(abs(a-b) for a,b in zip(point,[other[0],other[1],other[2]+vertices[i]]))>2e-4:
+                            mismatch=i;break
+                    assert mismatch is not None,(label,"status difference without a distinct root")
+                    i=mismatch;shape=system["surfaces"][i];segment=actual["segments"][i]
+                    other=item["points"][i+1];point=segment["point"]
+                    assert any(shape["even"]+shape["odd"]),(label,"distinct root on non-polynomial profile")
+                    assert abs(sag(shape,other)-other[2])<1e-6
+                    assert abs(sag(shape,point)-(point[2]-vertices[i]))<1e-8
+                    assert abs(point[2]-vertices[i])<abs(other[2])
+                    for hit in actual["segments"]:
+                        n=hit["normal"];v=hit["incoming"];u=hit["direction"]
+                        ni=sum(a*b for a,b in zip(n,v));no=sum(a*b for a,b in zip(n,u))
+                        assert max(abs(hit["n_before"]*(v[j]-ni*n[j])-hit["n_after"]*(u[j]-no*n[j])) for j in range(3))<1e-10
+                    branch_differences+=1
+                    print("Distinct asphere roots (not coordinate parity):",label,item["pupil"],"surface",i+1,"native/upstream local z",point[2]-vertices[i],other[2],flush=True)
+                else:
+                    message=result["content"][0]["text"].lower()
+                    if item["status"]==0x2001: assert "blocked" in message,(label,item["status"],message)
+                    elif item["status"]==0x1000: assert "total internal" in message,(label,item["status"],message)
+                rays+=1;continue
+            actual=tool("trace_ray",args)
+            expected=[[p[0],p[1],p[2]+vertex] for p,vertex in zip(item["points"][1:],vertices+[z])]
+            hits=[segment["point"] for segment in actual["segments"]]+[actual["image_hit"]["point"]]
+            assert len(hits)==len(expected)
+            error=max(abs(a-b) for point,other in zip(hits,expected) for a,b in zip(point,other))
+            assert error<2e-4,(label,item["pupil"],error)
+            maximum=max(maximum,error);rays+=1
+        cases+=1
+    for source in sorted((ROOT.parent/"reference/upstream/example").rglob("*.json")):
+        original=json.loads(source.read_text());wave=original["Spec"]["Wvl"];reference=wave["RefIndex"]
+        for key in ("Value","Weight","Color"): wave[key]=[wave[key][reference]]
+        wave["RefIndex"]=0
+        fields=original["Spec"]["Field"];count=len(fields["X"])
+        for field_index in range(count):
+            project=copy.deepcopy(original);field=project["Spec"]["Field"]
+            order=[field_index]+[i for i in range(count) if i!=field_index]
+            for key in ("X","Y","Weight","Color","VUY","VLY","VUX","VLX"): field[key]=[fields[key][i] for i in order]
+            for key in ("VUY","VLY","VUX","VLX"): field[key]=[0]*count
+            compare(project,source.stem+"-f"+str(field_index))
+    initial=tool("system_get")["system"]
+    # Use the catalog singlet for endpoint cases, independent of the upstream model-glass denominator.
+    # Install a catalog singlet using the current saved prescription fields.
+    template=copy.deepcopy(initial["surfaces"][0])
+    a=copy.deepcopy(template);a.update(radius=50,thickness=5,material="N-BK7_SCHOTT",aperture=12.5,clear_aperture=True,conic=0,even=[],odd=[],gap_solve=dict(kind="fixed"))
+    b=copy.deepcopy(a);b.update(radius=-50,thickness=20,material="AIR")
+    initial.update(surfaces=[a,b],object_distance=300,object_material="AIR",stop_index=0,temperature=25,pressure=101325,
+                   pupil_mapping="reference_entrance_pupil",pupil=dict(kind="entrance_pupil_diameter",value=4),
+                   fields=[dict(x=.5,y=1,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],field_type="angle",
+                   wavelengths=[dict(value=587.562,weight=1,color=[.7,.8,0,1])],reference_wavelength=0,custom_glasses=[])
+    flat=dict(radius=0,conic=0,even=[],odd=[],aperture=1,clear_aperture=False,semi_diameter=0)
+    initial["object_surface"]=copy.deepcopy(flat);initial["image_surface"]=copy.deepcopy(flat)
+    for profile in ("spherical","even","odd"):
+        for gap in (20,-20):
+            system=copy.deepcopy(initial);system["surfaces"][1]["thickness"]=gap
+            shape=system["image_surface"];shape["radius"]=40 if profile!="odd" else -40
+            if profile=="even": shape.update(conic=-1,even=[.0001])
+            if profile=="odd": shape.update(conic=-.2,odd=[.0001])
+            tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
+            project=json.loads(tool("project_export",dict(format="geopter"))["text"])
+            compare(project,profile+"-image-gap"+str(gap))
+    system=copy.deepcopy(initial)
+    system["fields"][0].update(x=.1,y=.2)
+    system["image_surface"].update(radius=10,clear_aperture=True,aperture=.6)
+    tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
+    compare(json.loads(tool("project_export",dict(format="geopter"))["text"]),"clipped-image")
+    print(f"PASS: original C++ reference-wavelength full-path comparison for all ten examples/every field, six signed SPH/ASP/ODD image cases and detector aperture clipping: {cases} prescriptions, {rays} rays, {branch_differences} distinct polynomial-root rays excluded from coordinate parity and checked by sag/Snell equations, maximum matched coordinate error {maximum} mm (tolerance 0.0002 mm)")
+
+
 def focus_overflow():
     import copy
     state=tool("system_get");system=state["system"]
@@ -503,6 +715,12 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--endpoints" in sys.argv:
+        endpoints()
+        raise SystemExit(0)
+    if "--endpoint-oracles" in sys.argv:
+        endpoint_oracles()
+        raise SystemExit(0)
     if "--focus-overflow" in sys.argv:
         focus_overflow()
         raise SystemExit(0)

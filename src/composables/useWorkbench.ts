@@ -15,7 +15,7 @@ import type {
 import { GEOMETRIC_SAMPLING, SPOT_SAMPLING, type SpectralMode } from '../sampling';
 import { FALLBACK_COLOR } from '../color';
 import { checkRevision, savedSystemChanged } from '../provenance';
-import { clone, fieldLabel, validateSystem } from '../validation';
+import { canonicalJson, clone, fieldLabel, validateSystem } from '../validation';
 
 const POLL_MS = 1500;
 const FALLBACK_MATERIALS = ['AIR'];
@@ -63,7 +63,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     () => system.value?.wavelengths[system.value.reference_wavelength]?.value ?? DEFAULT_WAVELENGTH,
   );
   const dirty = computed(
-    () => !!system.value && !!draft.value && JSON.stringify(system.value) !== JSON.stringify(draft.value),
+    () => !!system.value && !!draft.value && canonicalJson(system.value) !== canonicalJson(draft.value),
   );
   const problems = computed(() => (draft.value ? validateSystem(draft.value) : []));
 
@@ -126,7 +126,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
       void loadMaterials();
       // After a confirmed commit whose refresh failed, adopt even at an unchanged revision number.
       const changed = snapshot.revision !== revision.value || refreshPending.value;
-      const draftUnchanged = refreshPending.value && JSON.stringify(draft.value) === pendingDraftText;
+      const draftUnchanged = refreshPending.value && canonicalJson(draft.value) === pendingDraftText;
       if (!system.value || (changed && (!dirty.value || draftUnchanged))) {
         adopt(snapshot);
       } else if (changed) {
@@ -264,7 +264,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
    * `refreshPending` set instead of reporting failure. A draft edited since entry is never replaced.
    */
   async function commit(op: () => Promise<unknown>): Promise<boolean> {
-    const draftAtRequest = JSON.stringify(draft.value);
+    const draftAtRequest = canonicalJson(draft.value);
     busy.value = true;
     try {
       await op();
@@ -276,7 +276,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     try {
       actionError.value = '';
       const snapshot = await callTool('system_get', {});
-      if (JSON.stringify(draft.value) === draftAtRequest) {
+      if (canonicalJson(draft.value) === draftAtRequest) {
         adopt(snapshot);
         online.value = true;
         offlineReason.value = '';

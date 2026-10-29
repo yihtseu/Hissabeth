@@ -14,11 +14,33 @@ pub struct SurfaceSize {
     pub reached_rays: usize,
 }
 #[derive(Debug, Serialize)]
+pub struct EndpointSize {
+    pub semi_diameter: f64,
+    pub aperture: f64,
+    pub clear_aperture: bool,
+    pub reached_rays: usize,
+}
+impl EndpointSize {
+    fn new(surface: &EndpointSurface) -> Self {
+        Self {
+            semi_diameter: 0.,
+            aperture: surface.aperture,
+            clear_aperture: surface.clear_aperture,
+            reached_rays: 0,
+        }
+    }
+    fn include(&mut self, point: V3) {
+        self.semi_diameter = self.semi_diameter.max(point[0].hypot(point[1]));
+        self.reached_rays += 1;
+    }
+}
+#[derive(Debug, Serialize)]
 pub struct CoverageFailure {
     pub field_index: usize,
     pub pupil: [f64; 2],
     pub surface: Option<usize>,
     pub reached_surfaces: usize,
+    pub endpoint: Option<&'static str>,
     pub kind: String,
     pub error: String,
 }
@@ -29,9 +51,14 @@ pub struct ApertureReport {
     pub sampled_rays: usize,
     pub failed_rays: usize,
     pub surfaces: Vec<SurfaceSize>,
+    pub object: EndpointSize,
+    pub image: EndpointSize,
     pub failures: Vec<CoverageFailure>,
 }
-fn accumulate(ray: &Ray, sizes: &mut [SurfaceSize]) {
+fn accumulate(ray: &Ray, sizes: &mut [SurfaceSize], image: &mut EndpointSize) {
+    if let Some(hit) = &ray.image_hit {
+        image.include(hit.point);
+    }
     for (surface, segment) in sizes.iter_mut().zip(&ray.segments) {
         surface.semi_diameter = surface
             .semi_diameter
@@ -55,6 +82,8 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
         })
         .collect::<Vec<_>>();
     let mut failures = vec![];
+    let mut object = EndpointSize::new(&s.object_surface);
+    let mut image = EndpointSize::new(&s.image_surface);
     for (field_index, field) in s.fields.iter().enumerate() {
         let frame = s.field_frame(field);
         let pupils = [
@@ -65,18 +94,23 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
             frame.sagittal.map(|v| -v),
         ];
         for pupil in pupils {
+            if s.object_distance.is_some() {
+                if let Ok(point) = s.object_point(field, w) {
+                    object.include(point);
+                }
+            }
             let options = TraceOptions {
                 last: s.surfaces.len() - 1,
-                image: false,
+                image: true,
                 apertures: false,
                 vignetting: true,
             };
             match s.trace_options(radius * pupil[0], radius * pupil[1], field, w, options) {
-                Ok(ray) => accumulate(&ray, &mut surfaces),
+                Ok(ray) => accumulate(&ray, &mut surfaces, &mut image),
                 Err(failure) => {
                     let mut reached = 0;
                     if let Some(ray) = &failure.ray {
-                        accumulate(ray, &mut surfaces);
+                        accumulate(ray, &mut surfaces, &mut image);
                         reached = ray.segments.len();
                     }
                     if let (Some(i), Some(point)) = (failure.surface, failure.point) {
@@ -96,6 +130,7 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
                         pupil: local_pupil,
                         surface: failure.surface,
                         reached_surfaces: reached,
+                        endpoint: failure.endpoint,
                         kind: failure.kind.as_str().into(),
                         error: failure.message,
                     });
@@ -109,6 +144,8 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
         sampled_rays: 5 * s.fields.len(),
         failed_rays: failures.len(),
         surfaces,
+        object,
+        image,
         failures,
     })
 }
@@ -118,6 +155,7 @@ pub struct Boundary {
     pub direction: &'static str,
     pub pupil_scale: f64,
     pub limiting_surface: Option<usize>,
+    pub limiting_endpoint: Option<&'static str>,
     pub status: &'static str,
 }
 #[derive(Debug, Serialize)]
@@ -155,7 +193,7 @@ fn probe(
         w,
         TraceOptions {
             last: s.surfaces.len() - 1,
-            image: false,
+            image: true,
             apertures: true,
             vignetting: false,
         },
@@ -221,6 +259,7 @@ fn boundary(
             direction,
             pupil_scale: 1. - factor,
             limiting_surface: failed.surface,
+            limiting_endpoint: failed.endpoint,
             status: "aperture",
         },
     ))
@@ -228,13 +267,16 @@ fn boundary(
 fn calculate(s: &System) -> Result<Vec<FieldVignetting>, String> {
     let w = s.reference();
     let radius = s.pupil_radius(w)?;
-    let clipped = s.surfaces.iter().any(|surface| surface.clear_aperture);
+    let clipped =
+        s.image_surface.clear_aperture || s.surfaces.iter().any(|surface| surface.clear_aperture);
     let mut fields = vec![];
     for (field_index, field) in s.fields.iter().enumerate() {
         let mut vignetting = [0.; 4];
         let mut boundaries = vec![];
-        if clipped {
+        if clipped || s.object_surface.clear_aperture {
             probe(s, field, [0., 0.], 0., radius, w).map_err(|e| format!("Field {field_index}: chief ray cannot define a connected transmitting pupil: {e}"))?;
+        }
+        if clipped {
             for (i, (name, direction)) in DIRECTIONS.into_iter().enumerate() {
                 let (factor, edge) = boundary(s, field, name, direction, radius, w)
                     .map_err(|e| format!("Field {field_index}: {e}"))?;
@@ -246,6 +288,7 @@ fn calculate(s: &System) -> Result<Vec<FieldVignetting>, String> {
                 direction: *direction,
                 pupil_scale: 1.,
                 limiting_surface: None,
+                limiting_endpoint: None,
                 status: "unlimited",
             }));
         }
@@ -276,7 +319,8 @@ pub fn update_vignetting(system: &System) -> Result<(System, VignettingReport), 
         let rims_transmit = if error <= FACTOR_TOLERANCE {
             let w = next.reference();
             let r = next.pupil_radius(w)?;
-            !next.surfaces.iter().any(|surface| surface.clear_aperture)
+            !(next.image_surface.clear_aperture
+                || next.surfaces.iter().any(|surface| surface.clear_aperture))
                 || next.fields.iter().all(|field| {
                     DIRECTIONS.into_iter().all(|(_, direction)| {
                         next.trace_options(
@@ -286,7 +330,7 @@ pub fn update_vignetting(system: &System) -> Result<(System, VignettingReport), 
                             w,
                             TraceOptions {
                                 last: next.surfaces.len() - 1,
-                                image: false,
+                                image: true,
                                 apertures: true,
                                 vignetting: true,
                             },

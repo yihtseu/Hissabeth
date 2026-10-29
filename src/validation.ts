@@ -2,6 +2,7 @@ import { paletteColor } from './color';
 import type {
   Field,
   FieldType,
+  EndpointSurface,
   GapSolve,
   Glass,
   Interaction,
@@ -30,6 +31,23 @@ export const PUPIL_KINDS: readonly PupilKind[] = [
 export const PUPIL_MAPPINGS: readonly PupilMapping[] = ['reference_entrance_pupil', 'real_stop'];
 export const INTERACTIONS: readonly Interaction[] = ['refract', 'reflect', 'dummy'];
 
+/**
+ * Canonical JSON text: object keys sorted recursively, array order and every primitive kept exactly.
+ * Two values that differ only in object property order produce the same text.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v ?? null)).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const o = value as Record<string, unknown>;
+    const parts = Object.keys(o)
+      .sort()
+      .filter((k) => o[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`);
+    return `{${parts.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 export const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 export function newSurface(): Surface {
@@ -53,6 +71,21 @@ export const newWavelength = (n = 0): Wavelength => ({ value: 587.5618, weight: 
 
 const isRgba = (v: unknown): v is RGBA => isTuple(v, 4) && v.every((c) => c >= 0 && c <= 1);
 
+/** Plane endpoint with a unit clear radius, clipping off and a zero derived envelope. */
+export const newEndpoint = (): EndpointSurface => ({
+  radius: 0, conic: 0, even: [], odd: [], aperture: 1, clear_aperture: false, semi_diameter: 0,
+});
+
+/** Why an object at infinity cannot have this profile, or '' when it is valid. A conic alone has no shape at radius 0. */
+export function infiniteObjectProblem(s: OpticalSystem): string {
+  if (s.object_distance !== null) return '';
+  const o = s.object_surface;
+  const planar = o.radius === 0 && o.even.every((c) => c === 0) && o.odd.every((c) => c === 0);
+  if (!planar) return 'An object at infinity needs a planar object surface (radius 0 and no nonzero asphere coefficients).';
+  if (o.clear_aperture) return 'An object at infinity cannot clip rays: turn off Object surface clip rays.';
+  return '';
+}
+
 /** Custom glasses are addressed as NAME_CATALOG, matching the backend's Glass::key. */
 export const glassKey = (g: Glass): string => `${g.name}_${g.catalog}`;
 
@@ -64,6 +97,7 @@ function exactKeys(o: Record<string, unknown>, keys: readonly string[], where: s
 }
 
 const SURFACE_KEYS = ['label', 'radius', 'thickness', 'gap_solve', 'material', 'aperture', 'clear_aperture', 'semi_diameter', 'conic', 'even', 'odd', 'interaction'];
+const ENDPOINT_KEYS = ['radius', 'conic', 'even', 'odd', 'aperture', 'clear_aperture', 'semi_diameter'];
 const FIELD_KEYS = ['x', 'y', 'weight', 'vignetting', 'color'];
 const WAVELENGTH_KEYS = ['value', 'weight', 'color'];
 const GLASS_KEYS = [
@@ -72,7 +106,7 @@ const GLASS_KEYS = [
 ];
 const SYSTEM_KEYS = [
   'name', 'note', 'surfaces', 'wavelengths', 'reference_wavelength', 'fields', 'field_type',
-  'pupil', 'pupil_mapping', 'object_distance', 'object_material', 'object_label', 'image_label', 'stop_index', 'temperature', 'pressure', 'custom_glasses',
+  'pupil', 'pupil_mapping', 'object_distance', 'object_material', 'object_label', 'image_label', 'object_surface', 'image_surface', 'stop_index', 'temperature', 'pressure', 'custom_glasses',
 ];
 
 const isIndex = (v: unknown): v is number => isNum(v) && Number.isInteger(v) && v >= 0;
@@ -149,6 +183,23 @@ function parseGlass(value: unknown, i: number): Glass | string {
   };
 }
 
+/** Strict endpoint profile: exact keys, finite numbers, nonnegative derived radius. */
+function parseEndpoint(value: unknown, where: string): EndpointSurface | string {
+  if (!isRecord(value)) return `"${where.toLowerCase().replace(' ', '_')}" must be an object`;
+  const bad = exactKeys(value, ENDPOINT_KEYS, where);
+  if (bad) return bad;
+  if (!isNum(value.radius) || !isNum(value.aperture) || !isNum(value.conic))
+    return `${where}: radius, aperture and conic must be numbers`;
+  if (!isNum(value.semi_diameter) || value.semi_diameter < 0)
+    return `${where}: semi_diameter must be a non-negative number`;
+  if (typeof value.clear_aperture !== 'boolean') return `${where}: clear_aperture must be true or false`;
+  if (!isNumArray(value.even) || !isNumArray(value.odd)) return `${where}: even and odd must be arrays of numbers`;
+  return {
+    radius: value.radius, conic: value.conic, even: value.even, odd: value.odd,
+    aperture: value.aperture, clear_aperture: value.clear_aperture, semi_diameter: value.semi_diameter,
+  };
+}
+
 /** Parse untrusted JSON into an OpticalSystem; returns an error string on failure. */
 export function parseSystem(value: unknown): OpticalSystem | string {
   if (!isRecord(value)) return 'System must be a JSON object';
@@ -183,6 +234,10 @@ export function parseSystem(value: unknown): OpticalSystem | string {
   if (!isNum(v.pupil.value)) return 'pupil.value must be a number';
   if (!PUPIL_MAPPINGS.includes(v.pupil_mapping as PupilMapping))
     return `"pupil_mapping" must be one of ${PUPIL_MAPPINGS.join(', ')}`;
+  const objectSurface = parseEndpoint(v.object_surface, 'Object surface');
+  if (typeof objectSurface === 'string') return objectSurface;
+  const imageSurface = parseEndpoint(v.image_surface, 'Image surface');
+  if (typeof imageSurface === 'string') return imageSurface;
 
   const surfaces: Surface[] = [];
   for (const [i, s] of v.surfaces.entries()) {
@@ -248,6 +303,8 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     object_material: v.object_material,
     object_label: v.object_label,
     image_label: v.image_label,
+    object_surface: objectSurface,
+    image_surface: imageSurface,
     stop_index: v.stop_index,
     temperature: v.temperature,
     pressure: v.pressure,
@@ -272,6 +329,13 @@ export function validateSystem(s: OpticalSystem): string[] {
   if (s.object_label.length > 256) p.push('Object label is longer than 256 characters.');
   if (s.image_label.length > 256) p.push('Image label is longer than 256 characters.');
   if (s.object_material.trim() === '') p.push('Object material must not be empty.');
+  for (const [name, e] of [['Object surface', s.object_surface], ['Image surface', s.image_surface]] as const) {
+    if (!(e.aperture > 0)) p.push(`${name}: clear radius must be positive.`);
+    if (e.even.length > 16) p.push(`${name}: at most 16 even coefficients.`);
+    if (e.odd.length > 20) p.push(`${name}: at most 20 odd coefficients.`);
+  }
+  const infinite = infiniteObjectProblem(s);
+  if (infinite) p.push(infinite);
   if (s.object_distance !== null && !(s.object_distance > 0))
     p.push('Object distance must be positive (use infinity for none).');
   if (s.field_type !== 'angle' && s.object_distance === null)

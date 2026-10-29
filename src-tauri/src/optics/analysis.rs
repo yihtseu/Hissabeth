@@ -5,6 +5,8 @@ use super::{
 };
 use serde_json::{Value, json};
 
+const IMAGE_SAMPLING: &str = "Planar lateral analysis grid centered at the real chief image intercept; not surface irradiance integrated over a curved detector";
+
 pub fn ray_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, String> {
     if !(3..=257).contains(&samples) {
         return Err("Fan samples must be 3–257".into());
@@ -525,7 +527,7 @@ pub fn diffraction_psf(s: &System, f: &Field, w: f64, grid: usize) -> Result<Val
     let psf = psf_data(s, f, w, grid)?;
     Ok(
         json!({"intensity":psf.intensity,"grid":psf.n,"pixel_size":psf.pixel,"strehl":psf.strehl,
-        "wavelength":w,"normalization":"sum intensity = 1","model":"Fraunhofer with paraxial exit pupil mapping",
+        "wavelength":w,"normalization":"sum intensity = 1","model":"Fraunhofer with paraxial exit pupil mapping","image_sampling":IMAGE_SAMPLING,
         "failed_pupil_rays":psf.failed,"units":"mm"}),
     )
 }
@@ -653,7 +655,7 @@ fn compose_diffraction_mtf(
         "sagittal_otf":{"real":cuts[0]["real"],"imaginary":cuts[0]["imaginary"]},
         "tangential_otf":{"real":cuts[1]["real"],"imaginary":cuts[1]["imaginary"]},
         "spectrum":spectrum,"components":spectral,"origin":origin,"transmitted_weight":total,
-        "pupil_grid":grid,"sampling_limit":limit,"max_frequency":max,"frame":frame,"units":"cycles/mm",
+        "pupil_grid":grid,"sampling_limit":limit,"max_frequency":max,"frame":frame,"units":"cycles/mm","image_sampling":IMAGE_SAMPLING,
         "failed_pupil_rays":components.iter().map(|c|c.data.failed).sum::<usize>(),
         "normalization":"incident spectral weights times sampled pupil transmission; normalized at DC",
         "model":"Fraunhofer with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color"}),
