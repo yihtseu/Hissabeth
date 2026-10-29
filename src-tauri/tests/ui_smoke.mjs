@@ -149,6 +149,96 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await expect(page.getByText('Engine connected', { exact: true })).toBeVisible();
   await expect(page.getByRole('img').first()).toBeVisible();
+  if (process.argv.includes('--prescription-report')) {
+    await page.getByRole('tab',{name:'Prescription report',exact:true}).click();
+    const generate=page.getByRole('button',{name:'Generate report',exact:true});
+    const download=page.getByRole('button',{name:'Download report',exact:true});
+    const decimals=page.getByRole('spinbutton',{name:'Display decimals',exact:true});
+    const wavelength=page.getByRole('combobox',{name:'Report wavelength',exact:true});
+    await expect(download).toBeDisabled();
+    const before=await optical('system_get');
+    await generate.click();
+    await expect(download).toBeEnabled();
+    const report=lastUiResult('prescription_report');
+    assert.equal(report.revision,before.revision);
+    assert.equal(report.sections.length,5);
+    assert.deepEqual(report.diagnostics,[]);
+    const firstOrder=page.getByRole('table',{name:'First-order quantities',exact:true});
+    for(const label of ['Gaussian magnification','Reduction (inverse Gaussian magnification)']) {
+      const cell=firstOrder.getByRole('rowheader',{name:label,exact:true}).locator('..').locator('td.na');
+      await expect(cell).toContainText('—');await expect(cell).toHaveAttribute('tabindex','0');
+      await expect(cell).toHaveAttribute('title','Requires a finite object');
+    }
+    await expect(page.getByRole('table',{name:'Optical surfaces',exact:true})).toBeVisible();
+    const downloaded=page.waitForEvent('download');await download.click();
+    const artifact=await downloaded;
+    assert.match(artifact.suggestedFilename(),/\.txt$/);
+    assert.equal(await readFile(await artifact.path(),'utf8'),report.text);
+    const calls=uiRequests.filter(r=>r.name==='prescription_report').length;
+    for(const raw of ['', '-1', '16', '2.5']) {
+      await decimals.fill(raw);await decimals.blur();
+      assert.equal(await decimals.inputValue(),raw);
+      await expect(generate).toBeDisabled();await expect(download).toBeDisabled();
+    }
+    assert.equal(uiRequests.filter(r=>r.name==='prescription_report').length,calls);
+    await decimals.fill('3');
+    for(const label of ['General information','Optical specification','First-order data','Lens data','Surface profiles']) {
+      await page.getByRole('checkbox',{name:label,exact:true}).uncheck();
+    }
+    await generate.click();await expect(download).toBeEnabled();
+    assert.deepEqual(lastUiResult('prescription_report').sections,[]);
+    for(const label of ['General information','Optical specification','First-order data','Lens data','Surface profiles']) {
+      await page.getByRole('checkbox',{name:label,exact:true}).check();
+    }
+    analysisGate={stage:'after',name:'prescription_report'};
+    await generate.click();await expect.poll(()=>gatedAnalysis?.name).toBe('prescription_report');
+    await decimals.fill('5');resumeAnalysis();
+    await expect(download).toBeDisabled();
+    await generate.click();await expect(download).toBeEnabled();
+    assert.equal(lastUiResult('prescription_report').precision,5);
+    holdUiReads=true;await expect.poll(()=>dispatchingUiReads).toBe(0);
+    analysisGate={stage:'before',name:'prescription_report'};
+    await generate.click();await expect.poll(()=>gatedAnalysis?.name).toBe('prescription_report');
+    let current=await optical('system_get');current.system.name='Report engine-ahead revision';
+    const ahead=await optical('system_set',{system:current.system,revision:current.revision});
+    resumeAnalysis();
+    await expect(page.getByRole('alert')).toContainText('result was discarded');
+    await expect(download).toBeDisabled();resumeUiReads();
+    await expect.poll(()=>lastUiResult('system_get')?.revision).toBe(ahead.revision);
+    const edited=structuredClone(current.system);edited.note='Saved report note';
+    edited.wavelengths.push({...edited.wavelengths[1],weight:0});
+    const saved=await optical('system_set',{system:edited,revision:ahead.revision});
+    await expect.poll(()=>lastUiResult('system_get')?.revision).toBe(saved.revision);
+    await expect(download).toBeDisabled();await wavelength.selectOption('3');
+    await generate.click();await expect(download).toBeEnabled();
+    await page.screenshot({path:resolve(target,'prescription-report.png'),fullPage:true});
+    const stable=await optical('system_get');
+    const savedReport=lastUiResult('prescription_report');
+    assert.equal(stable.revision,saved.revision);assert.deepEqual(stable.system,edited);
+    const callsBeforeOffline=uiRequests.filter(r=>r.name==='prescription_report').length;
+    engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
+    await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
+    await expect(generate).toBeDisabled();await expect(download).toBeDisabled();
+    await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});await startEngine();
+    await expect(page.getByText('Engine connected',{exact:true})).toBeVisible();
+    await expect(download).toBeDisabled();
+    assert.equal(uiRequests.filter(r=>r.name==='prescription_report').length,callsBeforeOffline);
+    await generate.click();await expect(download).toBeEnabled();
+    assert.deepEqual(lastUiResult('prescription_report').sections,savedReport.sections);
+    assert.equal(await wavelength.inputValue(),'3');
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();
+    const editor=page.getByRole('textbox',{name:'Full prescription',exact:true});
+    const draft=JSON.parse(await editor.inputValue());draft.name='Unapplied report title';
+    await editor.fill(JSON.stringify(draft));
+    await page.getByRole('tab',{name:'Prescription report',exact:true}).click();
+    await expect(page.getByText(/Results use the saved system \(revision/)).toBeVisible();
+    await generate.click();await expect(download).toBeEnabled();
+    assert.equal(lastUiResult('prescription_report').name,edited.name);
+    await page.getByRole('button',{name:'Revert',exact:true}).click();
+    assert.deepEqual(errors,[]);
+    console.log('PASS: prescription report tables, exact canonical text download, optional empty selection, raw precision guards, late-response cancellation, revision invalidation, read-only saved state and offline/restart manual generation');
+    process.exitCode=0;
+  } else
   if (process.argv.includes('--field-curvature')) {
     let current=await optical('system_get');
     const system=structuredClone(current.system),duplicate=structuredClone(system.wavelengths[0]);

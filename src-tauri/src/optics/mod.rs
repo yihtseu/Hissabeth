@@ -10,6 +10,7 @@ pub mod profile;
 pub mod project;
 #[cfg(test)]
 mod reflection;
+pub mod report;
 pub mod sampling;
 pub mod solve;
 pub mod spec;

@@ -719,6 +719,64 @@ export type AnalysisKind = keyof AnalysisResults;
 /** A result tagged with the analysis that produced it, for narrowing in templates. */
 export type AnalysisOutcome = { [K in AnalysisKind]: { kind: K; data: AnalysisResults[K] } }[AnalysisKind];
 
+// ---- prescription report ---------------------------------------------------
+
+/** Saved-prescription report sections; the backend emits them in this canonical order regardless of request order. */
+export type SectionId = 'general' | 'specification' | 'first_order' | 'lens_data' | 'surface_data';
+
+/** Display text is the backend's canonical formatting; `value` keeps full precision for number cells. */
+export type ReportCell =
+  | { kind: 'number'; value: number; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'infinite'; sign: -1 | 1; text: string }
+  | { kind: 'not_applicable'; reason: string; text: string }
+  | { kind: 'unavailable'; reason: string; text: string };
+
+export interface ReportColumn {
+  id: string;
+  label: string;
+  unit: string | null;
+}
+
+/** `cells` aligns with the table's columns; the first cell is the row header. */
+export interface ReportRow {
+  id: string;
+  cells: ReportCell[];
+}
+
+export interface ReportTable {
+  id: string;
+  title: string;
+  columns: ReportColumn[];
+  rows: ReportRow[];
+}
+
+export interface ReportSection {
+  id: SectionId;
+  title: string;
+  paragraphs: string[];
+  tables: ReportTable[];
+}
+
+export interface ReportDiagnostic {
+  section: SectionId;
+  table: string;
+  row: string;
+  column: string;
+  message: string;
+}
+
+/** Read-only report assembly over the saved system; `text` is the canonical download payload. */
+export interface PrescriptionReport {
+  revision: number;
+  name: string;
+  wavelength: number;
+  precision: number;
+  sections: ReportSection[];
+  diagnostics: ReportDiagnostic[];
+  text: string;
+}
+
 export type ImportFormat = 'geopter' | 'hissabeth';
 
 export interface AgentInfo {
@@ -744,6 +802,7 @@ export const TABS = [
   'Import / Export',
   'Prescription',
   'Prescription JSON',
+  'Prescription report',
   'Agent connections',
 ] as const;
 export type Tab = (typeof TABS)[number];
