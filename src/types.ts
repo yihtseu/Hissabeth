@@ -119,6 +119,41 @@ export interface SystemSnapshot {
   revision: number;
 }
 
+// ---- workspace recovery ------------------------------------------------------
+
+/** Ready engine state; `revision` is the workspace revision the recovery tools expect. */
+export interface ReadyWorkspace {
+  state: 'ready';
+  revision: number;
+  path: string;
+}
+
+/**
+ * The saved file could not be loaded as a valid system; every optical tool is blocked.
+ * `source_text` is the full original text, or null when the file is unreadable or not valid UTF-8.
+ * `source_bytes` is null when unreadable and 0 when no file exists.
+ */
+export interface RecoveryWorkspace {
+  state: 'recovery';
+  revision: number;
+  path: string;
+  reason: string;
+  source_text: string | null;
+  source_bytes: number | null;
+}
+
+export type WorkspaceStatus = ReadyWorkspace | RecoveryWorkspace;
+
+export type RecoverySource =
+  | { kind: 'default' }
+  | { kind: 'project'; format: ImportFormat; text: string };
+
+/** Result of a confirmed recovery replacement; `preserved_path` is null when no original file existed. */
+export interface RecoveryResult {
+  revision: number;
+  preserved_path: string | null;
+}
+
 export type Point3 = [number, number, number];
 
 export interface Paraxial {

@@ -2,11 +2,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { callTool, errorMessage, inDesktop } from '../api';
 import type {
   GeometricMtf,
+  ImportFormat,
   Layout,
   MtfAxis,
   OpticalSystem,
   Paraxial,
   PupilSampling,
+  RecoveryWorkspace,
   RunInfo,
   SpotDiagram,
   Spectrum,
@@ -34,6 +36,26 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
   const actionError = ref('');
   const analysisError = ref('');
   const materials = ref<string[]>(FALLBACK_MATERIALS);
+
+  /** Recovery state from the last workspace_status poll; null when the workspace is ready. */
+  const recovery = ref<RecoveryWorkspace | null>(null);
+  /** Repair text and format for Restore from text; never written to the engine until the user acts. */
+  const recoveryText = ref('');
+  const recoveryFormat = ref<ImportFormat>('hissabeth');
+  const recoveryBusy = ref(false);
+  const recoveryError = ref('');
+  /** Set after a confirmed replacement; kept across refresh failures until dismissed. */
+  const recoveryNotice = ref<{ path: string | null } | null>(null);
+  /** True after a confirmed retry/replacement until a fresh snapshot is read and applied or flagged stale. */
+  const recoveryPending = ref(false);
+  /** Last server-observed source text; the repair text is re-seeded only while it still matches. */
+  let recoverySeed: string | null = null;
+  /** Draft text captured when the current recovery action started; null outside one. */
+  let recoveryDraftAtRequest: string | null = null;
+  /** Bumped when a recovery action starts; an in-flight poll holding an older value discards its replies. */
+  let recoveryEpoch = 0;
+  /** True while a confirmed recovery must not let the poll adopt over the kept draft. */
+  let recoveryKeepsDraft = false;
 
   /** Stored field number and wavelength number (indices into the saved system). */
   const fieldIndex = ref(0);
@@ -86,6 +108,8 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     stale.value = false;
     refreshPending.value = false;
     pendingDraftText = null;
+    recoveryKeepsDraft = false;
+    recoveryDraftAtRequest = null;
     const { fields, wavelengths, reference_wavelength } = snapshot.system;
     if (fieldIndex.value >= fields.length) fieldIndex.value = 0;
     // First adoption selects the reference wavelength; later edits keep the selected value if it still exists.
@@ -100,9 +124,14 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
   }
 
   async function loadMaterials(): Promise<void> {
-    if (materialsLoaded) return;
+    if (materialsLoaded || recovery.value) return;
+    const epoch = recoveryEpoch;
+    const rev = revision.value;
     try {
-      materials.value = await callTool('materials_list', {});
+      const list = await callTool('materials_list', {});
+      // Drop the reply when recovery began, a recovery action ran, or the saved system changed meanwhile.
+      if (recovery.value || epoch !== recoveryEpoch || rev !== revision.value) return;
+      materials.value = list;
       materialsLoaded = true;
     } catch {
       // keep the current list; retried on the next successful poll
@@ -111,30 +140,193 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
 
   /** Read the engine and replace local state, discarding any draft. */
   async function reload(): Promise<void> {
+    if (recovery.value) return; // system_get is blocked while the workspace is in recovery
     adopt(await callTool('system_get', {}));
     online.value = true;
     offlineReason.value = '';
   }
 
-  async function poll(): Promise<void> {
-    if (polling || busy.value) return;
-    polling = true;
+  /** Store a recovery status; the repair text follows the observed source only while unedited. */
+  function applyRecoveryStatus(status: RecoveryWorkspace): void {
+    const prev = recovery.value;
+    const changed =
+      !prev ||
+      prev.revision !== status.revision ||
+      prev.source_text !== status.source_text ||
+      prev.reason !== status.reason;
+    if (!changed) return;
+    recovery.value = status;
+    if (!prev || recoveryText.value === recoverySeed) {
+      recoverySeed = status.source_text ?? '';
+      recoveryText.value = recoverySeed;
+    } else {
+      // The user is repairing; keep their text and only move the last observed source.
+      recoverySeed = status.source_text ?? '';
+    }
+  }
+
+  /**
+   * Leaving recovery becomes final only with a fresh snapshot in hand: adopt it when no draft is
+   * pending and none was edited since the action started, otherwise keep the draft and flag stale.
+   */
+  function settleRecoverySnapshot(snapshot: SystemSnapshot, draftAtRequest: string): void {
+    recoveryPending.value = false;
+    recoveryDraftAtRequest = null;
+    recovery.value = null;
+    recoverySeed = null;
+    recoveryText.value = '';
+    if (!system.value || (!dirty.value && canonicalJson(draft.value) === draftAtRequest)) {
+      adopt(snapshot);
+    } else {
+      refreshPending.value = false; // the read succeeded; the kept draft is handled by the stale banner
+      stale.value = true;
+    }
+  }
+
+  /**
+   * The engine confirmed the workspace is ready. The recovery view stays up, disabled, until a fresh
+   * snapshot is read; a failed read leaves recoveryPending and refreshPending set so the poll finishes
+   * the transition, and the confirmed action is never repeated. A kept draft is never adopted over:
+   * pendingDraftText stays null so the poll's unchanged-draft replay cannot apply to it.
+   */
+  async function finishRecovery(preserved: string | null | undefined, draftAtRequest: string): Promise<void> {
+    recoveryError.value = '';
+    recoveryKeepsDraft = true;
+    recoveryPending.value = true;
+    refreshPending.value = true;
+    if (preserved !== undefined) recoveryNotice.value = { path: preserved };
     try {
       const snapshot = await callTool('system_get', {});
+      settleRecoverySnapshot(snapshot, draftAtRequest);
+    } catch {
+      pendingDraftText = null;
+    }
+  }
+
+  /** Recovery actions are blocked while another write runs, once a result is confirmed but unread, or while offline. */
+  function recoveryBlocked(): boolean {
+    return !recovery.value || recoveryPending.value || recoveryBusy.value || busy.value || !online.value;
+  }
+
+  async function retryFromDisk(): Promise<void> {
+    const rec = recovery.value;
+    if (!rec || recoveryBlocked()) return;
+    recoveryEpoch++;
+    recoveryBusy.value = true;
+    recoveryError.value = '';
+    const draftAtRequest = canonicalJson(draft.value);
+    recoveryDraftAtRequest = draftAtRequest;
+    try {
+      const status = await callTool('workspace_retry', { revision: rec.revision });
+      if (status.state === 'recovery') {
+        applyRecoveryStatus(status);
+        recoveryError.value = status.reason;
+      } else {
+        await finishRecovery(undefined, draftAtRequest);
+      }
+    } catch (e) {
+      // Not confirmed: the retry may still have loaded; the next poll discovers the state.
+      recoveryError.value = errorMessage(e);
+    } finally {
+      recoveryBusy.value = false;
+    }
+  }
+
+  async function restoreFromText(): Promise<void> {
+    const rec = recovery.value;
+    const text = recoveryText.value;
+    if (!rec || recoveryBlocked()) return;
+    if (!text.trim()) {
+      recoveryError.value = 'Enter or load project text before restoring.';
+      return;
+    }
+    recoveryEpoch++;
+    recoveryBusy.value = true;
+    recoveryError.value = '';
+    const draftAtRequest = canonicalJson(draft.value);
+    recoveryDraftAtRequest = draftAtRequest;
+    try {
+      const r = await callTool('workspace_recover', {
+        revision: rec.revision,
+        source: { kind: 'project', format: recoveryFormat.value, text },
+      });
+      await finishRecovery(r.preserved_path, draftAtRequest);
+    } catch (e) {
+      recoveryError.value = errorMessage(e);
+    } finally {
+      recoveryBusy.value = false;
+    }
+  }
+
+  async function createNewSystem(): Promise<void> {
+    const rec = recovery.value;
+    if (!rec || recoveryBlocked()) return;
+    recoveryEpoch++;
+    recoveryBusy.value = true;
+    recoveryError.value = '';
+    const draftAtRequest = canonicalJson(draft.value);
+    recoveryDraftAtRequest = draftAtRequest;
+    try {
+      const r = await callTool('workspace_recover', { revision: rec.revision, source: { kind: 'default' } });
+      await finishRecovery(r.preserved_path, draftAtRequest);
+    } catch (e) {
+      recoveryError.value = errorMessage(e);
+    } finally {
+      recoveryBusy.value = false;
+    }
+  }
+
+  function dismissRecoveryNotice(): void {
+    recoveryNotice.value = null;
+  }
+
+  async function poll(): Promise<void> {
+    if (polling || busy.value || recoveryBusy.value) return;
+    polling = true;
+    const epoch = recoveryEpoch;
+    let statusOk = false;
+    try {
+      const status = await callTool('workspace_status', {});
+      if (epoch !== recoveryEpoch) return; // a recovery action started meanwhile; its reply owns the state
+      statusOk = true;
       online.value = true;
       offlineReason.value = '';
+      if (status.state === 'recovery') {
+        recoveryNotice.value = null; // a stale notice belongs to the previous ready period
+        if (recoveryPending.value) {
+          // A new invalid file superseded the confirmed write before the view refreshed.
+          recoveryPending.value = false;
+          refreshPending.value = false;
+        }
+        applyRecoveryStatus(status);
+        return; // every optical tool is blocked; nothing else may be read
+      }
+      const snapshot = await callTool('system_get', {});
+      if (epoch !== recoveryEpoch) return;
+      if (recovery.value) {
+        // The workspace answered ready while recovery was still shown (confirmed or found fixed).
+        settleRecoverySnapshot(snapshot, recoveryDraftAtRequest ?? canonicalJson(draft.value));
+        return;
+      }
       void loadMaterials();
       // After a confirmed commit whose refresh failed, adopt even at an unchanged revision number.
       const changed = snapshot.revision !== revision.value || refreshPending.value;
-      const draftUnchanged = refreshPending.value && canonicalJson(draft.value) === pendingDraftText;
+      const draftUnchanged =
+        refreshPending.value && !recoveryKeepsDraft && pendingDraftText !== null &&
+        canonicalJson(draft.value) === pendingDraftText;
       if (!system.value || (changed && (!dirty.value || draftUnchanged))) {
         adopt(snapshot);
       } else if (changed) {
         stale.value = true; // an agent edited the system (or our write completed) while a local draft is pending
       }
     } catch (e) {
-      online.value = false;
-      offlineReason.value = errorMessage(e);
+      if (epoch !== recoveryEpoch) return; // a recovery action started meanwhile; its reply owns the state
+      if (statusOk && (recovery.value || recoveryPending.value)) {
+        // The status read succeeded; only the snapshot read failed. Stay connected and keep the pending view.
+      } else {
+        online.value = false;
+        offlineReason.value = errorMessage(e);
+      }
     } finally {
       polling = false;
     }
@@ -158,7 +350,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     paraxial.value = null;
     if (layout.value.revision !== captured) layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
     setError('core', '');
-    if (!online.value || !system.value) {
+    if (!online.value || !system.value || recovery.value) {
       layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
       return;
     }
@@ -192,7 +384,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     spotRun.value = null;
     spotPending.value = false;
     setError('spot', '');
-    if (!online.value || !system.value) return;
+    if (!online.value || !system.value || recovery.value) return;
     const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, color: selectedColor(system.value), mapping: system.value.pupil_mapping };
     spotPending.value = true;
     try {
@@ -230,7 +422,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     mtfRun.value = null;
     mtfPending.value = false;
     setError('mtf', '');
-    if (!online.value || !system.value || !wantMtf.value) return;
+    if (!online.value || !system.value || !wantMtf.value || recovery.value) return;
     const run: RunInfo = { revision: revision.value, field: fieldLabel(system.value, fieldIndex.value), wavelength: wavelength.value, color: selectedColor(system.value), mapping: system.value.pupil_mapping };
     mtfPending.value = true;
     try {
@@ -295,12 +487,12 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
   }
 
   async function save(next: OpticalSystem | null = draft.value): Promise<void> {
-    if (!next || busy.value || refreshPending.value || stale.value) return;
+    if (!next || busy.value || refreshPending.value || stale.value || recovery.value) return;
     await commit(() => callTool('system_set', { system: clone(next), revision: revision.value }));
   }
 
   async function autofocus(): Promise<void> {
-    if (busy.value || dirty.value || stale.value || refreshPending.value) return;
+    if (busy.value || dirty.value || stale.value || refreshPending.value || recovery.value) return;
     // The engine rejects the call if this revision is no longer current, so a stale view cannot apply it.
     await commit(() => callTool('autofocus', { wavelength: wavelength.value, revision: revision.value }));
   }
@@ -311,7 +503,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
    * Resolves true once the operation is confirmed, even if the refresh afterwards failed.
    */
   async function mutate(op: (revision: number) => Promise<unknown>): Promise<boolean> {
-    if (busy.value) return false;
+    if (busy.value || recovery.value) return false;
     if (refreshPending.value) {
       actionError.value = 'The last change was saved, but the view has not refreshed yet. Wait for it to reconnect before running another operation.';
       return false;
@@ -342,13 +534,13 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
   }
 
   const hasSystem = computed(() => system.value !== null);
-  watch([revision, fieldIndex, wavelengthIndex, hasSystem], () => void analyze());
-  watch([revision, fieldIndex, wavelengthIndex, hasSystem, spotSampling, online], () => void analyzeSpot());
+  watch([revision, fieldIndex, wavelengthIndex, hasSystem, recovery], () => void analyze());
+  watch([revision, fieldIndex, wavelengthIndex, hasSystem, spotSampling, online, recovery], () => void analyzeSpot());
   // The wavelength only matters in monochromatic mode, so weighted results are not discarded when it changes.
   watch(
     [
       revision, fieldIndex, () => (mtfSpectralMode.value === 'mono' ? wavelengthIndex.value : -1), hasSystem,
-      mtfAxis, mtfMaxFrequency, mtfSampling, mtfSpectralMode, wantMtf, online,
+      mtfAxis, mtfMaxFrequency, mtfSampling, mtfSpectralMode, wantMtf, online, recovery,
     ],
     () => void analyzeMtf(),
   );
@@ -371,6 +563,8 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     actionError, analysisError, materials, fieldIndex, wavelengthIndex, wavelength, layoutWavelength,
     mtfAxis, mtfMaxFrequency, spotSampling, mtfSampling, mtfSpectralMode, paraxial, layout, spot, mtf,
     spotRun, mtfRun, spotPending, mtfPending,
+    recovery, recoveryText, recoveryFormat, recoveryBusy, recoveryPending, recoveryError, recoveryNotice,
     save, autofocus, revert, discardAndReload, mutate,
+    retryFromDisk, restoreFromText, createNewSystem, dismissRecoveryNotice,
   };
 }

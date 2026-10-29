@@ -14,6 +14,7 @@ const workspace = resolve(target, 'ui-workspace');
 const executable = resolve(target, 'debug/hissabeth');
 await mkdir(workspace, { recursive: true });
 for (const filename of ['endpoint.json', 'system.json']) await unlink(resolve(workspace, filename)).catch(() => {});
+if(process.argv.includes('--workspace-recovery')) await writeFile(resolve(workspace,'system.json'),'{ invalid startup project\n');
 let engine;
 async function startEngine() {
   engine = spawn(executable, ['--engine'], { env: { ...process.env, HISSABETH_DATA_DIR: workspace }, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -48,6 +49,14 @@ async function optical(name, args = {}) {
     });
     socket.on('connect', () => socket.write(JSON.stringify({ token: endpoint.token, request: { jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name, arguments: args } } }) + '\n'));
   });
+}
+// Normal-flow fixtures start with a chosen new system when a previous recovery test left preserved files.
+if(!process.argv.includes('--workspace-recovery')) {
+  const status=await optical('workspace_status');
+  if(status.state==='recovery') {
+    assert.equal(status.source_text,null);assert.equal(status.source_bytes,0);
+    await optical('workspace_recover',{revision:status.revision,source:{kind:'default'}});
+  }
 }
 const server = createServer(async (req, res) => {
   try {
@@ -147,8 +156,124 @@ try {
   });
   await page.addInitScript(() => { globalThis.isTauri = true; window.__TAURI_INTERNALS__ = { invoke: (command, args) => window.__opticalInvoke(command, args) }; });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await expect(page.getByText('Engine connected', { exact: true })).toBeVisible();
-  await expect(page.getByRole('img').first()).toBeVisible();
+  if(process.argv.includes('--workspace-recovery')) {
+    await expect(page.locator('.header-actions').getByRole('status')).toContainText(/Workspace recovery/);
+    await expect(page.locator('.header-actions .status-dot.offline')).toHaveCount(0);
+  } else await expect(page.getByText('Engine connected', { exact: true })).toBeVisible();
+  if(!process.argv.includes('--workspace-recovery')) await expect(page.getByRole('img').first()).toBeVisible();
+  if (process.argv.includes('--workspace-stale-recovery')) {
+    const current=await optical('system_get');
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();
+    const editor=page.getByRole('textbox',{name:'Full prescription',exact:true});
+    const draft=JSON.parse(await editor.inputValue());draft.name='Kept stale recovery draft';
+    await editor.fill(JSON.stringify(draft));
+    const external=structuredClone(current.system);external.name='Saved externally';
+    await optical('system_set',{system:external,revision:current.revision});
+    const discard=page.getByRole('button',{name:'Discard draft and reload',exact:true});
+    await expect(discard).toBeVisible();
+    engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
+    await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
+    await writeFile(resolve(workspace,'system.json'),'{ invalid with a stale draft');
+    await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});await startEngine();
+    const panel=page.getByRole('region',{name:'Workspace recovery',exact:true});
+    await expect(panel).toBeVisible();await expect(discard).toHaveCount(0);
+    await expect(editor).toHaveCount(0);
+    await page.screenshot({path:resolve(target,'workspace-stale-recovery.png'),fullPage:true});
+    external.name='Restored stale project';
+    await page.getByRole('textbox',{name:'Recovery project text',exact:true}).fill(JSON.stringify(external));
+    await page.getByRole('button',{name:'Restore from text',exact:true}).click();
+    await expect(panel).toHaveCount(0);await expect(discard).toBeVisible();
+    assert.deepEqual(JSON.parse(await editor.inputValue()),draft);
+    await discard.click();
+    await expect.poll(async()=>JSON.parse(await editor.inputValue()).name).toBe(external.name);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: stale-before-recovery draft retained; inactive discard/reload action hidden during recovery and restored with working reload after ready');
+  } else
+  if (process.argv.includes('--workspace-recovery')) {
+    const panel=page.getByRole('region',{name:'Workspace recovery',exact:true});
+    const text=page.getByRole('textbox',{name:'Recovery project text',exact:true});
+    const restore=page.getByRole('button',{name:'Restore from text',exact:true});
+    const retry=page.getByRole('button',{name:'Retry from disk',exact:true});
+    const create=page.getByRole('button',{name:'Create new system',exact:true});
+    await expect(panel).toBeVisible();
+    await expect(text).toHaveValue('{ invalid startup project\n');
+    assert.equal(uiRequests.filter(r=>['layout','spot_diagram','paraxial','system_set'].includes(r.name)).length,0);
+    await text.fill('{}');await restore.click();
+    await expect(page.getByRole('alert').filter({hasText:/missing field/i}).first()).toBeVisible();
+    await expect(text).toHaveValue('{}');
+    assert.equal(await readFile(resolve(workspace,'system.json'),'utf8'),'{ invalid startup project\n');
+    await page.screenshot({path:resolve(target,'workspace-recovery-startup.png'),fullPage:true});
+    analysisGate={stage:'after',name:'workspace_status'};
+    await expect.poll(()=>gatedAnalysis?.name).toBe('workspace_status');
+    await create.click();await expect(panel).toHaveCount(0);
+    resumeAnalysis();await expect(panel).toHaveCount(0);
+    await expect(page.getByRole('img').first()).toBeVisible();
+    const first=lastUiResult('workspace_recover');
+    assert.equal(await readFile(first.preserved_path,'utf8'),'{ invalid startup project\n');
+    let saved=await optical('system_get');
+    const initialSystem=structuredClone(saved.system);
+    const native=structuredClone(initialSystem);native.name='Recovered from repair text';
+    const exchange=structuredClone(saved.system);
+    Object.assign(exchange,{pupil_mapping:'reference_entrance_pupil',object_distance:1e10,temperature:25});
+    const exchanged=await optical('system_set',{system:exchange,revision:saved.revision});
+    await expect.poll(()=>lastUiResult('system_get')?.revision).toBe(exchanged.revision);
+    const geopter=(await optical('project_export',{format:'geopter'})).text;
+    async function restartWith(bytes) {
+      engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
+      await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
+      await writeFile(resolve(workspace,'system.json'),bytes);
+      await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});await startEngine();
+      await expect(panel).toBeVisible();
+      await expect(page.locator('.header-actions .status-dot.offline')).toHaveCount(0);
+    }
+    await page.getByRole('tab',{name:'Prescription JSON',exact:true}).click();
+    const editor=page.getByRole('textbox',{name:'Full prescription',exact:true});
+    const draft=JSON.parse(await editor.inputValue());draft.name='Preserved live draft';
+    await editor.fill(JSON.stringify(draft));
+    await restartWith('{ invalid after restart');
+    await text.fill(JSON.stringify(native));
+    failRefreshAfter='workspace_recover';await restore.click();
+    await expect.poll(()=>holdUiReads).toBe(true);await expect(restore).toBeDisabled();
+    resumeUiReads();await expect(panel).toHaveCount(0);
+    await expect(page.getByText(/The saved system changed while your draft was open/)).toBeVisible();
+    assert.deepEqual(JSON.parse(await editor.inputValue()),draft);
+    assert.equal((await optical('system_get')).system.name,native.name);
+    await page.getByRole('button',{name:'Discard draft and reload',exact:true}).click();
+    await expect.poll(async()=>JSON.parse(await editor.inputValue()).name).toBe(native.name);
+    await restartWith('{ external source');
+    await text.fill('{ my typed repair');
+    await writeFile(resolve(workspace,'system.json'),'{ another external source');
+    await retry.click();
+    await expect.poll(()=>lastUiResult('workspace_retry')?.source_text).toBe('{ another external source');
+    await expect(text).toHaveValue('{ my typed repair');
+    await writeFile(resolve(workspace,'system.json'),JSON.stringify(native));
+    await retry.click();await expect(panel).toHaveCount(0);
+    await expect.poll(()=>lastUiResult('system_get')?.system.name).toBe(native.name);
+    await restartWith('{ refresh fault source');
+    await text.fill(JSON.stringify(native));
+    const count=uiRequests.filter(r=>r.name==='workspace_recover').length;
+    failRefreshAfter='workspace_recover';
+    await restore.click();
+    await expect.poll(()=>holdUiReads).toBe(true);
+    await expect(restore).toBeDisabled();await expect(retry).toBeDisabled();await expect(create).toBeDisabled();
+    assert.equal(uiRequests.filter(r=>r.name==='workspace_recover').length,count+1);
+    const confirmed=lastUiResult('workspace_recover');
+    assert.equal(await readFile(confirmed.preserved_path,'utf8'),'{ refresh fault source');
+    await page.screenshot({path:resolve(target,'workspace-recovery-refresh.png'),fullPage:true});
+    resumeUiReads();await expect(panel).toHaveCount(0);
+    assert.equal(uiRequests.filter(r=>r.name==='workspace_recover').length,count+1);
+    await restartWith(Buffer.from([255,254,0,123]));
+    await page.getByRole('combobox',{name:'Recovery format',exact:true}).selectOption('geopter');
+    await panel.locator('input[type=file]').setInputFiles({name:'restored.json',mimeType:'application/json',buffer:Buffer.from(geopter)});
+    await expect(text).toHaveValue(geopter);
+    assert.equal(uiRequests.filter(r=>r.name==='workspace_recover').length,count+1);
+    await restore.click();await expect(panel).toHaveCount(0);
+    assert.equal((await optical('system_get')).system.name,initialSystem.name);
+    const binary=lastUiResult('workspace_recover');
+    assert.deepEqual(await readFile(binary.preserved_path),Buffer.from([255,254,0,123]));
+    assert.deepEqual(errors,[]);
+    console.log('PASS: connected recovery UI; raw repair and file import, explicit new system, byte preservation, dirty draft across restart, external retry without form loss, confirmed-write refresh fault without duplicates, binary source and Geopter restore; no browser exceptions');
+  } else
   if (process.argv.includes('--prescription-report')) {
     await page.getByRole('tab',{name:'Prescription report',exact:true}).click();
     const generate=page.getByRole('button',{name:'Generate report',exact:true});

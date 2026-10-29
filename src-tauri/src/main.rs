@@ -11,7 +11,7 @@ fn execute() -> Result<(), String> {
     } else if args.iter().any(|a| a == "--engine") {
         let dir = hissabeth_lib::service::data_dir();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let engine = hissabeth_lib::service::Engine::open(dir.join("system.json"))?;
+        let engine = hissabeth_lib::service::Workspace::open(dir.join("system.json"))?;
         hissabeth_lib::service::serve(std::sync::Arc::new(std::sync::Mutex::new(engine)))?;
         loop {
             std::thread::park()
