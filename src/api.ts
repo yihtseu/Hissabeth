@@ -12,6 +12,7 @@ import type {
   EncircledEnergy,
   GeometricMtf,
   ImportFormat,
+  InspectLaunch,
   Layout,
   LongitudinalAberration,
   MaterialSearchResult,
@@ -19,6 +20,7 @@ import type {
   OpdFan,
   OpticalSystem,
   Paraxial,
+  ParaxialTrace,
   PolychromaticSpot,
   PupilSampling,
   RayFan,
@@ -29,6 +31,7 @@ import type {
   Spherochromatism,
   SpotDiagram,
   SystemSnapshot,
+  TraceInspect,
   VignettingUpdateResult,
   Wavefront,
 } from './types';
@@ -63,6 +66,8 @@ interface ToolMap {
   project_export: { args: { format: ImportFormat }; result: { text: string } };
   paraxial: { args: WavelengthArgs; result: Paraxial };
   layout: { args: NoArgs; result: Layout };
+  paraxial_trace: { args: { wavelength: number; field_index: number }; result: ParaxialTrace };
+  trace_inspect: { args: { wavelength: number; launch: InspectLaunch }; result: TraceInspect };
   spot_diagram: { args: FieldArgs & { sampling: PupilSampling }; result: SpotDiagram };
   geometric_mtf: {
     args: {

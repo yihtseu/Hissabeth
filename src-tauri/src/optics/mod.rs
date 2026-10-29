@@ -2,6 +2,7 @@
 // Optical algorithms translated from Geopter, Copyright (C) 2021 Hiiragi.
 pub mod analysis;
 pub mod aperture;
+pub mod inspection;
 pub mod material;
 pub mod math;
 pub mod profile;
@@ -394,22 +395,29 @@ impl System {
         let mut n = self.paraxial_index_before(start, w)?;
         for i in start..end {
             let s = &self.surfaces[i];
-            let next = match s.interaction {
-                Interaction::Refract => n.signum() * self.material_index(&s.material, w)?,
-                Interaction::Reflect => -n,
-                Interaction::Dummy => n,
-            };
-            matrix.refract(if s.radius == 0. {
-                0.
-            } else {
-                (next - n) / s.radius
-            });
+            let (next, power) = self.paraxial_step(s, n, w)?;
+            matrix.refract(power);
             n = next;
             if i + 1 < end {
                 matrix.transfer(s.thickness, n)
             }
         }
         Ok((matrix, n))
+    }
+    fn paraxial_step(&self, surface: &Surface, n: f64, w: f64) -> Result<(f64, f64), String> {
+        let next = match surface.interaction {
+            Interaction::Refract => n.signum() * self.material_index(&surface.material, w)?,
+            Interaction::Reflect => -n,
+            Interaction::Dummy => n,
+        };
+        Ok((
+            next,
+            if surface.radius == 0. {
+                0.
+            } else {
+                (next - n) / surface.radius
+            },
+        ))
     }
     pub fn pupil_matrix(&self, w: f64) -> Result<Matrix, String> {
         if self.stop_index == 0 {
@@ -567,7 +575,7 @@ impl System {
             .0;
         Ok([x, y, -d + z])
     }
-    fn launch(&self, first: [f64; 2], field: &Field, w: f64) -> Result<(V3, V3, f64), String> {
+    fn launch(&self, first: [f64; 2], field: &Field, w: f64) -> Result<trace::Launch, String> {
         let radial = first[0].hypot(first[1]);
         let sag_at_vertex = sag(&self.surfaces[0], radial)?.0;
         let plane = sag_at_vertex.min(0.) - radial.clamp(1., 100.) * 2.;
@@ -589,7 +597,12 @@ impl System {
                 first[1] + z * direction[1] / direction[2],
                 z,
             ];
-            Ok((p, direction, distance * self.object_index(w)?))
+            Ok(trace::Launch {
+                point: p,
+                direction,
+                entrance_opl: distance * self.object_index(w)?,
+                object_point: Some(obj),
+            })
         } else {
             let v = unit([field.x.to_radians().tan(), field.y.to_radians().tan(), 1.])?;
             let p = [
@@ -597,7 +610,12 @@ impl System {
                 first[1] + plane * v[1] / v[2],
                 plane,
             ];
-            Ok((p, v, dot(p, v) * self.object_index(w)?))
+            Ok(trace::Launch {
+                point: p,
+                direction: v,
+                entrance_opl: dot(p, v) * self.object_index(w)?,
+                object_point: None,
+            })
         }
     }
     pub fn trace(&self, x: f64, y: f64, field: f64, w: f64) -> Result<Ray, String> {
