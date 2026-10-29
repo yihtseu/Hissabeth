@@ -7,6 +7,7 @@ pub fn blank() -> System {
     let mut stop = Surface::sphere(0., 0., "AIR", 1.);
     stop.clear_aperture = false;
     System {
+        bench: None,
         name: "Untitled system".into(),
         note: String::new(),
         surfaces: vec![stop],
@@ -248,6 +249,7 @@ pub fn import(text: &str) -> Result<System, String> {
         return Err("Geopter stop must be a physical surface".into());
     }
     let mut system = System {
+        bench: None,
         object_surface,
         image_surface,
         name: root["Title"]
@@ -284,6 +286,9 @@ pub fn import(text: &str) -> Result<System, String> {
     Ok(system)
 }
 pub fn export(s: &System) -> Result<Value, String> {
+    if s.bench.is_some() {
+        return Err("Geopter export cannot store the free-space bench; export native JSON".into());
+    }
     if s.surfaces
         .iter()
         .any(|surface| !surface.gap_solve.is_fixed())

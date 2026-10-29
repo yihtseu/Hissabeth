@@ -2,6 +2,7 @@
 // Optical algorithms translated from Geopter, Copyright (C) 2021 Hiiragi.
 pub mod analysis;
 pub mod aperture;
+pub mod bench;
 pub mod editing;
 pub mod focus;
 pub mod inspection;
@@ -60,6 +61,7 @@ impl Surface {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct System {
+    pub bench: Option<bench::Bench>,
     pub name: String,
     pub note: String,
     pub surfaces: Vec<Surface>,
@@ -83,6 +85,7 @@ pub struct System {
 impl Default for System {
     fn default() -> Self {
         Self {
+            bench: None,
             name: "BK7 singlet".into(),
             note: String::new(),
             surfaces: vec![
@@ -290,6 +293,9 @@ impl System {
         Ok(())
     }
     fn validate_parameters(&self) -> Result<(), String> {
+        if let Some(bench) = &self.bench {
+            bench.validate()?;
+        }
         if self.name.len() > 256
             || self.object_label.len() > 256
             || self.image_label.len() > 256

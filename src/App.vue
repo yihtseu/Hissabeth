@@ -49,6 +49,7 @@ import ImportExportPanel from './components/ImportExportPanel.vue';
 import JsonEditor from './components/JsonEditor.vue';
 import MaterialsPanel from './components/MaterialsPanel.vue';
 import LayoutView from './components/LayoutView.vue';
+import BenchView from './components/BenchView.vue';
 import MetricsBar from './components/MetricsBar.vue';
 import MtfView from './components/MtfView.vue';
 import PrescriptionReport from './components/PrescriptionReport.vue';
@@ -266,6 +267,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                 ><MenubarItem
                                     v-for="view in [
                                         'Layout',
+                                        'Laser bench',
                                         'Spot diagram',
                                         'MTF',
                                         'Analysis',
@@ -629,6 +631,20 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             :system="wb.system.value"
                                             :layout="wb.layout.value"
                                             :wavelength="wb.layoutWavelength.value"
+                                        />
+                                        <BenchView
+                                            v-if="tab === 'Laser bench'"
+                                            :model-value="wb.draft.value.bench"
+                                            :revision="wb.revision.value"
+                                            :online="wb.online.value"
+                                            :locked="
+                                                wb.busy.value ||
+                                                wb.stale.value ||
+                                                wb.refreshPending.value
+                                            "
+                                            :can-save="canSave"
+                                            @update:model-value="wb.draft.value.bench = $event"
+                                            @save="wb.save()"
                                         />
                                         <SpotView
                                             v-if="tab === 'Spot diagram'"
