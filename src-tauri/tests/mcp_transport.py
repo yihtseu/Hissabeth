@@ -110,6 +110,47 @@ def workspace_recovery():
         assert math.isfinite(tool("paraxial",dict(wavelength=587.5618))["efl"])
     print("PASS: real connected startup recovery; blocked optical writes, strict/stale schemas, byte-exact preservation, native/Geopter/new-system recovery, changed-disk rejection, invalid/valid external retry and same-relay restart")
 
+def project_lifecycle():
+    global engine
+    current=tool("system_get")
+    rich=json.loads(json.dumps(current["system"]))
+    rich["name"]="Saved before new";rich["note"]="Prior project notes"
+    rich["object_distance"]=200;rich["object_label"]="Previous object";rich["image_label"]="Previous image"
+    rich["surfaces"][0]["gap_solve"]=dict(kind="pickup",source=1,scale=.1,offset=0)
+    tool("system_set",dict(system=rich,revision=current["revision"]))
+    before=tool("system_get");saved=(DATA/"system.json").read_bytes()
+    for args in [{},dict(revision=before["revision"]+1),dict(revision=before["revision"],extra=1),dict(revision=1.5)]:
+        tool("project_new",args,error=True)
+    assert tool("system_get")==before and (DATA/"system.json").read_bytes()==saved
+    pending=DATA/"system.pending";pending.mkdir()
+    try: tool("project_new",dict(revision=before["revision"]),error=True)
+    finally: pending.rmdir()
+    assert tool("system_get")==before and (DATA/"system.json").read_bytes()==saved
+    created=tool("project_new",dict(revision=before["revision"]))
+    assert created["revision"]==before["revision"]+1
+    new=tool("system_get");s=new["system"]
+    assert s["name"]=="Untitled system" and s["note"]=="" and s["custom_glasses"]==[]
+    assert len(s["surfaces"])==1 and s["surfaces"][0]["gap_solve"]==dict(kind="fixed")
+    assert s["surfaces"][0]["radius"]==0 and s["surfaces"][0]["thickness"]==0 and not s["surfaces"][0]["clear_aperture"]
+    assert s["stop_index"]==0 and s["object_distance"] is None and s["object_material"]=="AIR"
+    assert s["object_label"]=="Object" and s["image_label"]=="Image"
+    assert len(s["fields"])==len(s["wavelengths"])==1 and s["wavelengths"][0]["value"]==587.5618
+    assert s["fields"][0]["vignetting"]==[0,0,0,0]
+    assert tool("capabilities")["scope"]["project_creation"]
+    tool("project_new",dict(revision=before["revision"]),error=True)
+    export=tool("project_export",dict(format="hissabeth"))
+    assert export["revision"]==new["revision"] and export["name"]==s["name"] and export["format"]=="hissabeth"
+    native=export["text"]
+    assert json.loads(native)==s
+    ray=tool("trace_ray",dict(x=3,y=4,field_index=0))
+    assert ray["points"][-1]==[3,4,0]
+    tool("autofocus",dict(revision=new["revision"]),error=True)
+    assert tool("system_get")==new
+    engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink(missing_ok=True);engine=start_engine()
+    assert tool("system_get")["system"]==s
+    print("PASS: real MCP new-project schemas/stale revisions, failed-write atomicity, clean blank specification, native export, unpowered tracing, rejected focus and same-relay restart")
+
+
 def surface_edit():
     global engine
     current=tool("system_get")
@@ -1086,6 +1127,9 @@ try:
     if setup_status["state"]=="recovery":
         assert setup_status["source_text"] is None and setup_status["source_bytes"]==0
         tool("workspace_recover",dict(revision=setup_status["revision"],source=dict(kind="default")))
+    if "--project-lifecycle" in sys.argv:
+        project_lifecycle()
+        raise SystemExit(0)
     if "--surface-edit" in sys.argv:
         surface_edit()
         raise SystemExit(0)

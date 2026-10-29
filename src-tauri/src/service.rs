@@ -375,6 +375,7 @@ impl Engine {
                 result["revision"] = committed["revision"].clone();
                 Ok(result)
             }
+            "project_new" => self.replace(project::blank(), expected()?),
             "project_import" => {
                 let text = args["text"].as_str().unwrap();
                 let next = match args["format"].as_str().unwrap() {
@@ -390,10 +391,12 @@ impl Engine {
                 } else {
                     serde_json::to_value(&self.system).map_err(|e| e.to_string())?
                 };
-                Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
+                Ok(
+                    json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?,"revision":self.revision,"name":self.system.name,"format":args["format"]}),
+                )
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -825,6 +828,12 @@ pub fn tools() -> Value {
         &["revision"],
     );
     add(
+        "project_new",
+        "Replace the saved project with a minimum blank prescription: one plane air stop, unclipped plane endpoints, infinity source, one on-axis field, d-line and a 10 mm entrance pupil. Clears prior project data. Requires the current revision; creation is atomic and resolves the new model before saving.",
+        json!({"revision":revision}),
+        &["revision"],
+    );
+    add(
         "project_import",
         "Import native or Geopter project text and atomically replace current prescription",
         json!({"format":enumeration(&["geopter","hissabeth"]),"text":string(),"revision":revision}),
@@ -1111,6 +1120,101 @@ pub fn relay() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_new_clears_project_data_saves_and_reloads() {
+        let mut e = engine("project-new");
+        let mut old = e.system.clone();
+        old.name = "Prior project".into();
+        old.note = "Prior notes".into();
+        old.object_distance = Some(200.);
+        old.object_material = "FUSED_SILICA".into();
+        old.object_label = "Prior object".into();
+        old.image_label = "Prior image".into();
+        old.object_surface.radius = 1000.;
+        old.image_surface.even = vec![1e-9];
+        old.stop_index = 1;
+        old.pupil.value = 6.;
+        old.surfaces[0].gap_solve = solve::GapSolve::Pickup {
+            source: 1,
+            scale: 0.1,
+            offset: 0.,
+        };
+        let mut glass = material::catalogs()[0].clone();
+        glass.catalog = "LOCAL".into();
+        glass.name = "PriorGlass".into();
+        old.custom_glasses = vec![glass];
+        e.call("system_set", json!({"system":old,"revision":e.revision}))
+            .unwrap();
+        let previous = e.call("system_get", json!({})).unwrap();
+        let bytes = std::fs::read(&e.path).unwrap();
+        for args in [
+            json!({}),
+            json!({"revision":e.revision+1}),
+            json!({"revision":e.revision,"extra":0}),
+            json!({"revision":1.5}),
+        ] {
+            assert!(e.call("project_new", args).is_err());
+        }
+        assert_eq!(e.call("system_get", json!({})).unwrap(), previous);
+        assert_eq!(std::fs::read(&e.path).unwrap(), bytes);
+        let revision = e
+            .call("project_new", json!({"revision":e.revision}))
+            .unwrap()["revision"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(revision, previous["revision"].as_u64().unwrap() + 1);
+        let mut expected = project::blank();
+        expected.update().unwrap();
+        assert_eq!(
+            serde_json::to_value(&e.system).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let snapshot = e.call("system_get", json!({})).unwrap();
+        let path = e.path.clone();
+        drop(e);
+        let mut reopened = Engine::open(path).unwrap();
+        assert_eq!(
+            reopened.call("system_get", json!({})).unwrap()["system"],
+            snapshot["system"]
+        );
+        assert!(
+            reopened.call("capabilities", json!({})).unwrap()["scope"]["project_creation"]
+                .as_bool()
+                .unwrap()
+        );
+    }
+    #[test]
+    fn project_new_failed_persistence_and_recovery_leave_source_unchanged() {
+        let mut e = engine("project-new-failure");
+        e.call(
+            "system_set",
+            json!({"system":e.system,"revision":e.revision}),
+        )
+        .unwrap();
+        let before = e.call("system_get", json!({})).unwrap();
+        let bytes = std::fs::read(&e.path).unwrap();
+        let pending = e.path.with_extension("pending");
+        std::fs::create_dir(&pending).unwrap();
+        assert!(
+            e.call("project_new", json!({"revision":e.revision}))
+                .is_err()
+        );
+        assert_eq!(e.call("system_get", json!({})).unwrap(), before);
+        assert_eq!(std::fs::read(&e.path).unwrap(), bytes);
+        std::fs::remove_dir(pending).unwrap();
+        let path = e.path.clone();
+        drop(e);
+        std::fs::write(&path, b"{ broken").unwrap();
+        let mut recovery = Workspace::open(path.clone()).unwrap();
+        let revision = recovery.call("workspace_status", json!({})).unwrap()["revision"].clone();
+        assert!(
+            recovery
+                .call("project_new", json!({"revision":revision}))
+                .unwrap_err()
+                .contains("recovery")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"{ broken");
+    }
     #[test]
     fn surface_edits_stage_drafts_and_apply_constraints_on_save() {
         let mut e = engine("surface-edit");

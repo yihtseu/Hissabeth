@@ -1,6 +1,47 @@
 // Geopter project serialization translated from OpticalSystem::SaveToFile/LoadFromFile.
 use super::*;
 use serde_json::{Map, Value, json};
+
+/// A fresh editable prescription with one air stop and separate plane endpoints.
+pub fn blank() -> System {
+    let mut stop = Surface::sphere(0., 0., "AIR", 1.);
+    stop.clear_aperture = false;
+    System {
+        name: "Untitled system".into(),
+        note: String::new(),
+        surfaces: vec![stop],
+        wavelengths: vec![Wavelength {
+            value: 587.5618,
+            weight: 1.,
+            color: [0., 0., 0., 1.],
+        }],
+        reference_wavelength: 0,
+        fields: vec![Field {
+            x: 0.,
+            y: 0.,
+            weight: 1.,
+            vignetting: [0.; 4],
+            color: [0., 0., 0., 1.],
+        }],
+        field_type: FieldType::Angle,
+        pupil: Pupil {
+            kind: PupilType::EntrancePupilDiameter,
+            value: 10.,
+        },
+        pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+        object_distance: None,
+        object_material: "AIR".into(),
+        object_label: "Object".into(),
+        image_label: "Image".into(),
+        object_surface: EndpointSurface::plane(),
+        image_surface: EndpointSurface::plane(),
+        stop_index: 0,
+        temperature: 25.,
+        pressure: 101325.,
+        custom_glasses: vec![],
+    }
+}
+
 fn number(v: &Value, label: &str) -> Result<f64, String> {
     v.as_f64()
         .filter(|n| n.is_finite())
@@ -317,6 +358,56 @@ pub fn export(s: &System) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_new_has_minimum_specs_and_unpowered_air_path() {
+        let mut s = blank();
+        assert_eq!(s.name, "Untitled system");
+        assert!(s.note.is_empty() && s.custom_glasses.is_empty());
+        assert_eq!(s.surfaces.len(), 1);
+        let stop = &s.surfaces[0];
+        assert_eq!((stop.radius, stop.thickness, stop.conic), (0., 0., 0.));
+        assert_eq!(stop.material, "AIR");
+        assert_eq!(stop.interaction, Interaction::Refract);
+        assert!(!stop.clear_aperture && stop.gap_solve.is_fixed());
+        assert!(stop.even.is_empty() && stop.odd.is_empty());
+        assert_eq!(s.stop_index, 0);
+        assert_eq!(s.object_distance, None);
+        assert!(s.object_surface.profile().is_plane() && s.image_surface.profile().is_plane());
+        assert!(!s.object_surface.clear_aperture && !s.image_surface.clear_aperture);
+        assert_eq!(s.object_material, "AIR");
+        assert_eq!(s.fields.len(), 1);
+        assert_eq!((s.fields[0].x, s.fields[0].y), (0., 0.));
+        assert_eq!(s.fields[0].vignetting, [0.; 4]);
+        assert_eq!(s.fields[0].color, [0., 0., 0., 1.]);
+        assert_eq!(s.wavelengths.len(), 1);
+        assert_eq!(s.reference(), 587.5618);
+        assert_eq!(s.reference_wavelength, 0);
+        assert_eq!(s.wavelengths[0].weight, 1.);
+        assert_eq!(s.pupil.kind, PupilType::EntrancePupilDiameter);
+        assert_eq!(s.pupil.value, 10.);
+        assert_eq!(s.pupil_mapping, PupilMapping::ReferenceEntrancePupil);
+        assert_eq!((s.temperature, s.pressure), (25., 101325.));
+        s.update().unwrap();
+        s.validate().unwrap();
+        assert_eq!(s.surfaces[0].semi_diameter, 5.);
+        let encoded = serde_json::to_vec(&s).unwrap();
+        let mut loaded: System = serde_json::from_slice(&encoded).unwrap();
+        loaded.update().unwrap();
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::to_value(loaded).unwrap()
+        );
+        for mapping in [PupilMapping::ReferenceEntrancePupil, PupilMapping::RealStop] {
+            s.pupil_mapping = mapping;
+            for [x, y] in [[0., 0.], [3., 4.], [-5., 0.]] {
+                let ray = s.trace(x, y, 0., s.reference()).unwrap();
+                assert_eq!(ray.image(), [x, y, 0.]);
+                assert_eq!(ray.direction, [0., 0., 1.]);
+                assert!((ray.opl + ray.entrance_opl).abs() < 1e-12);
+            }
+        }
+        assert!(s.paraxial(s.reference()).unwrap_err().contains("Afocal"));
+    }
     #[test]
     fn geopter_export_rejects_unstored_builtin_dispersion_for_each_medium() {
         let mut s = System::default();
