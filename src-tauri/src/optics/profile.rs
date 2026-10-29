@@ -123,6 +123,61 @@ impl Profile<'_> {
             Err("Nonfinite surface sag".into())
         }
     }
+    pub(super) fn normal_variation(self, point: V3, variation: V3) -> Result<V3, String> {
+        let r = point[0].hypot(point[1]);
+        let mut polynomial = 0.;
+        let mut first = 0.;
+        let mut second = 0.;
+        for (power, a) in self
+            .even
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (4 + 2 * i as i32, *a))
+            .chain(self.odd.iter().enumerate().map(|(i, a)| (3 + i as i32, *a)))
+        {
+            polynomial += a * r.powi(power);
+            first += a * power as f64 * r.powi(power - 1);
+            second += a * (power * (power - 1)) as f64 * r.powi(power - 2);
+        }
+        let radial = if r > 0. {
+            [point[0] / r, point[1] / r]
+        } else {
+            [0., 0.]
+        };
+        let gradient = radial.map(|v| first * v);
+        let transverse = if r > 0. { first / r } else { 0. };
+        let radial_change = radial[0] * variation[0] + radial[1] * variation[1];
+        let hessian_product = [0, 1].map(|axis| {
+            transverse * variation[axis] + (second - transverse) * radial[axis] * radial_change
+        });
+        let c = if self.radius == 0. {
+            0.
+        } else {
+            1. / self.radius
+        };
+        let a = 1. - (1. + self.conic) * c * (point[2] - polynomial);
+        let da = -(1. + self.conic)
+            * c
+            * (variation[2] - gradient[0] * variation[0] - gradient[1] * variation[1]);
+        // The implicit conic with z replaced by z-P(r) stays regular at a vertical rim.
+        let g = [
+            -c * point[0] - a * gradient[0],
+            -c * point[1] - a * gradient[1],
+            a,
+        ];
+        let dg = [
+            -c * variation[0] - da * gradient[0] - a * hessian_product[0],
+            -c * variation[1] - da * gradient[1] - a * hessian_product[1],
+            da,
+        ];
+        let normal = unit(g)?;
+        let dn = scale(sub(dg, scale(normal, dot(normal, dg))), 1. / norm(g));
+        if dn.iter().all(|v| v.is_finite()) {
+            Ok(dn)
+        } else {
+            Err("Nonfinite surface-normal derivative".into())
+        }
+    }
     fn conic_roots(self, p: V3, v: V3) -> Vec<f64> {
         let curvature = if self.radius == 0. {
             0.

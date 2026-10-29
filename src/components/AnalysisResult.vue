@@ -4,6 +4,7 @@ import { fmt, niceTicks, type ChartSeries } from '../chart';
 import { rgbCss } from '../color';
 import { describeSampling, describeSpectrum, percent } from '../sampling';
 import type { AnalysisOutcome, RGBA } from '../types';
+import FieldCurvaturePlot from './FieldCurvaturePlot.vue';
 import HeatMap from './HeatMap.vue';
 import LineChart from './LineChart.vue';
 import SpectralLedger, { type LedgerRow } from './SpectralLedger.vue';
@@ -84,6 +85,41 @@ const sphero = computed(() => {
   const invalid = [...new Set(r.data.curves.flatMap((c) => c.points.filter((p) => p.focus === null || p.error !== null).map((p) => p.pupil)))];
   return { series, invalid, label };
 });
+
+// ---- field curvature -----------------------------------------------------------------------
+const FAILURE_ROW_CAP = 200;
+interface CurvatureFailure {
+  wavelengthIndex: number; wavelength: number; field: [number, number]; radius: number;
+  branch: string; stage: string; where: string; message: string; point: string;
+}
+const curvature = computed(() => {
+  const r = o.value;
+  if (r.kind !== 'field_curvature') return null;
+  const rows: CurvatureFailure[] = [];
+  const stages: Record<string, number> = { chief: 0, bundle: 0, focus: 0 };
+  let valid = 0, total = 0;
+  for (const c of r.data.curves) {
+    for (const p of c.points) {
+      for (const branch of ['sagittal', 'tangential'] as const) {
+        total++;
+        const v = p[branch];
+        if (v.shift !== null) valid++;
+        const e = v.error;
+        if (!e) continue;
+        stages[e.stage] = (stages[e.stage] ?? 0) + 1;
+        const where = e.endpoint === 'object' ? 'Object' : e.endpoint === 'image' ? 'Image'
+          : e.surface !== null ? `Surface ${e.surface + 1}` : e.stage === 'focus' ? 'Focus' : e.stage === 'chief' ? 'Chief ray' : 'Bundle';
+        rows.push({
+          wavelengthIndex: c.wavelength_index, wavelength: c.wavelength, field: p.field, radius: p.radius,
+          branch, stage: e.stage, where, message: `${e.kind}: ${e.message}`,
+          point: e.point ? `(${e.point.map((q) => fmt(q, 5)).join(', ')})` : '—',
+        });
+      }
+    }
+  }
+  return { rows, stages, valid, total };
+});
+const showFailures = ref(false);
 
 // ---- astigmatism ------------------------------------------------------------
 const astig = computed(() => {
@@ -225,6 +261,41 @@ const raw = computed(() =>
         </tbody>
       </table>
       <p class="note">Each curve is its marginal-ray focus minus the single reference focus, so chromatic focus differences between wavelengths are preserved. Every stored wavelength is shown; this is a diagnostic, not a weighted spectrum.</p>
+    </template>
+
+    <!-- field curvature -->
+    <template v-else-if="curvature && o.kind === 'field_curvature'">
+      <FieldCurvaturePlot :data="o.data" />
+      <dl class="kv">
+        <div><dt>Sweep end ({{ o.data.field_units }})</dt><dd>({{ fmt(o.data.field_end[0], 5) }}, {{ fmt(o.data.field_end[1], 5) }})</dd></div>
+        <div><dt>Largest field</dt><dd>{{ fmt(o.data.max_field, 5) }} {{ o.data.field_units }}</dd></div>
+        <div><dt>Samples</dt><dd>{{ o.data.samples }}</dd></div>
+        <div><dt>Image vertex z</dt><dd>{{ fmt(o.data.image_vertex, 6) }} mm</dd></div>
+        <div><dt>Wavelength curves</dt><dd>{{ o.data.curves.length }}</dd></div>
+        <div><dt>Valid focus values</dt><dd>{{ curvature.valid }} of {{ curvature.total }}</dd></div>
+      </dl>
+      <p class="note">{{ o.data.model }}</p>
+      <details class="data-table wide" :open="curvature.rows.length > 0 && curvature.valid === 0" @toggle="showFailures = ($event.target as HTMLDetailsElement).open">
+        <summary>Field curvature failures ({{ curvature.rows.length }}: {{ curvature.stages.chief }} chief ray, {{ curvature.stages.bundle }} bundle, {{ curvature.stages.focus }} focus)</summary>
+        <p v-if="curvature.rows.length === 0" class="note">No failures.</p>
+        <template v-else-if="showFailures || (curvature.valid === 0)">
+          <p v-if="curvature.rows.length > FAILURE_ROW_CAP" class="note">Showing the first {{ FAILURE_ROW_CAP }} of {{ curvature.rows.length }} failures; the raw response lists all of them.</p>
+          <div class="table-scroll" role="region" aria-label="Field curvature failures" tabindex="0">
+            <table class="wide-table">
+              <caption>Field curvature failures</caption>
+              <thead><tr><th scope="col">Wavelength</th><th scope="col">Field ({{ o.data.field_units }})</th><th scope="col">Radius</th><th scope="col">Branch</th><th scope="col">Stage</th><th scope="col">Where</th><th scope="col">Message</th><th scope="col">Attempted point (mm)</th></tr></thead>
+              <tbody>
+                <tr v-for="(f, i) in curvature.rows.slice(0, FAILURE_ROW_CAP)" :key="i">
+                  <td>{{ f.wavelengthIndex + 1 }}: {{ f.wavelength }} nm</td>
+                  <td>({{ fmt(f.field[0], 4) }}, {{ fmt(f.field[1], 4) }})</td>
+                  <td>{{ fmt(f.radius, 4) }}</td>
+                  <td>{{ f.branch }}</td><td>{{ f.stage }}</td><td>{{ f.where }}</td><td>{{ f.message }}</td><td>{{ f.point }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+      </details>
     </template>
 
     <!-- astigmatism -->

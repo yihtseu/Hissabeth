@@ -3,6 +3,7 @@
 #include "system/optical_system.h"
 #include "sequential/sequential_trace.h"
 #include "analysis/geometrical_mtf.h"
+#include "analysis/astigmatism.h"
 #include "nlohmann/json.hpp"
 #include <iostream>
 #include <sstream>
@@ -10,8 +11,9 @@ using namespace geopter;
 int main(int argc,char** argv){
  if(argc<2)return 2;
  const bool geometric = std::string(argv[1])=="--geometric";
+ const bool curvature = std::string(argv[1])=="--curvature";
  const bool rays = std::string(argv[1])=="--rays";
- const int prescription = (geometric || rays) ? 2 : 1;
+ const int prescription = (geometric || rays || curvature) ? 2 : 1;
  if(argc<=prescription)return 2;
  std::ostringstream chatter;auto output=std::cout.rdbuf(chatter.rdbuf());
  OpticalSystem system;
@@ -29,6 +31,26 @@ int main(int argc,char** argv){
     for(int i=0;i<ray->NumberOfSegments();i++){auto a=ray->GetSegmentAt(i)->IntersectPt();points.push_back({a[0],a[1],a[2]});}
     result.push_back({{"wavelength",w},{"pupil",{p[0],p[1]}},{"status",ray->Status()},{"points",points}});
    }
+  }
+  std::cout.rdbuf(output);std::cout<<result.dump()<<std::endl;return 0;
+ }
+ if(curvature){
+  Astigmatism analyzer(&system);const auto plot=analyzer.plot(17);
+  nlohmann::json result;result["samples"]=17;result["curves"]=nlohmann::json::array();
+  for(int i=0;i<plot->NumberOfGraphs();++i){const auto graph=plot->GetGraph(i);
+   result["curves"].push_back({{"name",graph->Name()},{"shifts",graph->XData()},{"fields",graph->YData()}});
+  }
+  SequentialTrace trace(&system);trace.SetApertureCheck(true);trace.SetApplyVig(true);
+  Field field;field.SetY(system.GetOpticalSpec()->GetFieldSpec()->MaxField()*2./16.);
+  Eigen::Vector2d aim({0.,0.});Eigen::Vector3d object;
+  trace.AimChiefRay(aim,object,&field,system.GetOpticalSpec()->GetWavelengthSpec()->ReferenceWavelength());field.SetAimPt(aim);
+  auto ray=trace.CreatePupilRay(Eigen::Vector2d({0.,0.}),&field,system.GetOpticalSpec()->GetWavelengthSpec()->GetWavelength(0)->Value());
+  result["diagnostic"]=nlohmann::json::array();
+  for(int i=1;i<ray->NumberOfSegments()-1;i++){auto segment=ray->GetSegmentAt(i);auto previous=ray->GetSegmentAt(i-1);
+   double ci=cos(segment->AngleOfIncidence()),si=sin(segment->AngleOfIncidence()),cu=previous->N(),su=sqrt(1.-cu*cu);
+   result["diagnostic"].push_back({{"surface",i-1},{"y",segment->Y()},{"normal_y",segment->SurfaceNormal()[1]},
+    {"incoming_y",previous->M()},{"incoming_z",cu},{"incidence",segment->AngleOfIncidence()},
+    {"asphere_sagittal_curvature",(si*cu-ci*su)/segment->Y()}});
   }
   std::cout.rdbuf(output);std::cout<<result.dump()<<std::endl;return 0;
  }

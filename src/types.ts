@@ -651,12 +651,63 @@ export interface Spherochromatism {
   units: 'mm';
 }
 
+/** Why one focus value is missing. `surface` is zero-based; endpoint names replace it for object or image failures. */
+export interface FocusFailure {
+  stage: 'chief' | 'bundle' | 'focus';
+  kind: string;
+  surface: number | null;
+  endpoint: 'object' | 'image' | null;
+  point: Point3 | null;
+  message: string;
+}
+
+/** Global z of the focus and its shift from the stored image vertex; both null when the value failed. */
+export interface FocusValue {
+  focus_z: number | null;
+  shift: number | null;
+  error: FocusFailure | null;
+}
+
+export interface FieldCurvaturePoint {
+  /** Position along the sweep, 0 at the axis and 1 at `field_end`. */
+  fraction: number;
+  field: [number, number];
+  radius: number;
+  chief_image: Point3 | null;
+  frame: FieldFrame;
+  sagittal: FocusValue;
+  tangential: FocusValue;
+}
+
+export interface FieldCurvatureCurve {
+  wavelength_index: number;
+  wavelength: number;
+  weight: number;
+  color: RGBA;
+  points: FieldCurvaturePoint[];
+}
+
+/** Radial sweep of sagittal and tangential focus for every stored wavelength, zero weights and duplicates included. */
+export interface FieldCurvature {
+  revision: number;
+  field_end: [number, number];
+  max_field: number;
+  samples: number;
+  field_type: 'angle' | 'object_height' | 'image_height';
+  field_units: 'degrees' | 'mm';
+  image_vertex: number;
+  curves: FieldCurvatureCurve[];
+  units: 'mm';
+  model: string;
+}
+
 export interface AnalysisResults {
   ray_fan: RayFan;
   opd_fan: OpdFan;
   chromatic_focus: ChromaticFocus;
   longitudinal_aberration: LongitudinalAberration;
   spherochromatism: Spherochromatism;
+  field_curvature: FieldCurvature;
   astigmatism: Astigmatism;
   distortion: Distortion;
   wavefront: Wavefront;

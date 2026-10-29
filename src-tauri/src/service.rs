@@ -1,5 +1,5 @@
 use crate::optics::{
-    self, Field, PupilSampling, Spectrum, System, analysis, aperture, inspection, material,
+    self, Field, PupilSampling, Spectrum, System, analysis, aperture, focus, inspection, material,
     project, solve,
 };
 use serde_json::{Value, json};
@@ -250,6 +250,13 @@ impl Engine {
                 )
             }
             "astigmatism" => analysis::astigmatism(&self.system, &field, w),
+            "field_curvature" => focus::field_curvature(
+                &self.system,
+                args.get("field_end")
+                    .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+                    .transpose()?,
+                samples,
+            ),
             "distortion" => analysis::distortion(&self.system, &field, w),
             "wavefront" => Ok(analysis::wavefront(&self.system, &field, w, grid)?.json()),
             "diffraction_psf" => analysis::diffraction_psf(
@@ -341,7 +348,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -360,6 +367,7 @@ impl Engine {
             "longitudinal_aberration",
             "spherochromatism",
             "astigmatism",
+            "field_curvature",
             "distortion",
             "wavefront",
             "diffraction_psf",
@@ -570,6 +578,12 @@ pub fn tools() -> Value {
         "Per-vertex linearized axial and stored-field chief ray tables in global x/y; signed reduced angles include centered reflections. No aperture clipping. The image row uses its vertex plane.",
         json!({"wavelength":wave,"field_index":integer(0,63)}),
         &["wavelength", "field_index"],
+    );
+    add(
+        "field_curvature",
+        "Continuous radial field sweep of analytic sagittal/tangential chief-ray foci for every stored wavelength, including zero weights and duplicates. Default endpoint is +Y at the maximum stored field radius; optional field_end selects a 2D slice. Shifts reference the stored image vertex; retain per-branch failures.",
+        json!({"field_end":pair,"samples":integer(2,257)}),
+        &["samples"],
     );
     let common = json!({"wavelength":wave,"field_index":integer(0,63),"field":num(-1e9,1e9),"field_x":num(-1e9,1e9)});
     for (name, description) in [

@@ -94,57 +94,29 @@ pub fn longitudinal(s: &System, w: f64, samples: usize) -> Result<Value, String>
     Ok(json!({"wavelength":w,"paraxial_focus":paraxial,"points":points,"units":"mm"}))
 }
 pub fn astigmatism(s: &System, f: &Field, w: f64) -> Result<Value, String> {
-    let epsilon = s.pupil_radius(w)? * 1e-4;
-    let chief = s.trace_field(0., 0., f, w)?;
-    let cp = chief.last().point;
-    let frame = s.field_frame(f);
+    let pair = super::focus::chief_foci(s, f, w);
+    let sagittal = pair
+        .sagittal
+        .focus_z
+        .ok_or_else(|| pair.sagittal.error.as_ref().unwrap().message.clone())?;
+    let tangential = pair
+        .tangential
+        .focus_z
+        .ok_or_else(|| pair.tangential.error.as_ref().unwrap().message.clone())?;
     let vertex = s
         .surfaces
         .iter()
         .take(s.surfaces.len() - 1)
-        .map(|s| s.thickness)
+        .map(|v| v.thickness)
         .sum::<f64>();
-    let mut focus = [0.; 2];
-    for (axis, z) in [frame.sagittal, frame.tangential]
-        .into_iter()
-        .zip(&mut focus)
-    {
-        let a = s.trace_field(epsilon * axis[0], epsilon * axis[1], f, w)?;
-        let b = s.trace_field(-epsilon * axis[0], -epsilon * axis[1], f, w)?;
-        let height = FieldFrame::project(
-            axis,
-            [
-                a.last().point[0] - b.last().point[0],
-                a.last().point[1] - b.last().point[1],
-            ],
-        );
-        let slope_a = FieldFrame::project(
-            axis,
-            [
-                a.direction[0] / a.direction[2],
-                a.direction[1] / a.direction[2],
-            ],
-        );
-        let slope_b = FieldFrame::project(
-            axis,
-            [
-                b.direction[0] / b.direction[2],
-                b.direction[1] / b.direction[2],
-            ],
-        );
-        let h =
-            height + (cp[2] - a.last().point[2]) * slope_a - (cp[2] - b.last().point[2]) * slope_b;
-        let slope = slope_a - slope_b;
-        if slope.abs() < 1e-15 {
-            return Err("Differential focus lies at infinity".into());
-        }
-        *z = cp[2] - h / slope - vertex;
-    }
-    let image_z = s.surfaces.last().unwrap().thickness;
     Ok(
-        json!({"sagittal_focus":focus[0],"tangential_focus":focus[1],"sagittal_shift":focus[0]-image_z,"tangential_shift":focus[1]-image_z,"astigmatism":focus[1]-focus[0],"chief_direction":chief.direction,"frame":frame,"units":"mm"}),
+        json!({"sagittal_focus":sagittal-vertex,"tangential_focus":tangential-vertex,
+        "sagittal_shift":pair.sagittal.shift,"tangential_shift":pair.tangential.shift,
+        "astigmatism":tangential-sagittal,"chief_direction":pair.chief_direction,
+        "frame":pair.frame,"units":"mm"}),
     )
 }
+
 pub fn distortion(s: &System, f: &Field, w: f64) -> Result<Value, String> {
     let image = s.trace_field(0., 0., f, w)?.image();
     let ideal = s.paraxial_chief_image(f, w)?;
