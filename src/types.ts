@@ -119,6 +119,24 @@ export interface SystemSnapshot {
   revision: number;
 }
 
+// ---- surface structure editing -------------------------------------------------
+
+/** Draft transformation over zero-based internal surface indexes; `before` may equal the surface count (before Image). */
+export type SurfaceEditOperation =
+  | { kind: 'insert'; before: number; count: number }
+  | { kind: 'remove'; first: number; count: number };
+
+/**
+ * Read-only result over a supplied draft: the transformed system plus the old→new row map
+ * (null for removed rows), the new indexes of inserted rows, and whether removing rows moved the stop.
+ */
+export interface SurfaceEditResult {
+  system: OpticalSystem;
+  old_to_new: (number | null)[];
+  inserted: number[];
+  stop_reassigned: boolean;
+}
+
 // ---- workspace recovery ------------------------------------------------------
 
 /** Ready engine state; `revision` is the workspace revision the recovery tools expect. */

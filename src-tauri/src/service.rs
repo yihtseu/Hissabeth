@@ -1,6 +1,6 @@
 use crate::optics::{
-    self, Field, PupilSampling, Spectrum, System, analysis, aperture, focus, inspection, material,
-    project, report, solve,
+    self, Field, PupilSampling, Spectrum, System, analysis, aperture, editing, focus, inspection,
+    material, project, report, solve,
 };
 use serde_json::{Value, json};
 use std::{
@@ -150,6 +150,13 @@ impl Engine {
                     serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
                 s.update()?;
                 Ok(json!({"valid":true,"system":s}))
+            }
+            "surface_edit" => {
+                let system: System =
+                    serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
+                let operation: editing::Operation =
+                    serde_json::from_value(args["operation"].clone()).map_err(|e| e.to_string())?;
+                serde_json::to_value(editing::apply(&system, operation)?).map_err(|e| e.to_string())
             }
             "materials_list" => {
                 let mut names: Vec<String> = material::catalogs()
@@ -386,7 +393,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -581,6 +588,15 @@ pub fn tools() -> Value {
         "Validate a complete prescription without changing the workspace",
         json!({"system":system_schema()}),
         &["system"],
+    );
+    add(
+        "surface_edit",
+        "Stage inserted or removed internal surface rows in a supplied draft without saving, solving or tracing. Zero-based before may equal the row count (before Image). Remaps stop and retained gap references; rejects deletion of gaps referenced by retained solves. Returns the transformed system, old_to_new indices, inserted indices and stop_reassigned.",
+        json!({"system":system_schema(),"operation":{"oneOf":[
+            object(json!({"kind":enumeration(&["insert"]),"before":integer(0,128),"count":integer(1,128)}),&["kind","before","count"]),
+            object(json!({"kind":enumeration(&["remove"]),"first":integer(0,127),"count":integer(1,128)}),&["kind","first","count"])
+        ]}}),
+        &["system", "operation"],
     );
     add(
         "materials_list",
@@ -1095,6 +1111,88 @@ pub fn relay() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn surface_edits_stage_drafts_and_apply_constraints_on_save() {
+        let mut e = engine("surface-edit");
+        let saved = e.system.clone();
+        e.call("system_set", json!({"system":saved,"revision":e.revision}))
+            .unwrap();
+        let before = e.call("system_get", json!({})).unwrap();
+        let bytes = std::fs::read(&e.path).unwrap();
+        let mut draft = e.system.clone();
+        draft.name = "Unapplied edited source".into();
+        draft.surfaces[0].gap_solve = solve::GapSolve::Pickup {
+            source: 1,
+            scale: 0.1,
+            offset: 2.,
+        };
+        let result = e
+            .call(
+                "surface_edit",
+                json!({"system":draft,"operation":{"kind":"insert","before":1,"count":2}}),
+            )
+            .unwrap();
+        assert_eq!(result["system"]["name"], draft.name);
+        assert_eq!(result["system"]["surfaces"][0]["gap_solve"]["source"], 3);
+        assert_eq!(
+            result["system"]["surfaces"][0]["thickness"],
+            draft.surfaces[0].thickness
+        );
+        assert!(result.get("revision").is_none());
+        for operation in [
+            json!({"kind":"insert","before":1,"count":0}),
+            json!({"kind":"insert","before":1,"count":1.5}),
+            json!({"kind":"insert","before":1,"count":1,"extra":true}),
+            json!({"kind":"remove","first":0,"count":2}),
+            json!({"kind":"remove","first":1,"count":1}),
+        ] {
+            assert!(
+                e.call(
+                    "surface_edit",
+                    json!({"system":draft,"operation":operation})
+                )
+                .is_err()
+            );
+        }
+        let mut unfinished = draft.clone();
+        unfinished.surfaces[0].material = "UnfinishedGlass".into();
+        assert!(
+            e.call(
+                "surface_edit",
+                json!({"system":unfinished,"operation":{"kind":"insert","before":0,"count":1}})
+            )
+            .is_ok()
+        );
+        assert_eq!(e.call("system_get", json!({})).unwrap(), before);
+        assert_eq!(std::fs::read(&e.path).unwrap(), bytes);
+        e.call(
+            "system_set",
+            json!({"system":result["system"],"revision":before["revision"]}),
+        )
+        .unwrap();
+        assert_eq!(e.system.surfaces.len(), 4);
+        assert!(
+            (e.system.surfaces[0].thickness - (draft.surfaces[1].thickness * 0.1 + 2.)).abs()
+                < 1e-10
+        );
+        assert_eq!(e.revision, before["revision"].as_u64().unwrap() + 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&e.path).unwrap()).unwrap(),
+            serde_json::to_value(&e.system).unwrap()
+        );
+        let path = engine("surface-edit-recovery").path.clone();
+        std::fs::write(&path, b"{ invalid optical project").unwrap();
+        let mut workspace = Workspace::open(path).unwrap();
+        assert!(
+            workspace
+                .call(
+                    "surface_edit",
+                    json!({"system":draft,"operation":{"kind":"insert","before":0,"count":1}})
+                )
+                .unwrap_err()
+                .contains("recovery")
+        );
+    }
     #[test]
     fn prescription_reports_validate_requests_and_leave_saved_state_unchanged() {
         let mut e = engine("prescription-report");
