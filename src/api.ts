@@ -35,6 +35,8 @@ import type {
   Spectrum,
   Spherochromatism,
   SpotDiagram,
+  SurfaceEditOperation,
+  SurfaceEditResult,
   SystemSnapshot,
   TraceInspect,
   VignettingUpdateResult,
@@ -60,6 +62,8 @@ interface ToolMap {
   /** Recovery only: validates the source fully before any disk change. */
   workspace_recover: { args: { revision: number; source: RecoverySource }; result: RecoveryResult };
   system_get: { args: NoArgs; result: SystemSnapshot };
+  /** Read-only: transforms the supplied draft system; the saved model, revision and solves are untouched. */
+  surface_edit: { args: { system: OpticalSystem; operation: SurfaceEditOperation }; result: SurfaceEditResult };
   system_set: { args: { system: OpticalSystem; revision: number }; result: { revision: number } };
   materials_list: { args: NoArgs; result: string[] };
   material_index: { args: { material: string; wavelength: number }; result: { index: number } };

@@ -265,7 +265,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
             :mutate="wb.mutate"
           />
           <JsonEditor v-if="tab === 'Prescription JSON'" v-model="wb.draft.value" />
-          <SurfaceTable v-if="showTable" v-model="wb.draft.value" :materials="wb.materials.value" :dirty="wb.dirty.value" />
+          <SurfaceTable v-if="showTable" v-model="wb.draft.value" :materials="wb.materials.value" :dirty="wb.dirty.value" :online="wb.online.value" />
         </template>
 
         <AgentPanel v-if="tab === 'Agent connections'" :agents="agents" :registration="registration" @connect="connect" />

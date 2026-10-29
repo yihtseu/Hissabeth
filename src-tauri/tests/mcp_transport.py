@@ -110,6 +110,43 @@ def workspace_recovery():
         assert math.isfinite(tool("paraxial",dict(wavelength=587.5618))["efl"])
     print("PASS: real connected startup recovery; blocked optical writes, strict/stale schemas, byte-exact preservation, native/Geopter/new-system recovery, changed-disk rejection, invalid/valid external retry and same-relay restart")
 
+def surface_edit():
+    global engine
+    current=tool("system_get")
+    tool("system_set",dict(system=current["system"],revision=current["revision"]))
+    current=tool("system_get"); before=(DATA/"system.json").read_bytes()
+    draft=json.loads(json.dumps(current["system"]))
+    draft["name"]="Staged topology only"
+    draft["fields"][0]["weight"]=0
+    draft["wavelengths"].append(dict(draft["wavelengths"][0],weight=0))
+    draft["surfaces"][0]["gap_solve"]=dict(kind="pickup",source=1,scale=.1,offset=2)
+    args=dict(system=draft,operation=dict(kind="insert",before=1,count=2))
+    result=tool("surface_edit",args)
+    assert result["old_to_new"]==[0,3] and result["inserted"]==[1,2]
+    assert not result["stop_reassigned"] and "revision" not in result
+    staged=result["system"]
+    assert staged["name"]==draft["name"] and staged["fields"]==draft["fields"] and staged["wavelengths"]==draft["wavelengths"]
+    assert staged["surfaces"][0]["gap_solve"]["source"]==3
+    assert staged["surfaces"][0]["thickness"]==draft["surfaces"][0]["thickness"]
+    assert all(r["interaction"]=="dummy" and r["thickness"]==0 and not r["clear_aperture"] for r in staged["surfaces"][1:3])
+    tool("surface_edit",dict(system=draft,operation=dict(kind="remove",first=1,count=1)),error=True)
+    for op in [dict(kind="insert",before=0,count=0),dict(kind="insert",before=0,count=1.5),dict(kind="insert",before=0,count=1,extra=True),dict(kind="remove",first=0,count=2)]:
+        tool("surface_edit",dict(system=draft,operation=op),error=True)
+    bad=json.loads(json.dumps(draft));bad["surfaces"][0]["material"]="UnfinishedGlass"
+    assert tool("surface_edit",dict(system=bad,operation=dict(kind="insert",before=0,count=1)))["system"]["surfaces"][1]["material"]=="UnfinishedGlass"
+    assert tool("system_get")==current and (DATA/"system.json").read_bytes()==before
+    tool("system_set",dict(system=staged,revision=current["revision"]))
+    applied=tool("system_get")
+    assert applied["revision"]==current["revision"]+1
+    assert abs(applied["system"]["surfaces"][0]["thickness"]-(draft["surfaces"][1]["thickness"]*.1+2))<1e-9
+    tool("surface_edit",dict(system=staged,operation=dict(kind="remove",first=0,count=3)))
+    engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink(missing_ok=True);engine=start_engine()
+    recovered=tool("system_get")
+    assert recovered["system"]==applied["system"]
+    assert tool("capabilities")["scope"]["surface_row_editing"]
+    print("PASS: real MCP draft topology, strict schemas, shared reference guards, no implicit save/solve, explicit constrained Apply and same-relay restart")
+
+
 def prescription_report():
     global engine
     import copy
@@ -1049,6 +1086,9 @@ try:
     if setup_status["state"]=="recovery":
         assert setup_status["source_text"] is None and setup_status["source_bytes"]==0
         tool("workspace_recover",dict(revision=setup_status["revision"],source=dict(kind="default")))
+    if "--surface-edit" in sys.argv:
+        surface_edit()
+        raise SystemExit(0)
     if "--prescription-report" in sys.argv:
         prescription_report()
         raise SystemExit(0)
