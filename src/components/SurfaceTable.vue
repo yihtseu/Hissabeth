@@ -77,6 +77,23 @@ function solveLabel(s: Surface): string {
 function setStop(i: number): void {
   emit('update:modelValue', { ...props.modelValue, stop_index: i });
 }
+/** Real axial travel after each surface: +1 toward +z, -1 after an odd number of centered reflections. */
+const travel = computed(() => {
+  let direction = 1;
+  return surfaces.value.map((s) => {
+    if (s.interaction === 'reflect') direction = -direction;
+    return direction;
+  });
+});
+const hasReflection = computed(() => surfaces.value.some((s) => s.interaction === 'reflect'));
+const retainsMedium = (s: Surface): boolean => s.interaction !== 'refract';
+/** Medium a reflect or dummy row retains: the material of the last refracting row above it, else the object medium. */
+function incidentMedium(i: number): string {
+  for (let k = i - 1; k >= 0; k--) if (surfaces.value[k]!.interaction === 'refract') return surfaces.value[k]!.material;
+  return props.modelValue.object_material;
+}
+const materialTitle = (s: Surface, i: number): string =>
+  `${s.interaction === 'reflect' ? 'A mirror' : 'A dummy surface'} keeps the incident medium (${incidentMedium(i)}). The stored material "${s.material}" is kept and used again if the type is set back to refract.`;
 const CLEAR_HELP =
   'Checked: the clear radius is a circular physical aperture and rays beyond it are blocked. Unchecked: rays are never clipped.';
 const DRAW_HELP =
@@ -127,8 +144,12 @@ const DRAW_HELP =
                 <NumberField readonly :title="`Resolved by the ${solveLabel(s)}; change it in Gap solve.`" :aria-label="`Surface ${i + 1} thickness (solved: ${solveLabel(s)})`" :model-value="s.thickness" />
                 <span class="solve-tag">{{ solveLabel(s) }}</span>
               </template>
+              <span v-if="hasReflection" class="solve-tag" :title="travel[i]! < 0 ? 'Light propagates toward −z after an odd number of reflections: real propagation uses a negative gap. The opposite sign is legal (a virtual path).' : 'Light propagates toward +z: real propagation uses a positive gap. The opposite sign is legal (a virtual path).'">{{ travel[i]! < 0 ? '← −z (negative gap)' : '→ +z (positive gap)' }}</span>
             </td>
-            <td><input type="text" list="material-options" autocomplete="off" spellcheck="false" :aria-label="`Surface ${i + 1} material`" :value="s.material" @input="patch(i, { material: ($event.target as HTMLInputElement).value })" /></td>
+            <td>
+              <input v-if="retainsMedium(s)" type="text" disabled :title="materialTitle(s, i)" :aria-label="`Surface ${i + 1} material: keeps the incident medium ${incidentMedium(i)} (stored ${s.material} unused)`" :value="incidentMedium(i)" />
+              <input v-else type="text" list="material-options" autocomplete="off" spellcheck="false" :aria-label="`Surface ${i + 1} material`" :value="s.material" @input="patch(i, { material: ($event.target as HTMLInputElement).value })" />
+            </td>
             <td><NumberField min="0" :aria-label="`Surface ${i + 1} clear radius`" :model-value="s.aperture" @update:model-value="(v: number) => patch(i, { aperture: v })" /></td>
             <td class="center"><input type="checkbox" :title="CLEAR_HELP" :aria-label="`Surface ${i + 1} clip rays outside the clear radius`" :checked="s.clear_aperture" @change="patch(i, { clear_aperture: ($event.target as HTMLInputElement).checked })" /></td>
             <td><NumberField readonly :title="DRAW_HELP" :aria-label="`Surface ${i + 1} draw semi-diameter (derived, read-only)`" :model-value="s.semi_diameter" /></td>
@@ -143,6 +164,7 @@ const DRAW_HELP =
     </div>
     <div class="legend">
       <span>Radius 0 = plane · Thickness may be negative (the engine checks the real ray path) · Last thickness sets image distance · Solved thicknesses are read-only and show the last evaluated value; they recalculate on Apply, and are edited under Gap solve · Materials (catalog keys or model glass nd:vd) are checked by the engine on apply</span>
+      <span>Reflect and dummy surfaces keep the incident medium, so their material is not used. A centered reflection reverses travel along the axis: after an odd number of reflections real propagation is toward −z and gaps are entered negative. Changing a surface type never edits any gap, material or radius. Tilted or decentered folds are not supported.</span>
       <span>Clip rays on: rays beyond the clear radius are blocked. Off: the clear radius never clips. Draw semi-diam. is derived from the reference-wavelength chief and four field-local pupil rim rays across all fields; it is only drawn, never clips, and recalculates on Apply. While edits are unapplied it shows the last evaluated values.</span>
       <span v-if="dirty" class="unsaved">Unapplied changes</span>
     </div>

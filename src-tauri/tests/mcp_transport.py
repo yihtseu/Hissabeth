@@ -311,6 +311,88 @@ def spectrum_sampling():
     print("PASS: weighted hexapolar spot/energy, strict spectral/sampling arguments, real lateral-color OTF cancellation, diffraction physical frequencies/complex components, skipped zero weights, positive-weight failure without mutation, engine analysis revisions")
 
 
+def mirrors():
+    import copy
+    global engine
+    initial=tool("system_get");system=copy.deepcopy(initial["system"])
+    surface=copy.deepcopy(system["surfaces"][0])
+    surface.update(radius=-100,thickness=-50,material="N-BK7_SCHOTT",interaction="reflect",aperture=10,clear_aperture=True,conic=-1,even=[],odd=[],gap_solve=dict(kind="fixed"))
+    system.update(surfaces=[surface],fields=[dict(x=0,y=0,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],stop_index=0,
+                  object_distance=None,object_material="AIR",temperature=25,pupil=dict(kind="entrance_pupil_diameter",value=10))
+    tool("system_set",dict(system=system,revision=initial["revision"]))
+    capability=tool("capabilities")["scope"]
+    assert capability["centered_reflection"] and not capability["folded_coordinates"]
+    paraxial=tool("paraxial")
+    assert paraxial["efl"]==50 and paraxial["bfl"]==-50 and paraxial["image_distance"]==-50
+    assert paraxial["image_index"]==1 and paraxial["image_direction"]==-1
+    assert "direction_sign" in paraxial["matrix_basis"]
+    ray=tool("trace_ray",dict(field_index=0,x=3,y=4))
+    assert max(abs(a-b) for a,b in zip(ray["points"][-1],[0,0,-50]))<1e-10
+    assert abs(ray["opl"]+ray["entrance_opl"]-50)<1e-10
+    assert ray["segments"][0]["n_before"]==ray["segments"][0]["n_after"]==1
+    assert ray["direction"][2]<0
+    cases=[("ray_fan",dict(samples=9)),("opd_fan",dict(samples=9)),("chromatic_focus",dict(lower=480,upper=650,samples=5)),
+           ("longitudinal_aberration",dict(samples=9)),("spherochromatism",dict(samples=9)),("astigmatism",{}),("distortion",{}),
+           ("encircled_energy",dict(sampling=dict(kind="hexapolar",rings=4),samples=9)),("wavefront",dict(grid=16)),
+           ("diffraction_psf",dict(grid=16)),("diffraction_mtf",dict(grid=16,spectrum=dict(kind="polychromatic"))),
+           ("geometric_mtf",dict(sampling=dict(kind="hexapolar",rings=4),spectrum=dict(kind="polychromatic")))]
+    results={name:tool(name,args if name=="chromatic_focus" else dict(field_index=0,**args)) for name,args in cases}
+    psf=results["diffraction_psf"]
+    assert abs(sum(psf["intensity"])-1)<1e-12 and abs(psf["strehl"]-1)<1e-10
+    assert abs(psf["pixel_size"]-system["wavelengths"][system["reference_wavelength"]]["value"]*1e-6*2.5)<1e-14
+    assert all(abs(v)<1e-7 for v in results["wavefront"]["opd"] if v is not None)
+    mono=tool("spot_diagram",dict(field_index=0,sampling=dict(kind="grid",count=17)))
+    poly=tool("polychromatic_spot",dict(field_index=0,sampling=dict(kind="hexapolar",rings=4)))
+    assert mono["blocked"]==0 and mono["rms_radius"]<1e-10 and poly["rms_radius"]<1e-10
+    state=tool("system_get");stored=(DATA/"system.json").read_bytes()
+    tool("project_export",dict(format="geopter"),error=True)
+    broken=copy.deepcopy(state["system"]);broken["pupil"]=dict(kind="image_na",value=1.2)
+    tool("system_set",dict(system=broken,revision=state["revision"]),error=True)
+    assert tool("system_get")==state and (DATA/"system.json").read_bytes()==stored
+    native=tool("project_export",dict(format="hissabeth"))["text"]
+    tool("project_import",dict(format="hissabeth",text=native,revision=state["revision"]))
+    assert tool("system_get")["system"]==state["system"]
+    tool("solve",dict(gap=0,definition=dict(kind="edge_thickness",height=3,value=-60),revision=tool("system_get")["revision"]))
+    saved=tool("system_get")
+    assert abs(saved["system"]["surfaces"][0]["thickness"]-(-60-9/200))<1e-10
+    saved["system"]["surfaces"][0]["radius"]=-120
+    tool("system_set",dict(system=saved["system"],revision=saved["revision"]))
+    saved=tool("system_get");expected=-60-9/240
+    assert abs(saved["system"]["surfaces"][0]["thickness"]-expected)<1e-10
+    engine.terminate();engine.wait(timeout=5)
+    stale=copy.deepcopy(saved["system"]);stale["surfaces"][0]["thickness"]=999
+    stale["surfaces"][0]["semi_diameter"]=stale["image_surface"]["semi_diameter"]=999
+    (DATA/"system.json").write_text(json.dumps(stale));(DATA/"endpoint.json").unlink(missing_ok=True)
+    engine=start_engine();recovered=tool("system_get")["system"]
+    assert abs(recovered["surfaces"][0]["thickness"]-expected)<1e-10
+    assert recovered["surfaces"][0]["interaction"]=="reflect"
+    assert json.loads((DATA/"system.json").read_text())==recovered
+    # A plane mirror has finite virtual imaging even though all focal lengths are infinite.
+    plane=copy.deepcopy(system);plane.update(object_distance=300,field_type="object_height",pupil=dict(kind="entrance_pupil_diameter",value=2))
+    plane["fields"][0].update(x=1.2,y=-2)
+    plane["surfaces"][0].update(radius=0,conic=0,thickness=10)
+    tool("system_set",dict(system=plane,revision=tool("system_get")["revision"]))
+    p=tool("paraxial")
+    assert all(p[key] is None for key in ("efl","bfl","front_focal_distance"))
+    assert abs(p["image_distance"]-300)<1e-10 and p["magnification"]==1 and p["image_direction"]==-1
+    tool("autofocus",dict(revision=tool("system_get")["revision"]))
+    ray=tool("trace_ray",dict(field_index=0,x=.4,y=-.3))
+    assert max(abs(a-b) for a,b in zip(ray["points"][-1],[1.2,-2,300]))<1e-10
+    assert abs(ray["opl"]+ray["entrance_opl"])<1e-10
+    wf=tool("wavefront",dict(field_index=0,grid=16))
+    assert all(abs(v)<1e-7 for v in wf["opd"] if v is not None)
+    # Positive parity after two mirrors; the element coordinates stay globally signed.
+    telescope=copy.deepcopy(system);a=telescope["surfaces"][0];a.update(radius=-200,conic=0,thickness=-80)
+    b=copy.deepcopy(a);b.update(radius=-50,thickness=100);telescope["surfaces"].append(b)
+    tool("system_set",dict(system=telescope,revision=tool("system_get")["revision"]))
+    p=tool("paraxial")
+    assert p["image_direction"]==1 and p["image_index"]==1
+    assert abs(p["efl"]-500)<1e-9 and abs(p["bfl"]-100)<1e-9
+    ray=tool("trace_ray",dict(field_index=0,y=.0001))
+    assert abs(ray["points"][-1][1])<1e-10 and abs(ray["points"][-1][2]-20)<1e-10
+    print("PASS: real MCP centered mirrors, signed Gaussian matrix/physical indices, exact parabolic focus and OPL, all analysis families and mono/poly spectra, signed edge solve/profile reapplication, strict failure atomicity/native retention/same-relay recovery, plane-mirror finite virtual imaging/autofocus, and two-mirror telescope")
+
+
 def endpoints():
     import copy
     global engine
@@ -715,6 +797,9 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--mirrors" in sys.argv:
+        mirrors()
+        raise SystemExit(0)
     if "--endpoints" in sys.argv:
         endpoints()
         raise SystemExit(0)

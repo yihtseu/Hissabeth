@@ -124,8 +124,9 @@ export type Point3 = [number, number, number];
 export interface Paraxial {
   /** Saved-model revision the engine held while computing this reply. */
   revision: number;
-  efl: number;
-  bfl: number;
+  /** Null when the system is afocal for a finite object (no finite focal length). */
+  efl: number | null;
+  bfl: number | null;
   f_number: number;
   matrix: number[];
   image_distance: number;
@@ -139,7 +140,11 @@ export interface Paraxial {
   object_index: number;
   object_na: number | null;
   image_na: number;
-  front_focal_distance: number;
+  front_focal_distance: number | null;
+  /** +1 when light propagates toward +z in image space, -1 after an odd number of centered reflections. */
+  image_direction: number;
+  /** How the engine's first-order matrix indices are signed (descriptive text). */
+  matrix_basis: string;
 }
 
 /** Terminal hit on the image surface; no refraction, so the indices before and after are equal. */
@@ -159,6 +164,8 @@ export interface Ray {
   points: Point3[];
   /** Segments at the internal surfaces only; the image hit is `image_hit`. */
   segments: Segment[];
+  /** Unit direction of the ray as launched, before the first surface. */
+  launch_direction: Point3;
   /** Point on the source profile for a finite object; null at infinity. */
   object_point: Point3 | null;
   /** Terminal image-surface hit; null for rays that did not reach it. */

@@ -21,8 +21,8 @@ type ActiveKind = Exclude<SolveKind, 'fixed'>;
 
 const KINDS: { id: ActiveKind; label: string; help: string }[] = [
   { id: 'pickup', label: 'Pickup', help: 'Thickness = source thickness × scale + offset.' },
-  { id: 'edge_thickness', label: 'Edge thickness', help: 'Thickness that gives the target edge thickness at a semi-height, using this and the next surface. For the final gap the next surface is the image surface, so its actual sag at that height is included.' },
-  { id: 'overall_length', label: 'Overall length', help: 'Thickness that makes the summed thickness of a range of gaps equal the target length.' },
+  { id: 'edge_thickness', label: 'Edge thickness', help: 'Thickness that gives the target signed global axial edge separation at a semi-height (next surface z minus this surface z; negative values are allowed, for example after a reflection), using this and the next surface. For the final gap the next surface is the image surface, so its actual sag at that height is included.' },
+  { id: 'overall_length', label: 'Overall length', help: 'Thickness that makes the summed signed thickness of a range of gaps equal the target: the net axial displacement along +z, not the folded path length.' },
   { id: 'marginal_height', label: 'Marginal ray height', help: 'Thickness after which the marginal ray is at the target height, measured at the next vertex plane (not on a curved profile). Zone is relative to the nominal pupil radius: 0 is the full-aperture paraxial axial ray, ±1 is the nominal rim; a nonzero zone traces the first prescribed field at the reference wavelength. Physical apertures and ray geometry decide whether it is valid.' },
 ];
 
@@ -98,7 +98,7 @@ const block = computed(() => {
   const g = gap.value;
   if (kind.value === 'pickup' && source.value === g) return 'A pickup must refer to another gap.';
   if (kind.value === 'edge_thickness') {
-    if (!(height.value >= 0) || !(value.value >= 0)) return 'Edge height and thickness must be non-negative.';
+    if (!(height.value >= 0)) return 'Edge height must be non-negative.';
   }
   if (kind.value === 'overall_length' && !(first.value <= g && g <= last.value))
     return 'The solved gap must lie within the first–last range.';
@@ -205,8 +205,8 @@ async function recalculate(): Promise<void> {
         <label v-if="kind === 'edge_thickness'">Height (mm) <NumberField v-model="height" aria-label="Edge semi-height" /></label>
         <label v-if="kind === 'marginal_height'">Pupil zone (relative to nominal radius) <NumberField v-model="zone" aria-label="Pupil zone" /></label>
         <label v-if="kind !== 'pickup'">{{
-          kind === 'edge_thickness' ? 'Target edge thickness (mm)'
-          : kind === 'overall_length' ? 'Target overall length (mm)'
+          kind === 'edge_thickness' ? 'Target axial edge separation (mm, signed)'
+          : kind === 'overall_length' ? 'Target net axial length (mm, signed)'
           : 'Target ray height (mm)'
         }} <NumberField v-model="value" aria-label="Solve target" /></label>
         <button type="button" class="primary" :disabled="!!block || busy" @click="apply">{{ editing ? 'Update solve' : 'Install solve' }}</button>
