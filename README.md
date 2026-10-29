@@ -27,6 +27,25 @@ All lengths are mm, wavelengths are nm, field angles are degrees, temperature is
 
 Centered axial reflection is implemented. Tilted/decentered coordinate frames, polarization/coatings, optimization, tolerancing, and nonsequential propagation remain unfinished. Geopter export requires a finite object gap, refractive interactions, 25 C, standard pressure, no embedded custom catalogs, and no active gap relations, and reference entrance-pupil mapping. Geopter profiles store ten polynomial coefficients: export writes all ten entries and rejects longer lists or mixed even/odd lists on any profile. Nonzero gap or material data following the terminal image is rejected on import. The built-in `FUSED_SILICA` dispersion model requires native JSON. Native JSON retains the full current prescription, including solve definitions.
 
+## Desktop workspace and preferences
+
+The desktop workspace has a menu bar, command toolbar, view navigator, analysis area, resizable prescription dock, and status bar. Narrow windows use a navigator drawer and keep every view available through the toolbar selector; wide tables scroll within their dock. Reka UI supplies menus, toolbars, dialogs, and settings tabs; Splitpanes handles dock resizing, VueUse handles window/media preferences, Pinia shares local state, and Vue I18n provides Simplified Chinese and US English. The frontend builds with TypeScript 6.
+
+Open the separate native Settings window with **Tools → Settings** or **Ctrl/Cmd+,**. **Tools → Agent connections** opens its Agents page. Opening Settings again focuses the existing window. Apply saves the form; Cancel reloads saved preferences. Settings changes reach both windows after a successful write. Edits made during saving remain in the form, while an external update preserves an edited form for explicit reload. Failed writes retain the unsaved form. Invalid settings files show a warning and remain unchanged until Apply, including when saving the displayed defaults.
+
+| Settings page | Active controls |
+| --- | --- |
+| General | Interface language, startup view, restore last view |
+| Appearance | System/light/dark/high-contrast theme, blue/teal/amber accent, density, font size, reduced motion |
+| Workspace | Navigator, prescription dock, metric/status bars, dock proportions |
+| Display | Summary metric decimals, ray direction arrows, plot grids |
+| Analysis defaults | Grid/hexapolar sampling, grid points/rings, report precision, engine polling interval |
+| Agents | Detect installed CLIs, connect selected Codex/Claude Code agents, selected-agent startup registration |
+
+Preferences use Tauri Store in `preferences.json` beside the optical workspace, with a separate revision for window conflicts. They do not change the optical prescription revision. Sampling defaults update controls still using the previous default and preserve manual selections. Theme changes redraw plots; contrast outlines preserve saved field and wavelength colors. UI report labels translate; canonical report text downloads remain in English. Raw project JSON, material names, and engine diagnostic details retain their source text.
+
+**Ctrl/Cmd+S** applies a valid prescription draft; **Ctrl/Cmd+B** toggles the navigator and **Ctrl/Cmd+J** toggles the prescription dock. **File → New system** opens an explicit blank-project confirmation. Export reads the saved prescription; importing or creating a blank system requires resolving an existing draft first. Connected recovery remains available after an invalid project is found at startup or engine restart.
+
 ## Run and agent access
 
 ```sh
@@ -34,7 +53,7 @@ bun install
 bun run tauri dev
 ```
 
-Keep the desktop app open while using an agent. Startup detects Codex and Claude Code on PATH and invokes their MCP registration commands. The connection panel can repeat registration and show its result. Restart an agent after changing its registration.
+Keep the desktop app open while using an agent. In Settings → Agents, select Codex and/or Claude Code and choose Connect selected agents; this runs their MCP registration commands immediately. Startup registration is off by default and runs only for saved selected agents when enabled. Restart an agent after changing its registration.
 
 Example agent request: “Read the prescription, design a BK7 singlet with a 50 mm focal length, focus it, and report the RMS spot radius.” Read `workspace_status` first; optical tools require a ready workspace. Read `system_get` before editing: every mutating tool requires its current revision. Recovery actions use the revision returned by `workspace_status`. MCP exposes 42 tools covering prescriptions, materials, tracing, analyses, solves, and project exchange. The `capabilities` tool returns the full tool schemas and current scope.
 
@@ -59,6 +78,8 @@ cargo build --manifest-path src-tauri/Cargo.toml --features tauri/custom-protoco
 Build artifacts belong in the existing `dist` and `src-tauri/target` directories.
 
 ## Source and verification evidence
+
+Local UI/settings evidence is recorded in `src-tauri/target/dsh-gap-audit.log`: affected Rust settings tests, production-browser flows, and actual Tauri settings/window/agent-fixture/restart checks. Browser layouts were inspected at 1440, 1024, 768, 480, and 360 pixels. The WSL root drawable did not provide a native screenshot; native interaction and persistence assertions passed. This batch used local validation only and reused unchanged optical results.
 
 The optical implementation draws on [heterophyllus/Geopter](https://github.com/heterophyllus/Geopter), commit `0edfbf52fcf0e3fc660e5ae33c354fd7a6be80d7`. The local upstream clone is retained under `reference/upstream` and excluded from application commits; `reference/Geopter` contains the earlier source selection. The optional C++ oracle requires that clone and its `3rdparty/json` submodule. Application builds do not require the clone. Geopter is Copyright (C) 2021 Hiiragi. Its GPL license is retained in `LICENSE.md`.
 

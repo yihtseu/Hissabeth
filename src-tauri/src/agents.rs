@@ -109,18 +109,21 @@ fn register(name: &str, path: &Path, app: &Path, workspace: &Path) -> Value {
         Err(e) => json!({"name":name,"success":false,"message":e}),
     }
 }
-pub fn configure() -> Value {
+pub fn configure(targets: &[crate::preferences::Agent]) -> Value {
     let app = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return json!([{"success":false,"message":e.to_string()}]),
     };
     let workspace = crate::service::data_dir();
     Value::Array(
-        ["codex", "claude"]
+        targets
             .iter()
-            .map(|name| match executable(name) {
-                Some(path) => register(name, &path, &app, &workspace),
-                None => json!({"name":name,"installed":false,"status":"not installed"}),
+            .map(|target| {
+                let name = target.name();
+                match executable(name) {
+                    Some(path) => register(name, &path, &app, &workspace),
+                    None => json!({"name":name,"installed":false,"status":"not installed"}),
+                }
             })
             .collect(),
     )

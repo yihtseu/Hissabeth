@@ -4,7 +4,13 @@ fn execute() -> Result<(), String> {
         println!("{}", hissabeth_lib::agents::detect());
         Ok(())
     } else if args.iter().any(|a| a == "--configure-agents") {
-        println!("{}", hissabeth_lib::agents::configure());
+        println!(
+            "{}",
+            hissabeth_lib::agents::configure(&[
+                hissabeth_lib::preferences::Agent::Codex,
+                hissabeth_lib::preferences::Agent::Claude
+            ])
+        );
         Ok(())
     } else if args.iter().any(|a| a == "--mcp") {
         hissabeth_lib::service::relay()
