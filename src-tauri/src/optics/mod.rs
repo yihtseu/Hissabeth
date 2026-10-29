@@ -62,6 +62,9 @@ pub struct System {
     pub pupil: Pupil,
     pub pupil_mapping: PupilMapping,
     pub object_distance: Option<f64>,
+    pub object_material: String,
+    pub object_label: String,
+    pub image_label: String,
     pub stop_index: usize,
     pub temperature: f64,
     pub pressure: f64,
@@ -77,24 +80,24 @@ impl Default for System {
                 Surface::sphere(-50., 46.64, "AIR", 12.5),
             ],
             wavelengths: vec![
-                Wavelength {
-                    value: 486.1327,
-                    weight: 1.,
-                },
-                Wavelength {
-                    value: 587.5618,
-                    weight: 1.,
-                },
-                Wavelength {
-                    value: 656.2725,
-                    weight: 1.,
-                },
+                Wavelength::new(486.1327, 1.),
+                Wavelength::new(587.5618, 1.),
+                Wavelength::new(656.2725, 1.),
             ],
             reference_wavelength: 1,
             fields: vec![
-                Field::meridional(0.),
-                Field::meridional(3.),
-                Field::meridional(5.),
+                Field {
+                    color: [0.78, 0.416, 0.239, 1.],
+                    ..Field::meridional(0.)
+                },
+                Field {
+                    color: [0.196, 0.486, 0.623, 1.],
+                    ..Field::meridional(3.)
+                },
+                Field {
+                    color: [0.553, 0.439, 0.702, 1.],
+                    ..Field::meridional(5.)
+                },
             ],
             field_type: FieldType::Angle,
             pupil: Pupil {
@@ -103,6 +106,9 @@ impl Default for System {
             },
             pupil_mapping: PupilMapping::RealStop,
             object_distance: None,
+            object_material: "AIR".into(),
+            object_label: "Object".into(),
+            image_label: "Image".into(),
             stop_index: 0,
             temperature: 20.,
             pressure: 101325.,
@@ -193,8 +199,9 @@ impl System {
         if ep.a.abs() < 1e-15 {
             return Err("Entrance pupil lies at infinity".into());
         }
-        let shift = ep.b / ep.a;
+        let shift = self.entrance_pupil_distance(w)?;
         let (matrix, n) = self.matrix(w, 0, self.surfaces.len())?;
+        let n0 = self.object_index(w)?;
         let image_distance = self.surfaces.last().ok_or("Empty prescription")?.thickness;
         let object = if self.object_distance.is_some() {
             Some(self.object_point(field, w)?)
@@ -217,8 +224,8 @@ impl System {
                 (-shift * slope, slope)
             };
             image[axis] = matrix.a * height
-                + matrix.b * slope
-                + image_distance / n * (matrix.c * height + matrix.d * slope);
+                + matrix.b * n0 * slope
+                + image_distance / n * (matrix.c * height + matrix.d * n0 * slope);
         }
         if image.iter().all(|v| v.is_finite()) {
             Ok(image)
@@ -244,6 +251,26 @@ impl System {
             material::refractive_index(name, w, Some((self.temperature, self.pressure)))
         }
     }
+    pub fn object_index(&self, w: f64) -> Result<f64, String> {
+        self.material_index(&self.object_material, w)
+    }
+    pub fn entrance_pupil_distance(&self, w: f64) -> Result<f64, String> {
+        let ep = self.pupil_matrix(w)?;
+        if ep.a.abs() < 1e-15 {
+            return Err("Entrance pupil lies at infinity".into());
+        }
+        Ok(self.object_index(w)? * ep.b / ep.a)
+    }
+    fn medium_before(&self, surface: usize, w: f64) -> Result<f64, String> {
+        match self.surfaces[..surface]
+            .iter()
+            .rev()
+            .find(|s| s.interaction != Interaction::Dummy)
+        {
+            Some(s) => self.material_index(&s.material, w),
+            None => self.object_index(w),
+        }
+    }
     pub fn update(&mut self) -> Result<(), String> {
         self.validate_parameters()?;
         let mut resolved = self.clone();
@@ -267,6 +294,8 @@ impl System {
     }
     fn validate_parameters(&self) -> Result<(), String> {
         if self.name.len() > 256
+            || self.object_label.len() > 256
+            || self.image_label.len() > 256
             || self.note.len() > 100_000
             || self.surfaces.is_empty()
             || self.surfaces.len() > 128
@@ -303,6 +332,7 @@ impl System {
         for f in &self.fields {
             if ![f.x, f.y, f.weight].iter().all(|v| v.is_finite())
                 || f.weight < 0.
+                || !valid_color(f.color)
                 || f.vignetting.iter().any(|v| !v.is_finite() || *v >= 1.)
             {
                 return Err("Invalid field or vignetting specification".into());
@@ -319,11 +349,13 @@ impl System {
         for w in &self.wavelengths {
             if !w.weight.is_finite()
                 || w.weight < 0.
+                || !valid_color(w.color)
                 || !w.value.is_finite()
                 || !(100.0..=20000.).contains(&w.value)
             {
                 return Err("Invalid wavelength specification".into());
             }
+            self.object_index(w.value)?;
         }
         for (gap, s) in self.surfaces.iter().enumerate() {
             s.gap_solve.validate(self, gap)?;
@@ -353,11 +385,7 @@ impl System {
             return Err("Invalid matrix surface range".into());
         }
         let mut matrix = Matrix::identity();
-        let mut n = if start == 0 {
-            1.
-        } else {
-            self.material_index(&self.surfaces[start - 1].material, w)?
-        };
+        let mut n = self.medium_before(start, w)?;
         for i in start..end {
             let s = &self.surfaces[i];
             let next = self.material_index(&s.material, w)?;
@@ -393,15 +421,17 @@ impl System {
     }
     fn specified_pupil_radius(&self, w: f64) -> Result<f64, String> {
         let (m, n) = self.matrix(w, 0, self.surfaces.len())?;
+        let n0 = self.object_index(w)?;
+        let shift = self.entrance_pupil_distance(w)?;
+        let q_gain = if let Some(t) = self.object_distance {
+            (m.c * t + m.d * n0) / (t + shift)
+        } else {
+            m.c
+        };
         let r = match self.pupil.kind {
             PupilType::EntrancePupilDiameter => self.pupil.value / 2.,
             PupilType::FNumber => {
-                let slope = if let Some(t) = self.object_distance {
-                    let ep = self.pupil_matrix(w)?;
-                    (m.c * t + m.d) / (t + ep.b / ep.a)
-                } else {
-                    m.c
-                };
+                let slope = q_gain;
                 if slope.abs() < 1e-15 {
                     return Err("F-number pupil undefined for afocal system".into());
                 }
@@ -411,27 +441,23 @@ impl System {
                 let d = self
                     .object_distance
                     .ok_or("Object NA requires finite conjugates")?;
-                if self.pupil.value >= 1. {
-                    return Err("Object NA must be smaller than 1".into());
+                if self.pupil.value >= n0 {
+                    return Err("Object NA must be smaller than object medium index".into());
                 }
                 let ep = self.pupil_matrix(w)?;
                 if ep.a.abs() < 1e-15 {
                     return Err("Entrance pupil lies at infinity".into());
                 }
-                (d + ep.b / ep.a).abs() * self.pupil.value / (1. - self.pupil.value.powi(2)).sqrt()
+                (d + shift).abs() * self.pupil.value / (n0 * n0 - self.pupil.value.powi(2)).sqrt()
             }
             PupilType::ImageNa => {
                 if self.pupil.value >= n {
                     return Err("Image NA must be smaller than image medium index".into());
                 }
-                if m.c.abs() < 1e-15 {
+                if q_gain.abs() < 1e-15 {
                     return Err("Image NA undefined for afocal system".into());
                 }
-                let slope = if let Some(t) = self.object_distance {
-                    (m.c * t + m.d) / (t + self.pupil_matrix(w)?.b / self.pupil_matrix(w)?.a)
-                } else {
-                    m.c
-                };
+                let slope = q_gain;
                 n * self.pupil.value / ((n * n - self.pupil.value.powi(2)).sqrt() * slope.abs())
             }
         };
@@ -456,6 +482,8 @@ impl System {
     }
     pub fn paraxial(&self, w: f64) -> Result<Value, String> {
         let (m, n) = self.matrix(w, 0, self.surfaces.len())?;
+        let n0 = self.object_index(w)?;
+        let entrance_distance = self.entrance_pupil_distance(w)?;
         if m.c.abs() < 1e-14 {
             return Err("Afocal system: focal lengths undefined".into());
         }
@@ -466,21 +494,28 @@ impl System {
             return Err("Entrance pupil lies at infinity".into());
         }
         let image_distance = if let Some(t) = self.object_distance {
-            let den = m.c * t + m.d;
+            let den = m.c * t / n0 + m.d;
             if den.abs() < 1e-15 {
                 return Err("Image conjugate lies at infinity".into());
             }
-            -n * (m.a * t + m.b) / den
+            -n * (m.a * t / n0 + m.b) / den
         } else {
             bfl
         };
-        let magnification = self.object_distance.map(|t| 1. / (m.c * t + m.d));
+        if !image_distance.is_finite() {
+            return Err("Nonfinite paraxial image distance".into());
+        }
+        let magnification = self.object_distance.map(|t| 1. / (m.c * t / n0 + m.d));
         let r = self.pupil_radius(w)?;
         let q_gain = if let Some(t) = self.object_distance {
-            (m.c * t + m.d) / (t + ep.b / ep.a)
+            (m.c * t + m.d * n0) / (t + entrance_distance)
         } else {
             m.c
         };
+        let object_na = self
+            .object_distance
+            .map(|t| (n0 * (r / (t + entrance_distance)).atan().sin()).abs());
+        let image_na = (n * (q_gain * r / n).atan().sin()).abs();
         // Image of the aperture stop in image space, measured from the last vertex.
         let (post, ni) = self.matrix(w, self.stop_index, self.surfaces.len())?;
         let exit_distance = if post.d.abs() > 1e-15 {
@@ -495,7 +530,7 @@ impl System {
             None
         };
         Ok(
-            json!({"efl":efl,"bfl":bfl,"f_number":1./(2.*(q_gain*r).abs()),"matrix":[m.a,m.b,m.c,m.d],"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":ep.b/ep.a,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n}),
+            json!({"efl":efl,"bfl":bfl,"f_number":1./(2.*(q_gain*r).abs()),"matrix":[m.a,m.b,m.c,m.d],"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n,"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":n0*m.d/m.c}),
         )
     }
     fn object_point(&self, field: &Field, _w: f64) -> Result<V3, String> {
@@ -506,7 +541,7 @@ impl System {
                 if ep.a.abs() < 1e-15 {
                     return Err("Entrance pupil lies at infinity".into());
                 }
-                let l = d + ep.b / ep.a;
+                let l = d + self.entrance_pupil_distance(self.reference())?;
                 (
                     -l * field.x.to_radians().tan(),
                     -l * field.y.to_radians().tan(),
@@ -541,7 +576,7 @@ impl System {
                 first[1] + z * direction[1] / direction[2],
                 z,
             ];
-            Ok((p, direction, distance))
+            Ok((p, direction, distance * self.object_index(w)?))
         } else {
             let v = unit([field.x.to_radians().tan(), field.y.to_radians().tan(), 1.])?;
             let p = [
@@ -549,7 +584,7 @@ impl System {
                 first[1] + plane * v[1] / v[2],
                 plane,
             ];
-            Ok((p, v, dot(p, v)))
+            Ok((p, v, dot(p, v) * self.object_index(w)?))
         }
     }
     pub fn trace(&self, x: f64, y: f64, field: f64, w: f64) -> Result<Ray, String> {
@@ -566,22 +601,186 @@ impl System {
     pub fn layout(&self) -> Value {
         let mut rays = vec![];
         let mut rejected = vec![];
+        let mut field_indices = vec![];
         let w = self.reference();
         let radius = self.pupil_radius(w).unwrap_or(1.);
         for (fi, f) in self.fields.iter().enumerate() {
             for i in -3..=3 {
                 match self.trace_field(0., radius * i as f64 / 3., f, w) {
-                    Ok(r) => rays.push(r),
+                    Ok(r) => {
+                        rays.push(r);
+                        field_indices.push(fi);
+                    }
                     Err(e) => rejected.push(json!({"field":fi,"pupil":i as f64/3.,"error":e})),
                 }
             }
         }
-        json!({"rays":rays,"rejected":rejected})
+        json!({"rays":rays,"field_indices":field_indices,"rejected":rejected})
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn immersed_interface() -> System {
+        let mut s = System::default();
+        s.object_material = "1.500000:60.000000".into();
+        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
+        s.reference_wavelength = 0;
+        s.surfaces = vec![Surface::sphere(-50., 200., "AIR", 20.)];
+        s.object_distance = Some(300.);
+        s.fields = vec![Field::meridional(0.)];
+        s.pupil.value = 0.0002;
+        s.update().unwrap();
+        s
+    }
+    #[test]
+    fn overflowing_finite_object_conjugate_returns_an_error() {
+        let mut s = System::default();
+        s.object_distance = Some(1e308);
+        s.surfaces = vec![
+            Surface::sphere(1., 100., "1.500000:60.000000", 0.1),
+            Surface::sphere(-1., 10., "AIR", 0.1),
+        ];
+        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
+        s.reference_wavelength = 0;
+        assert!(s.paraxial(s.reference()).unwrap_err().contains("Nonfinite"));
+        assert!(analysis::longitudinal(&s, s.reference(), 5).is_err());
+        assert!(analysis::chromatic_focus(&s, 500., 650., 3).is_err());
+    }
+    #[test]
+    fn immersed_object_conjugates_match_spherical_interface_equation() {
+        let s = immersed_interface();
+        let p = s.paraxial(s.reference()).unwrap();
+        // n0/s + n1/s' = (n1-n0)/R = 0.01 for this interface.
+        for (key, expected) in [
+            ("object_index", 1.5),
+            ("image_index", 1.),
+            ("efl", 100.),
+            ("image_distance", 200.),
+            ("magnification", -1.),
+            ("front_focal_distance", -150.),
+        ] {
+            assert!(
+                (p[key].as_f64().unwrap() - expected).abs() < 1e-10,
+                "{key}: {}",
+                p[key]
+            );
+        }
+        let ray = s.trace(0., 0.0001, 0., s.reference()).unwrap();
+        assert!((ray.last().n_before - 1.5).abs() < 1e-14);
+        assert!(ray.image()[1].abs() < 1e-9);
+        let focus = ray.last().point[2] - ray.last().point[1] * ray.direction[2] / ray.direction[1];
+        assert!((focus - 200.).abs() < 1e-4);
+    }
+    #[test]
+    fn immersed_object_autofocus_and_marginal_solve_match_gaussian_conjugate() {
+        let mut s = immersed_interface();
+        s.surfaces[0].thickness = 123.;
+        let focused = solve::autofocus(&s, s.reference()).unwrap();
+        assert!((focused.surfaces[0].thickness - 200.).abs() < 1e-8);
+        for zone in [0., 0.5] {
+            let (solved, _) =
+                solve::apply(&s, 0, solve::GapSolve::MarginalHeight { value: 0., zone }).unwrap();
+            assert!((solved.surfaces[0].thickness - 200.).abs() < 1e-4);
+        }
+    }
+    #[test]
+    fn numerical_apertures_and_working_f_number_use_both_media() {
+        let mut s = immersed_interface();
+        s.object_distance = Some(10.);
+        s.pupil = Pupil {
+            kind: PupilType::ObjectNa,
+            value: 1.2,
+        };
+        let r = s.pupil_radius(s.reference()).unwrap();
+        assert!((r - 10. * 1.2 / (1.5_f64.powi(2) - 1.2_f64.powi(2)).sqrt()).abs() < 1e-12);
+        assert!(
+            (s.paraxial(s.reference()).unwrap()["object_na"]
+                .as_f64()
+                .unwrap()
+                - 1.2)
+                .abs()
+                < 1e-12
+        );
+        s.pupil.value = 1.5;
+        assert!(
+            s.pupil_radius(s.reference())
+                .unwrap_err()
+                .contains("object medium index")
+        );
+        s.pupil = Pupil {
+            kind: PupilType::ImageNa,
+            value: 0.3,
+        };
+        assert!(
+            (s.paraxial(s.reference()).unwrap()["image_na"]
+                .as_f64()
+                .unwrap()
+                - 0.3)
+                .abs()
+                < 1e-12
+        );
+        s.pupil = Pupil {
+            kind: PupilType::FNumber,
+            value: 5.,
+        };
+        assert!(
+            (s.paraxial(s.reference()).unwrap()["f_number"]
+                .as_f64()
+                .unwrap()
+                - 5.)
+                .abs()
+                < 1e-12
+        );
+    }
+    #[test]
+    fn object_medium_survives_dummy_surfaces_and_sets_geometric_pupil_distance() {
+        let mut s = immersed_interface();
+        let mut dummy = Surface::sphere(0., 10., "AIR", 20.);
+        dummy.interaction = Interaction::Dummy;
+        s.surfaces = vec![dummy, Surface::sphere(0., 10., "AIR", 20.)];
+        s.stop_index = 1;
+        s.object_distance = Some(100.);
+        s.field_type = FieldType::ObjectHeight;
+        s.fields = vec![Field::meridional(2.)];
+        s.pupil = Pupil {
+            kind: PupilType::EntrancePupilDiameter,
+            value: 2.,
+        };
+        s.update().unwrap();
+        assert!((s.pupil_matrix(s.reference()).unwrap().b - 10. / 1.5).abs() < 1e-12);
+        assert!((s.entrance_pupil_distance(s.reference()).unwrap() - 10.).abs() < 1e-12);
+        assert!((s.matrix(s.reference(), 1, 1).unwrap().1 - 1.5).abs() < 1e-12);
+        let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
+        assert!(ray.segments[1].point[1].abs() < 1e-9);
+        assert!((ray.segments[0].n_after - 1.5).abs() < 1e-12);
+        assert!((ray.segments[1].n_before - 1.5).abs() < 1e-12);
+        let expected_path = 1.5 * 110_f64.hypot(2.);
+        assert!((ray.last().opl + ray.entrance_opl - expected_path).abs() < 1e-9);
+    }
+    #[test]
+    fn plane_interface_refraction_and_paraxial_chief_use_object_index() {
+        let mut s = immersed_interface();
+        s.surfaces = vec![Surface::sphere(0., 10., "AIR", 20.)];
+        s.object_distance = Some(200.);
+        s.field_type = FieldType::ObjectHeight;
+        s.fields = vec![Field::meridional(1.)];
+        s.update().unwrap();
+        let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
+        let incoming_sine = -1. / 200_f64.hypot(1.);
+        let outgoing_sine = 1.5 * incoming_sine;
+        let expected = 10. * outgoing_sine / (1. - outgoing_sine * outgoing_sine).sqrt();
+        assert!((ray.image()[1] - expected).abs() < 1e-11);
+        assert!(
+            (s.paraxial_chief_image(&s.fields[0], s.reference()).unwrap()[1] + 0.075).abs() < 1e-13
+        );
+        s.object_distance = None;
+        s.field_type = FieldType::Angle;
+        s.fields[0].y = 3.;
+        s.update().unwrap();
+        let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
+        assert!((ray.direction[1] - 1.5 * 3_f64.to_radians().sin()).abs() < 1e-12);
+    }
     #[test]
     fn bk7_index() {
         assert!((index("N-BK7", 587.5618).unwrap() - 1.5168).abs() < 1e-5)

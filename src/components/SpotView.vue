@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { callTool, errorMessage } from '../api';
+import { rgbCss } from '../color';
 import { checkRevision, savedSystemChanged } from '../provenance';
 import { describeMapping, describeSampling, percent } from '../sampling';
 import type { OpticalSystem, PolychromaticSpot, PupilMapping, PupilSampling, RunInfo, SpotDiagram } from '../types';
@@ -75,6 +76,7 @@ const polyRows = computed<LedgerRow[]>(() =>
     sampled: f.transmitted + f.rejected,
     fraction: f.transmitted_fraction,
     effective: f.effective_weight,
+    color: f.color,
   })),
 );
 
@@ -110,7 +112,7 @@ const um = (v: number): string => (v * 1000).toFixed(2);
       v-if="mode === 'single' && spot && spotRun"
       :points="spot.points"
       :centroid="spot.centroid"
-      color="#327c9f"
+      :color="rgbCss(spotRun.color)"
       :opacity="0.65"
       :label="`Spot diagram of ${spot.points.length} transmitted rays centered on the area-weighted centroid, RMS radius ${um(spot.rms_radius)} micrometers`"
     />
@@ -118,9 +120,9 @@ const um = (v: number): string => (v * 1000).toFixed(2);
       v-else-if="mode === 'all' && poly && polyRun"
       :points="poly.points"
       :centroid="poly.centroid"
-      :wavelengths="poly.wavelengths"
+      :colors="poly.colors"
       :opacity="0.6"
-      :label="`Polychromatic spot diagram of ${poly.points.length} transmitted rays centered on the weighted centroid, RMS radius ${um(poly.rms_radius)} micrometers, colored by wavelength`"
+      :label="`Polychromatic spot diagram of ${poly.points.length} transmitted rays centered on the weighted centroid, RMS radius ${um(poly.rms_radius)} micrometers, colored by the saved wavelength colors`"
     />
     <p v-else class="empty" role="status">{{ (mode === 'all' ? polyPending : spotPending) ? 'Computing…' : 'No spot data yet.' }}</p>
 

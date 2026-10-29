@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import NumberField from './NumberField.vue';
+import { rgbToHex, withHex } from '../color';
 import type { Field, FieldType, OpticalSystem, PupilKind, PupilMapping, Vignetting, Wavelength } from '../types';
 import { FIELD_TYPES, PUPIL_KINDS, fieldUnit, glassKey, newField, newWavelength } from '../validation';
 
@@ -33,7 +34,7 @@ function setWavelength(i: number, p: Partial<Wavelength>): void {
   patch({ wavelengths: s.value.wavelengths.map((w, k) => (k === i ? { ...w, ...p } : w)) });
 }
 function addWavelength(): void {
-  patch({ wavelengths: [...s.value.wavelengths, newWavelength()] });
+  patch({ wavelengths: [...s.value.wavelengths, newWavelength(s.value.wavelengths.length)] });
 }
 function removeWavelength(i: number): void {
   const current = s.value.reference_wavelength;
@@ -42,6 +43,16 @@ function removeWavelength(i: number): void {
     wavelengths: s.value.wavelengths.filter((_, k) => k !== i),
     reference_wavelength: Math.max(0, Math.min(i < current ? current - 1 : current, remaining - 1)),
   });
+}
+
+/** RGB from a color input; the stored alpha is kept exactly and an unchanged color is not rewritten. */
+function setWavelengthColor(i: number, hex: string): void {
+  const next = withHex(s.value.wavelengths[i]!.color, hex);
+  if (next) setWavelength(i, { color: next });
+}
+function setFieldColor(i: number, hex: string): void {
+  const next = withHex(s.value.fields[i]!.color, hex);
+  if (next) setField(i, { color: next });
 }
 
 // ---- fields ---------------------------------------------------------------------------
@@ -54,7 +65,7 @@ function setVignetting(i: number, j: number, v: number): void {
   setField(i, { vignetting: next });
 }
 function addField(): void {
-  patch({ fields: [...s.value.fields, newField()] });
+  patch({ fields: [...s.value.fields, newField(s.value.fields.length)] });
 }
 function removeField(i: number): void {
   patch({ fields: s.value.fields.filter((_, k) => k !== i) });
@@ -93,7 +104,7 @@ function setInfinity(infinite: boolean): void {
       <div class="field">
         <label for="sys-pvalue">{{ PUPIL_LABELS[s.pupil.kind].name }} {{ PUPIL_LABELS[s.pupil.kind].unit && `(${PUPIL_LABELS[s.pupil.kind].unit})` }}</label>
         <NumberField id="sys-pvalue" min="0" :model-value="s.pupil.value" @update:model-value="(v: number) => patch({ pupil: { ...s.pupil, value: v } })" />
-        <small>Must be positive{{ s.pupil.kind === 'object_na' ? ' and below 1' : '' }}.</small>
+        <small>Must be positive{{ s.pupil.kind === 'object_na' ? ' and below the refractive index of the object medium' : '' }}.</small>
       </div>
       <div class="field">
         <label for="sys-pmap">Pupil ray mapping</label>
@@ -111,6 +122,19 @@ function setInfinity(infinite: boolean): void {
         <input v-else id="sys-obj" type="text" value="∞" disabled aria-label="Object distance: infinity" />
         <label class="inline"><input type="checkbox" :checked="s.object_distance === null" @change="setInfinity(($event.target as HTMLInputElement).checked)" /> Object at infinity</label>
         <small v-if="s.field_type !== 'angle' && s.object_distance === null" class="warn-text">Height fields need a finite distance.</small>
+      </div>
+      <div class="field">
+        <label for="sys-omat">Object material</label>
+        <input id="sys-omat" type="text" list="material-options" autocomplete="off" spellcheck="false" :value="s.object_material" @input="patch({ object_material: input($event) })" />
+        <small>Medium between the object and the first surface (finite or infinite object).</small>
+      </div>
+      <div class="field">
+        <label for="sys-olabel">Object label</label>
+        <input id="sys-olabel" type="text" maxlength="256" :value="s.object_label" @input="patch({ object_label: input($event) })" />
+      </div>
+      <div class="field">
+        <label for="sys-ilabel">Image label</label>
+        <input id="sys-ilabel" type="text" maxlength="256" :value="s.image_label" @input="patch({ image_label: input($event) })" />
       </div>
       <div class="field">
         <label for="sys-temp">Temperature (°C)</label>
@@ -133,13 +157,14 @@ function setInfinity(infinite: boolean): void {
       </div>
       <div class="table-scroll" role="region" aria-labelledby="wl-title" tabindex="0">
         <table>
-          <caption class="sr-only">Wavelengths in nm with weights; one is the reference wavelength.</caption>
-          <thead><tr><th scope="col">#</th><th scope="col">Wavelength (nm)</th><th scope="col">Weight</th><th scope="col">Reference</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <caption class="sr-only">Wavelengths in nm with weights and plot colors; one is the reference wavelength.</caption>
+          <thead><tr><th scope="col">#</th><th scope="col">Wavelength (nm)</th><th scope="col">Weight</th><th scope="col">Color</th><th scope="col">Reference</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             <tr v-for="(w, i) in s.wavelengths" :key="i">
               <th scope="row"><span class="surface-index">{{ i + 1 }}</span></th>
               <td><NumberField :aria-label="`Wavelength ${i + 1} (nm)`" :model-value="w.value" @update:model-value="(v: number) => setWavelength(i, { value: v })" /></td>
               <td><NumberField min="0" :aria-label="`Wavelength ${i + 1} weight`" :model-value="w.weight" @update:model-value="(v: number) => setWavelength(i, { weight: v })" /></td>
+              <td><input type="color" :aria-label="`Wavelength ${i + 1} color`" :value="rgbToHex(w.color)" @input="setWavelengthColor(i, input($event))" /></td>
               <td><input type="radio" name="ref-wl" :aria-label="`Use wavelength ${i + 1} as reference`" :checked="s.reference_wavelength === i" @change="patch({ reference_wavelength: i })" /></td>
               <td><button type="button" class="small" :disabled="s.wavelengths.length === 1" :aria-label="`Remove wavelength ${i + 1}`" @click="removeWavelength(i)">×</button></td>
             </tr>
@@ -156,10 +181,10 @@ function setInfinity(infinite: boolean): void {
       </div>
       <div class="table-scroll" role="region" aria-labelledby="fl-title" tabindex="0">
         <table>
-          <caption class="sr-only">Fields with weights and vignetting factors. Fields are referred to by their number.</caption>
+          <caption class="sr-only">Fields with weights, vignetting factors and plot colors. Fields are referred to by their number.</caption>
           <thead><tr>
             <th scope="col">#</th><th scope="col">X ({{ unit }})</th><th scope="col">Y ({{ unit }})</th><th scope="col">Weight</th>
-            <th v-for="v in VIGNETTING" :key="v" scope="col">Vig. {{ v }}</th><th scope="col"><span class="sr-only">Actions</span></th>
+            <th v-for="v in VIGNETTING" :key="v" scope="col">Vig. {{ v }}</th><th scope="col">Color</th><th scope="col"><span class="sr-only">Actions</span></th>
           </tr></thead>
           <tbody>
             <tr v-for="(f, i) in s.fields" :key="i">
@@ -168,6 +193,7 @@ function setInfinity(infinite: boolean): void {
               <td><NumberField :aria-label="`Field ${i + 1} y`" :model-value="f.y" @update:model-value="(v: number) => setField(i, { y: v })" /></td>
               <td><NumberField min="0" :aria-label="`Field ${i + 1} weight`" :model-value="f.weight" @update:model-value="(v: number) => setField(i, { weight: v })" /></td>
               <td v-for="(label, j) in VIGNETTING" :key="j"><NumberField :aria-label="`Field ${i + 1} vignetting ${label.toLowerCase()}`" :model-value="f.vignetting[j]!" @update:model-value="(v: number) => setVignetting(i, j, v)" /></td>
+              <td><input type="color" :aria-label="`Field ${i + 1} color`" :value="rgbToHex(f.color)" @input="setFieldColor(i, input($event))" /></td>
               <td><button type="button" class="small" :disabled="s.fields.length === 1" :aria-label="`Remove field ${i + 1}`" @click="removeField(i)">×</button></td>
             </tr>
           </tbody>

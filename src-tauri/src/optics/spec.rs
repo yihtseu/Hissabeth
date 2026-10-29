@@ -16,6 +16,7 @@ pub struct Field {
     pub y: f64,
     pub weight: f64,
     pub vignetting: [f64; 4],
+    pub color: [f64; 4],
 }
 impl Field {
     pub fn meridional(y: f64) -> Self {
@@ -24,6 +25,7 @@ impl Field {
             y,
             weight: 1.,
             vignetting: [0.; 4],
+            color: [0.196, 0.486, 0.623, 1.],
         }
     }
 }
@@ -32,6 +34,47 @@ impl Field {
 pub struct Wavelength {
     pub value: f64,
     pub weight: f64,
+    pub color: [f64; 4],
+}
+impl Wavelength {
+    pub fn new(value: f64, weight: f64) -> Self {
+        Self {
+            value,
+            weight,
+            color: wavelength_color(value),
+        }
+    }
+}
+pub fn valid_color(color: [f64; 4]) -> bool {
+    color
+        .iter()
+        .all(|c| c.is_finite() && (0. ..=1.).contains(c))
+}
+pub fn wavelength_color(nm: f64) -> [f64; 4] {
+    let (r, g, b) = if nm < 440. {
+        (((440. - nm) / 60.).clamp(0., 1.), 0., 1.)
+    } else if nm < 490. {
+        (0., (nm - 440.) / 50., 1.)
+    } else if nm < 510. {
+        (0., 1., (510. - nm) / 20.)
+    } else if nm < 580. {
+        ((nm - 510.) / 70., 1., 0.)
+    } else if nm < 645. {
+        (1., (645. - nm) / 65., 0.)
+    } else {
+        (1., 0., 0.)
+    };
+    let edge = if nm < 380. || nm > 780. {
+        0.5
+    } else if nm < 420. {
+        0.5 + 0.5 * (nm - 380.) / 40.
+    } else if nm > 700. {
+        0.5 + 0.5 * (780. - nm) / 80.
+    } else {
+        1.
+    };
+    let component = |x: f64| (x * edge).powf(0.8) * 0.85;
+    [component(r), component(g), component(b), 1.]
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]

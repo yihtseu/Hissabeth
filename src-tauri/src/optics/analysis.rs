@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Analysis families follow Geopter; calculations use f64 and explicit invalid-ray masks.
-use super::{Field, FieldFrame, PupilSampling, Ray, SpectralComponent, Spectrum, System, math::*, trace};
+use super::{
+    Field, FieldFrame, PupilSampling, Ray, SpectralComponent, Spectrum, System, math::*, trace,
+};
 use serde_json::{Value, json};
 
 pub fn ray_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, String> {
@@ -268,7 +270,7 @@ impl WavefrontReference {
         } else {
             dot(sub(ray.points[0], chief.points[0]), chief.launch_direction)
         };
-        let opd = input_difference
+        let opd = s.object_index(self.wavelength)? * input_difference
             + (ray.last().opl - chief.last().opl)
             + chief.last().n_after * (self.sphere_distance(ray)? - self.sphere_distance(chief)?);
         let waves = opd / (self.wavelength * 1e-6);
@@ -672,6 +674,7 @@ pub fn diffraction_mtf(
         let spectral = SpectralComponent {
             wavelength: wave.value,
             weight: wave.weight,
+            color: wave.color,
             pupil_samples: data.valid + data.failed,
             transmitted_samples: data.valid,
             transmitted_fraction: fraction,
@@ -684,7 +687,7 @@ pub fn diffraction_mtf(
 
 #[cfg(test)]
 mod tests {
-use super::*;
+    use super::*;
     #[test]
     fn chromatic_zero_at_reference() {
         let s = System::default();
@@ -923,12 +926,17 @@ pub fn polychromatic_spot(s: &System, f: &Field, sampling: PupilSampling) -> Res
             std::iter::repeat_n(component.wavelength, component.transmitted_samples)
         })
         .collect();
+    let colors: Vec<_> = components
+        .iter()
+        .flat_map(|component| std::iter::repeat_n(component.color, component.transmitted_samples))
+        .collect();
     let failures:Vec<_>=components.iter().map(|component| json!({
-        "wavelength":component.wavelength,"weight":component.weight,
+        "wavelength":component.wavelength,"weight":component.weight,"color":component.color,
         "transmitted":component.transmitted_samples,"rejected":component.pupil_samples-component.transmitted_samples,
         "transmitted_fraction":component.transmitted_fraction,"effective_weight":component.effective_weight
     })).collect();
     result["wavelengths"] = json!(wavelengths);
+    result["colors"] = json!(colors);
     result["failures"] = json!(failures);
     Ok(result)
 }
@@ -936,6 +944,35 @@ pub fn polychromatic_spot(s: &System, f: &Field, sampling: PupilSampling) -> Res
 #[cfg(test)]
 mod physical_tests {
     use super::*;
+    #[test]
+    fn finite_object_wavefront_matches_uniform_medium_sphere_intersection() {
+        use crate::optics::{FieldType, Interaction, Surface, Wavelength};
+        for image_distance in [10., -20.] {
+            let mut s = System::default();
+            s.object_material = "1.500000:60.000000".into();
+            s.wavelengths = vec![Wavelength::new(587.562, 1.)];
+            s.reference_wavelength = 0;
+            s.object_distance = Some(100.);
+            s.field_type = FieldType::ObjectHeight;
+            s.fields = vec![Field::meridional(0.)];
+            s.pupil.value = 2.;
+            let mut surface = Surface::sphere(0., image_distance, "AIR", 20.);
+            surface.interaction = Interaction::Dummy;
+            s.surfaces = vec![surface];
+            s.update().unwrap();
+            let wf = wavefront(&s, &s.fields[0], s.reference(), 9).unwrap();
+            // Intersect an object-centered straight line with the reference sphere.
+            let theta = (0.5_f64 / 100.).atan();
+            let b = (100. + image_distance) * theta.cos();
+            let root = (image_distance * image_distance
+                - ((100. + image_distance) * theta.sin()).powi(2))
+            .sqrt();
+            let distance =
+                100. * (100. + 2. * image_distance) / (b + image_distance.signum() * root);
+            let expected = 1.5 * (distance - 100.) / (587.562e-6);
+            assert!((wf.values[6 * 9 + 4].unwrap() - expected).abs() < 5e-8);
+        }
+    }
     #[test]
     fn circular_pupil_mtf_matches_overlap_formula() {
         let n = 128;
@@ -1022,6 +1059,7 @@ mod spectral_tests {
             spectral: SpectralComponent {
                 wavelength,
                 weight,
+                color: crate::optics::wavelength_color(wavelength),
                 pupil_samples: 10,
                 transmitted_samples: valid,
                 transmitted_fraction: fraction,
@@ -1095,16 +1133,7 @@ mod spectral_tests {
         let mut s = System::default();
         s.fields = vec![Field::meridional(0.)];
         s.pupil.value = 0.05;
-        s.wavelengths = vec![
-            Wavelength {
-                value: 486.1327,
-                weight: 1.,
-            },
-            Wavelength {
-                value: 656.2725,
-                weight: 3.,
-            },
-        ];
+        s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 3.)];
         s.reference_wavelength = 0;
         s.surfaces[1].thickness = s.paraxial(s.reference()).unwrap()["bfl"].as_f64().unwrap();
         s.update().unwrap();
@@ -1163,37 +1192,41 @@ mod spectral_tests {
             let mut s = System::default();
             s.pupil_mapping = mapping;
             s.pupil.value = 2.;
-            s.fields = vec![Field { x: 0.8, y: 0.6, weight: 1., vignetting: [0.; 4] }];
+            s.fields = vec![Field {
+                x: 0.8,
+                y: 0.6,
+                weight: 1.,
+                vignetting: [0.; 4],
+                color: [0.2, 0.5, 0.8, 1.],
+            }];
             s.surfaces[0].aperture = 0.65;
             s.update().unwrap();
             let wave = wavefront(&s, &s.fields[0], s.reference(), 16).unwrap();
             assert!(wave.failed > 0 && wave.valid > 3);
             let psf = diffraction_psf(&s, &s.fields[0], s.reference(), 16).unwrap();
-            let mtf = diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, None).unwrap();
+            let mtf =
+                diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, None).unwrap();
             s.fields[0].vignetting = [0.4, 0.2, -0.1, 0.3];
             s.update().unwrap();
             let compressed = wavefront(&s, &s.fields[0], s.reference(), 16).unwrap();
             assert_eq!(wave.values, compressed.values);
             assert_eq!(wave.failed, compressed.failed);
             assert_eq!(wave.valid, compressed.valid);
-            assert_eq!(psf, diffraction_psf(&s, &s.fields[0], s.reference(), 16).unwrap());
-            assert_eq!(mtf, diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, None).unwrap());
+            assert_eq!(
+                psf,
+                diffraction_psf(&s, &s.fields[0], s.reference(), 16).unwrap()
+            );
+            assert_eq!(
+                mtf,
+                diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, None).unwrap()
+            );
         }
     }
     #[test]
     fn spectral_diffraction_skips_zero_weight_and_reports_positive_weight_failure() {
         let mut s = System::default();
         s.fields = vec![Field::meridional(0.)];
-        s.wavelengths = vec![
-            Wavelength {
-                value: 587.5618,
-                weight: 2.,
-            },
-            Wavelength {
-                value: 435.834,
-                weight: 0.,
-            },
-        ];
+        s.wavelengths = vec![Wavelength::new(587.5618, 2.), Wavelength::new(435.834, 0.)];
         s.reference_wavelength = 0;
         s.update().unwrap();
         let a =
@@ -1225,16 +1258,7 @@ mod spectral_tests {
         s.stop_index = 1;
         s.pupil.value = 0.00001;
         s.fields = vec![Field::meridional(5.)];
-        s.wavelengths = vec![
-            Wavelength {
-                value: 486.1327,
-                weight: 1.,
-            },
-            Wavelength {
-                value: 656.2725,
-                weight: 1.,
-            },
-        ];
+        s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 1.)];
         s.reference_wavelength = 0;
         s.update().unwrap();
         let a = s

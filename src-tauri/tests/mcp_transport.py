@@ -33,10 +33,11 @@ def start_engine():
 engine = start_engine()
 relay = subprocess.Popen([str(BINARY), "--mcp"], env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 identifier = 0
+last_response_bytes = 0
 
 
 def request(method, params=None):
-    global identifier
+    global identifier, last_response_bytes
     identifier += 1
     message = dict(jsonrpc="2.0", id=identifier, method=method)
     if params is not None:
@@ -45,7 +46,9 @@ def request(method, params=None):
     relay.stdin.flush()
     if not select.select([relay.stdout], [], [], 20)[0]:
         raise TimeoutError(f"No response for {method}")
-    response = json.loads(relay.stdout.readline())
+    line = relay.stdout.readline()
+    last_response_bytes = len(line.encode())
+    response = json.loads(line)
     assert response["id"] == identifier, response
     assert "error" not in response, response
     return response["result"]
@@ -54,7 +57,7 @@ def request(method, params=None):
 def tool(name, args=None, error=False):
     result = request("tools/call", dict(name=name, arguments=args or {}))
     assert result["isError"] is error, result
-    return result if error else result["structuredContent"]
+    return result if error else json.loads(result["content"][0]["text"])
 
 
 def persistent_solves():
@@ -124,7 +127,7 @@ def apertures():
     plane.update(radius=0, thickness=10, material="AIR", aperture=1, clear_aperture=False, conic=0, even=[], odd=[], semi_diameter=999)
     second = copy.deepcopy(plane)
     second.update(aperture=2, clear_aperture=True)
-    system.update(surfaces=[plane, second], fields=[dict(x=0, y=math.degrees(math.atan(.1)), weight=1, vignetting=[0]*4)], pupil=dict(kind="entrance_pupil_diameter", value=10), object_distance=None, stop_index=0)
+    system.update(surfaces=[plane, second], fields=[dict(x=0, y=math.degrees(math.atan(.1)), weight=1, vignetting=[0]*4,color=[.2,.5,.8,1])], pupil=dict(kind="entrance_pupil_diameter", value=10), object_distance=None, stop_index=0)
     tool("system_set",dict(system=system,revision=current["revision"]))
     current=tool("system_get")
     assert abs(current["system"]["surfaces"][1]["semi_diameter"]-6)<1e-8
@@ -211,7 +214,7 @@ def spectrum_sampling():
     system=copy.deepcopy(initial["system"])
     plane=copy.deepcopy(system["surfaces"][0])
     plane.update(radius=0,thickness=10,material="AIR",aperture=2,clear_aperture=True,semi_diameter=0,conic=0,even=[],odd=[])
-    system.update(surfaces=[plane],fields=[dict(x=0,y=0,weight=1,vignetting=[0]*4)],pupil=dict(kind="entrance_pupil_diameter",value=2),stop_index=0,object_distance=None)
+    system.update(surfaces=[plane],fields=[dict(x=0,y=0,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],pupil=dict(kind="entrance_pupil_diameter",value=2),stop_index=0,object_distance=None)
     tool("system_set",dict(system=system,revision=initial["revision"]))
     current=tool("system_get")
     sampling=dict(kind="hexapolar",rings=2)
@@ -231,7 +234,7 @@ def spectrum_sampling():
     ]: tool(name,args,error=True)
     assert tool("system_get")==before
     system=copy.deepcopy(initial["system"])
-    system.update(stop_index=1,pupil=dict(kind="entrance_pupil_diameter",value=.00001),fields=[dict(x=0,y=5,weight=1,vignetting=[0]*4)],wavelengths=[dict(value=486.1327,weight=1),dict(value=656.2725,weight=1),dict(value=435.834,weight=0)],reference_wavelength=0)
+    system.update(stop_index=1,pupil=dict(kind="entrance_pupil_diameter",value=.00001),fields=[dict(x=0,y=5,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],wavelengths=[dict(value=486.1327,weight=1,color=[.8,.7,0,1]),dict(value=656.2725,weight=1,color=[.8,.7,0,1]),dict(value=435.834,weight=0,color=[.8,.7,0,1])],reference_wavelength=0)
     tool("system_set",dict(system=system,revision=before["revision"]))
     current=tool("system_get")
     a=tool("trace_ray",dict(field_index=0,x=0,y=0,wavelength=486.1327))["points"][-1][1]
@@ -308,10 +311,163 @@ def spectrum_sampling():
     print("PASS: weighted hexapolar spot/energy, strict spectral/sampling arguments, real lateral-color OTF cancellation, diffraction physical frequencies/complex components, skipped zero weights, positive-weight failure without mutation, engine analysis revisions")
 
 
+def focus_overflow():
+    import copy
+    state=tool("system_get");system=state["system"]
+    a=copy.deepcopy(system["surfaces"][0]);b=copy.deepcopy(system["surfaces"][1])
+    a.update(radius=1,thickness=100,material="1.500000:60.000000",aperture=.1,conic=0,even=[],odd=[])
+    b.update(radius=-1,thickness=10,material="AIR",aperture=.1,conic=0,even=[],odd=[])
+    system.update(object_distance=1e308,surfaces=[a,b],stop_index=0,
+                  fields=[dict(x=0,y=0,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],
+                  wavelengths=[dict(value=587.562,weight=1,color=[.7,.8,0,1])],reference_wavelength=0,
+                  pupil=dict(kind="entrance_pupil_diameter",value=.001))
+    tool("system_set",dict(system=system,revision=state["revision"]))
+    before=tool("system_get");saved=(DATA/"system.json").read_bytes()
+    for name,args in [("paraxial",{}),("spherochromatism",dict(samples=5)),
+                      ("longitudinal_aberration",dict(samples=5)),
+                      ("chromatic_focus",dict(lower=500,upper=650,samples=3))]:
+        error=tool(name,args,error=True)
+        assert "nonfinite" in error["content"][0]["text"].lower(),error
+        assert tool("system_get")==before and (DATA/"system.json").read_bytes()==saved
+    print("PASS: finite object-distance overflow returns errors for paraxial, spherochromatism, longitudinal and chromatic focus without killing the broker or mutating the project")
+
+
+def silica_export():
+    import copy
+    state=tool("system_get");system=state["system"]
+    system.update(object_distance=300,temperature=25,pupil_mapping="reference_entrance_pupil")
+    for position in range(len(system["surfaces"])+1):
+        trial=copy.deepcopy(system)
+        if position==0: trial["object_material"]="FUSED_SILICA"
+        else: trial["surfaces"][position-1]["material"]="FUSED_SILICA"
+        tool("system_set",dict(system=trial,revision=tool("system_get")["revision"]))
+        before=tool("system_get");saved=(DATA/"system.json").read_bytes()
+        error=tool("project_export",dict(format="geopter"),error=True)
+        assert "FUSED_SILICA" in error["content"][0]["text"]
+        assert tool("system_get")==before and (DATA/"system.json").read_bytes()==saved
+        assert json.loads(tool("project_export",dict(format="hissabeth"))["text"])==before["system"]
+    print("PASS: real MCP rejects Geopter export for built-in silica in object and every surface medium without mutation; native export retains the prescription")
+
+
+def project_metadata():
+    import copy
+    global engine
+    state = tool("system_get")
+    system = copy.deepcopy(state["system"])
+    surface = copy.deepcopy(system["surfaces"][0])
+    surface.update(radius=-50, thickness=123, material="AIR", aperture=20,
+                   clear_aperture=True, conic=0, even=[], odd=[], gap_solve=dict(kind="fixed"))
+    colors = [[.923456789012345, .123456789012345, .2, 0],
+              [.1, .812345678901234, .2, .25], [.9, .7, .1, .5], [.1, .2, .9, 1]]
+    waves = [dict(value=v, weight=w, color=c) for v, w, c in zip(
+        [656.273, 587.562, 587.562, 486.133], [1, 1, 2, 0], colors)]
+    fields = [dict(x=0, y=0, weight=1, vignetting=[0]*4, color=c) for c in colors[:2]]
+    system.update(object_material="1.500000:60.000000", object_label="Submerged emitter",
+                  image_label="Measured detector", object_distance=300, temperature=25,
+                  pressure=101325, pupil_mapping="reference_entrance_pupil", surfaces=[surface],
+                  stop_index=0, fields=fields, wavelengths=waves, reference_wavelength=1,
+                  pupil=dict(kind="entrance_pupil_diameter", value=.0002))
+    tool("system_set", dict(system=system, revision=state["revision"]))
+    first = tool("paraxial")
+    for key, expected in [("object_index", 1.5), ("efl", 100), ("image_distance", 200),
+                          ("magnification", -1), ("front_focal_distance", -150)]:
+        assert abs(first[key]-expected)<1e-9, (key, first[key])
+    ray = tool("trace_ray", dict(x=0, y=.0001))
+    last = ray["segments"][-1]["point"]
+    focus = last[2]-last[1]*ray["direction"][2]/ray["direction"][1]
+    assert abs(focus-200)<1e-4, focus
+    expected = tool("system_get")["system"]
+    for format in ("hissabeth", "geopter"):
+        text = tool("project_export", dict(format=format))["text"]
+        tool("project_import", dict(format=format, text=text, revision=tool("system_get")["revision"]))
+        actual = tool("system_get")["system"]
+        for key in ("object_material", "object_label", "image_label", "fields", "wavelengths"):
+            assert actual[key]==expected[key], (format, key, actual[key], expected[key])
+    poly = tool("polychromatic_spot", dict(field_index=0, sampling=dict(kind="hexapolar", rings=2)))
+    assert len(poly["points"])==len(poly["colors"])==57
+    for i, color in enumerate(colors[:3]):
+        assert all(c==color for c in poly["colors"][19*i:19*(i+1)])
+        assert poly["failures"][i]["color"]==color
+    layout = tool("layout")
+    assert layout["field_indices"]==[0]*7+[1]*7
+    sphero = tool("spherochromatism", dict(samples=5))
+    assert len(sphero["curves"])==4
+    for i, curve in enumerate(sphero["curves"]):
+        assert curve["wavelength_index"]==i and curve["color"]==colors[i]
+        assert curve["weight"]==waves[i]["weight"] and curve["points"][0]["shift"]==0
+    assert abs(sphero["curves"][0]["points"][0]["focus"]-sphero["reference_focus"])>1e-5
+    tool("autofocus", dict(revision=tool("system_get")["revision"]))
+    assert abs(tool("system_get")["system"]["surfaces"][0]["thickness"]-200)<1e-8
+    definition = dict(kind="marginal_height", value=0, zone=0)
+    tool("solve", dict(gap=0, definition=definition, revision=tool("system_get")["revision"]))
+    state = tool("system_get")
+    state["system"]["object_material"]="1.600000:60.000000"
+    tool("system_set", dict(system=state["system"], revision=state["revision"]))
+    state = tool("system_get")
+    assert abs(state["system"]["surfaces"][0]["thickness"]-150)<1e-8
+    stored = (DATA/"system.json").read_bytes()
+    for mutation in range(5):
+        broken = copy.deepcopy(state["system"])
+        if mutation==0: del broken["object_material"]
+        elif mutation==1: del broken["fields"][0]["color"]
+        elif mutation==2: broken["wavelengths"][0]["color"]=[0,0,0,1.1]
+        elif mutation==3: broken["object_material"]="UNKNOWN_OBJECT_MEDIUM"
+        if mutation==4:
+            tool("system_set", dict(system=broken, revision=state["revision"]-1), error=True)
+        else:
+            tool("project_import", dict(format="hissabeth", text=json.dumps(broken), revision=state["revision"]), error=True)
+        assert tool("system_get")==state and (DATA/"system.json").read_bytes()==stored
+    engine.terminate(); engine.wait(timeout=5)
+    state["system"]["surfaces"][0]["thickness"]=999
+    (DATA/"system.json").write_text(json.dumps(state["system"]))
+    (DATA/"endpoint.json").unlink(missing_ok=True)
+    engine = start_engine()
+    recovered = tool("system_get")["system"]
+    assert abs(recovered["surfaces"][0]["thickness"]-150)<1e-8
+    assert recovered["object_material"]=="1.600000:60.000000"
+    assert recovered["wavelengths"]==waves and recovered["fields"]==fields
+    assert json.loads((DATA/"system.json").read_text())==recovered
+    print("PASS: real MCP immersed Gaussian conjugates/rays, native and Geopter RGBA/labels/medium exchange, duplicate spectral/field identity, all-wavelength spherochromatism, autofocus and saved solve reapplication, atomic rejection and same-relay restart")
+
+
+def maximum_payload():
+    import copy
+    state = tool("system_get"); system = state["system"]
+    surface = copy.deepcopy(system["surfaces"][0])
+    surface.update(radius=0, thickness=10, material="AIR", aperture=20,
+                   clear_aperture=True, conic=0, even=[], odd=[], gap_solve=dict(kind="fixed"))
+    radius = 1.234567891234567
+    field = [1.234567891234567, -2.345678912345678]
+    color = [.1234567890123456, .2345678901234567, .3456789012345678, .4567890123456789]
+    system.update(surfaces=[surface, copy.deepcopy(surface)], object_material="AIR", object_distance=None,
+                  stop_index=0, pupil_mapping="reference_entrance_pupil", reference_wavelength=0,
+                  pupil=dict(kind="entrance_pupil_diameter", value=2*radius),
+                  wavelengths=[dict(value=587.562123456789, weight=1, color=color) for _ in range(32)],
+                  fields=[dict(x=field[0], y=field[1], weight=1, vignetting=[0]*4, color=color)])
+    tool("system_set", dict(system=system, revision=state["revision"]))
+    began = time.monotonic()
+    result = tool("polychromatic_spot", dict(field_index=0, sampling=dict(kind="grid", count=129)))
+    size = last_response_bytes
+    pupils = [(i/64-1, j/64-1) for i in range(129) for j in range(129) if (i/64-1)**2+(j/64-1)**2<=1+1e-12]
+    count = len(pupils)*32
+    assert count==411296 and len(result["points"])==len(result["colors"])==len(result["weights"])==count
+    assert size>64_000_000, size
+    assert all(c==color for c in result["colors"])
+    shift = [20*math.tan(math.radians(f)) for f in field]
+    for index in (0, len(pupils)-1, count-1):
+        xy = pupils[index%len(pupils)]
+        assert max(abs(a-(radius*p+q)) for a,p,q in zip(result["points"][index], xy, shift))<1e-10
+    assert max(abs(a-b) for a,b in zip(result["centroid"], shift))<1e-9
+    rms = radius*math.sqrt(sum(x*x+y*y for x,y in pupils)/len(pupils))
+    assert abs(result["rms_radius"]-rms)<1e-9
+    assert abs(math.fsum(result["weights"])-32)<1e-10
+    print(f"PASS: real stdio relay returned {size} bytes, {count} colored rays, complete arrays and independent plane/centroid/RMS checks in {time.monotonic()-began:.2f}s")
+
+
 def fft_pupil():
     for mapping in ("real_stop","reference_entrance_pupil"):
         saved=tool("system_get");system=saved["system"]
-        system.update(pupil_mapping=mapping,pupil=dict(kind="entrance_pupil_diameter",value=2),fields=[dict(x=.8,y=.6,weight=1,vignetting=[0]*4)])
+        system.update(pupil_mapping=mapping,pupil=dict(kind="entrance_pupil_diameter",value=2),fields=[dict(x=.8,y=.6,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])])
         system["surfaces"][0]["aperture"]=.65
         tool("system_set",dict(system=system,revision=saved["revision"]))
         requests=[("spot_diagram",dict(field_index=0,sampling=dict(kind="hexapolar",rings=4))),("polychromatic_spot",dict(field_index=0,sampling=dict(kind="hexapolar",rings=4))),("encircled_energy",dict(field_index=0,sampling=dict(kind="hexapolar",rings=4),samples=9)),("geometric_mtf",dict(field_index=0,sampling=dict(kind="hexapolar",rings=4),spectrum=dict(kind="polychromatic"))),("wavefront",dict(field_index=0,grid=16)),("diffraction_psf",dict(field_index=0,grid=16)),("diffraction_mtf",dict(field_index=0,grid=16,spectrum=dict(kind="polychromatic")))]
@@ -347,6 +503,18 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--focus-overflow" in sys.argv:
+        focus_overflow()
+        raise SystemExit(0)
+    if "--silica-export" in sys.argv:
+        silica_export()
+        raise SystemExit(0)
+    if "--project-metadata" in sys.argv:
+        project_metadata()
+        raise SystemExit(0)
+    if "--maximum-payload" in sys.argv:
+        maximum_payload()
+        raise SystemExit(0)
     if "--fft-pupil" in sys.argv:
         fft_pupil()
         raise SystemExit(0)

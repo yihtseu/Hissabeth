@@ -32,20 +32,6 @@ export function fmt(v: number, digits = 3): string {
   return a >= 1e5 || a < 1e-3 ? v.toExponential(digits - 1) : String(Number(v.toPrecision(digits)));
 }
 
-/** Approximate display colour of a wavelength in nm; UV/IR are shown as dim violet/red. Darkened for white backgrounds. */
-export function wavelengthColor(nm: number): string {
-  let r = 0, g = 0, b = 0;
-  if (nm < 440) { r = Math.max(0, (440 - nm) / 60); b = 1; }
-  else if (nm < 490) { g = (nm - 440) / 50; b = 1; }
-  else if (nm < 510) { g = 1; b = (510 - nm) / 20; }
-  else if (nm < 580) { r = (nm - 510) / 70; g = 1; }
-  else if (nm < 645) { r = 1; g = (645 - nm) / 65; }
-  else { r = 1; }
-  const edge = nm < 380 ? 0.5 : nm < 420 ? 0.5 + (0.5 * (nm - 380)) / 40 : nm > 780 ? 0.5 : nm > 700 ? 0.5 + (0.5 * (780 - nm)) / 80 : 1;
-  const c = (v: number): number => Math.round(255 * Math.pow(v * edge, 0.8) * 0.85);
-  return `rgb(${c(r)},${c(g)},${c(b)})`;
-}
-
 export function extent(values: Iterable<number | null | undefined>): [number, number] | null {
   let lo = Infinity, hi = -Infinity;
   for (const v of values) {

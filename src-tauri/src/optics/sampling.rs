@@ -176,10 +176,7 @@ pub enum Spectrum {
 impl Spectrum {
     pub fn wavelengths(self, system: &System) -> Result<Vec<Wavelength>, String> {
         let waves = match self {
-            Self::Monochromatic { wavelength } => vec![Wavelength {
-                value: wavelength,
-                weight: 1.,
-            }],
+            Self::Monochromatic { wavelength } => vec![Wavelength::new(wavelength, 1.)],
             Self::Polychromatic {} => system
                 .wavelengths
                 .iter()
@@ -205,6 +202,7 @@ impl Spectrum {
 pub struct SpectralComponent {
     pub wavelength: f64,
     pub weight: f64,
+    pub color: [f64; 4],
     pub pupil_samples: usize,
     pub transmitted_samples: usize,
     pub transmitted_fraction: f64,
@@ -216,6 +214,7 @@ impl SpectralComponent {
         Self {
             wavelength: wave.value,
             weight: wave.weight,
+            color: wave.color,
             pupil_samples: bundle.sampled_rays,
             transmitted_samples: bundle.points.len(),
             transmitted_fraction,
@@ -265,6 +264,50 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn duplicate_wavelengths_keep_per_entry_plot_colors_and_layout_field_indices() {
+        let mut s = planes(2.);
+        let a = [0.125, 0.25, 0.875, 0.];
+        let b = [0.625, 0.75, 0.375, 0.5];
+        s.wavelengths = vec![
+            Wavelength {
+                color: a,
+                ..Wavelength::new(587.562, 1.)
+            },
+            Wavelength {
+                color: b,
+                ..Wavelength::new(587.562, 2.)
+            },
+            Wavelength::new(435.834, 0.),
+        ];
+        s.fields = vec![
+            Field {
+                color: a,
+                ..Field::meridional(0.)
+            },
+            Field {
+                color: b,
+                ..Field::meridional(0.)
+            },
+        ];
+        s.reference_wavelength = 0;
+        s.update().unwrap();
+        let poly =
+            analysis::polychromatic_spot(&s, &s.fields[0], PupilSampling::Hexapolar { rings: 2 })
+                .unwrap();
+        let colors = poly["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 38);
+        assert!(colors[..19].iter().all(|c| *c == json!(a)));
+        assert!(colors[19..].iter().all(|c| *c == json!(b)));
+        assert_eq!(poly["failures"][0]["color"], json!(a));
+        assert_eq!(poly["failures"][1]["color"], json!(b));
+        let layout = s.layout();
+        assert_eq!(
+            layout["field_indices"],
+            json!([0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1])
+        );
+        assert_eq!(layout["rays"].as_array().unwrap().len(), 14);
+    }
     #[test]
     fn hexapolar_annuli_have_unit_area_symmetry_and_known_radial_moment() {
         for rings in [1, 2, 8, 64] {
@@ -352,18 +395,9 @@ mod tests {
         let mut s = System::default();
         s.fields = vec![Field::meridional(0.)];
         s.wavelengths = vec![
-            Wavelength {
-                value: 587.5618,
-                weight: 1.,
-            },
-            Wavelength {
-                value: 587.5618,
-                weight: 3.,
-            },
-            Wavelength {
-                value: 435.834,
-                weight: 0.,
-            },
+            Wavelength::new(587.5618, 1.),
+            Wavelength::new(587.5618, 3.),
+            Wavelength::new(435.834, 0.),
         ];
         s.reference_wavelength = 0;
         s.update().unwrap();
@@ -398,21 +432,36 @@ mod tests {
     #[test]
     fn area_analyses_integrate_nominal_pupil_despite_stored_ray_compression() {
         for mapping in [PupilMapping::RealStop, PupilMapping::ReferenceEntrancePupil] {
-            for sampling in [PupilSampling::Grid { count: 17 }, PupilSampling::Hexapolar { rings: 4 }] {
+            for sampling in [
+                PupilSampling::Grid { count: 17 },
+                PupilSampling::Hexapolar { rings: 4 },
+            ] {
                 let mut s = planes(0.6);
                 s.pupil_mapping = mapping;
                 s.update().unwrap();
                 let spot = s.spot_field(&s.fields[0], s.reference(), sampling).unwrap();
                 assert!(spot["blocked"].as_u64().unwrap() > 0);
                 let poly = analysis::polychromatic_spot(&s, &s.fields[0], sampling).unwrap();
-                let energy = analysis::encircled_energy(&s, &s.fields[0], s.reference(), sampling, 5).unwrap();
+                let energy =
+                    analysis::encircled_energy(&s, &s.fields[0], s.reference(), sampling, 5)
+                        .unwrap();
                 let args = json!({"field_index":0,"sampling":sampling,"spectrum":{"kind":"polychromatic"}});
                 let mtf = crate::compute::geometric_mtf(&s, &args).unwrap();
                 s.fields[0].vignetting = [0.4, 0.2, -0.1, 0.3];
                 s.update().unwrap();
-                assert_eq!(spot, s.spot_field(&s.fields[0], s.reference(), sampling).unwrap());
-                assert_eq!(poly, analysis::polychromatic_spot(&s, &s.fields[0], sampling).unwrap());
-                assert_eq!(energy, analysis::encircled_energy(&s, &s.fields[0], s.reference(), sampling, 5).unwrap());
+                assert_eq!(
+                    spot,
+                    s.spot_field(&s.fields[0], s.reference(), sampling).unwrap()
+                );
+                assert_eq!(
+                    poly,
+                    analysis::polychromatic_spot(&s, &s.fields[0], sampling).unwrap()
+                );
+                assert_eq!(
+                    energy,
+                    analysis::encircled_energy(&s, &s.fields[0], s.reference(), sampling, 5)
+                        .unwrap()
+                );
                 assert_eq!(mtf, crate::compute::geometric_mtf(&s, &args).unwrap());
             }
         }

@@ -36,9 +36,13 @@ export interface Surface {
   interaction: Interaction;
 }
 
+/** Four finite values in 0..1. Plots use RGB; alpha is stored metadata. */
+export type RGBA = [number, number, number, number];
+
 export interface Wavelength {
   value: number;
   weight: number;
+  color: RGBA;
 }
 
 /** vignetting order: [upper y, lower y, upper x, lower x]; any finite value < 1 (positive trims, negative enlarges, 0 nominal). */
@@ -49,6 +53,7 @@ export interface Field {
   y: number;
   weight: number;
   vignetting: Vignetting;
+  color: RGBA;
 }
 
 export interface Pupil {
@@ -82,6 +87,10 @@ export interface OpticalSystem {
   /** How pupil coordinates map to rays; part of the saved model, no default when omitted. */
   pupil_mapping: PupilMapping;
   object_distance: number | null;
+  /** Material key of the object medium (same keys as surface materials); finite and infinite conjugates. */
+  object_material: string;
+  object_label: string;
+  image_label: string;
   stop_index: number;
   temperature: number;
   pressure: number;
@@ -110,6 +119,10 @@ export interface Paraxial {
   exit_pupil_distance: number | null;
   exit_pupil_radius: number | null;
   image_index: number;
+  object_index: number;
+  object_na: number | null;
+  image_na: number;
+  front_focal_distance: number;
 }
 
 export interface Ray {
@@ -130,6 +143,8 @@ export interface Layout {
   /** Saved-model revision the engine held while computing this reply. */
   revision: number;
   rays: Ray[];
+  /** Saved field number of each ray, aligned with `rays`. */
+  field_indices: number[];
   rejected: RejectedRay[];
 }
 
@@ -148,6 +163,7 @@ export interface SpectralComponent {
   transmitted_samples: number;
   transmitted_fraction: number;
   effective_weight: number;
+  color: RGBA;
 }
 
 export interface ComplexOtf {
@@ -160,6 +176,8 @@ export interface RunInfo {
   revision: number;
   field: string;
   wavelength: number;
+  /** Saved color of the selected wavelength entry. */
+  color: RGBA;
   mapping: PupilMapping;
 }
 
@@ -189,6 +207,8 @@ export interface PolychromaticSpot {
   points: [number, number][];
   weights: number[];
   wavelengths: number[];
+  /** Saved RGBA per point, aligned with `points`; duplicate wavelength values can differ. */
+  colors: RGBA[];
   centroid: [number, number];
   rms_radius: number;
   transmitted_weight: number;
@@ -201,6 +221,7 @@ export interface PolychromaticSpot {
     rejected: number;
     transmitted_fraction: number;
     effective_weight: number;
+    color: RGBA;
   }[];
   units: string;
 }
@@ -496,11 +517,21 @@ export interface EncircledEnergy {
   units: string;
 }
 
+/** Diagnostic over every stored wavelength, zero weights included; not a weighted spectrum. */
+export interface Spherochromatism {
+  revision: number;
+  curves: (LongitudinalAberration & { color: RGBA; weight: number; wavelength_index: number })[];
+  reference_focus: number;
+  reference_wavelength: number;
+  units: 'mm';
+}
+
 export interface AnalysisResults {
   ray_fan: RayFan;
   opd_fan: OpdFan;
   chromatic_focus: ChromaticFocus;
   longitudinal_aberration: LongitudinalAberration;
+  spherochromatism: Spherochromatism;
   astigmatism: Astigmatism;
   distortion: Distortion;
   wavefront: Wavefront;

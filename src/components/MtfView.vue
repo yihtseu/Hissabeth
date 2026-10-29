@@ -55,6 +55,8 @@ const rows = computed<LedgerRow[]>(() =>
     sampled: c.pupil_samples,
     fraction: c.transmitted_fraction,
     effective: c.effective_weight,
+    // A monochromatic reply may use a generated display color; the selected saved entry's color was captured at dispatch.
+    color: props.mtf?.spectrum.kind === 'monochromatic' && props.run ? props.run.color : c.color,
   })),
 );
 function onMax(e: Event): void {
