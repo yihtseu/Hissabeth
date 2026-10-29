@@ -12,6 +12,7 @@ import MaterialsPanel from './components/MaterialsPanel.vue';
 import LayoutView from './components/LayoutView.vue';
 import MetricsBar from './components/MetricsBar.vue';
 import MtfView from './components/MtfView.vue';
+import PrescriptionReport from './components/PrescriptionReport.vue';
 import RayInspection from './components/RayInspection.vue';
 import SpotView from './components/SpotView.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
@@ -185,6 +186,13 @@ function onTabKey(e: KeyboardEvent, index: number): void {
           />
           <RayInspection
             v-if="tab === 'Ray inspection'"
+            :system="wb.system.value"
+            :revision="wb.revision.value"
+            :online="wb.online.value"
+            :dirty="wb.dirty.value"
+          />
+          <PrescriptionReport
+            v-if="tab === 'Prescription report'"
             :system="wb.system.value"
             :revision="wb.revision.value"
             :online="wb.online.value"

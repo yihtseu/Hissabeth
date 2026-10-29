@@ -60,6 +60,47 @@ def tool(name, args=None, error=False):
     return result if error else json.loads(result["content"][0]["text"])
 
 
+def prescription_report():
+    global engine
+    import copy
+    snapshot=tool("system_get")
+    tool("system_set",dict(system=snapshot["system"],revision=snapshot["revision"]))
+    initial=tool("system_get");revision=initial["revision"]
+    disk=(DATA/"system.json").read_bytes()
+    all_sections=["general","specification","first_order","lens_data","surface_data"]
+    args=dict(sections=list(reversed(all_sections)),wavelength=587.5618,precision=6)
+    result=tool("prescription_report",args)
+    assert result["revision"]==revision and [s["id"] for s in result["sections"]]==all_sections
+    assert tool("capabilities")["scope"]["assembled_prescription_report"]
+    assert tool("system_get")==initial and (DATA/"system.json").read_bytes()==disk
+    for invalid in [{},dict(args,precision=16),dict(args,precision=1.5),dict(args,wavelength=99),dict(args,sections=["general","general"]),dict(args,sections=["invalid"]),dict(args,revision=revision)]:
+        tool("prescription_report",invalid,error=True)
+    empty=tool("prescription_report",dict(args,sections=[]))
+    assert empty["sections"]==[] and empty["diagnostics"]==[] and "Sections: none" in empty["text"]
+    system=copy.deepcopy(initial["system"])
+    system["name"]="Report\ttitle\nnext";system["note"]="First line\nSecond line"
+    system["wavelengths"].append(dict(system["wavelengths"][0],weight=0))
+    system["image_surface"].update(even=[1e-20,0],odd=[1e-8,0])
+    revision=tool("system_set",dict(system=system,revision=revision))["revision"]
+    result=tool("prescription_report",args)
+    def table(section,name):
+        return next(t for s in result["sections"] if s["id"]==section for t in s["tables"] if t["id"]==name)
+    assert "Title: Report\\ttitle\\nnext" in result["text"] and "First line\nSecond line" in result["text"]
+    assert len(table("specification","wavelengths")["rows"])==4
+    profiles={r["id"]:r["cells"][1] for r in table("surface_data","image")["rows"]}
+    assert profiles["even_4"]["value"]==1e-20 and profiles["even_4"]["text"]=="1.000000e-20"
+    assert profiles["odd_4"]["value"]==0
+    for section in result["sections"]:
+        for t in section["tables"]:
+            assert all(len(row["cells"])==len(t["columns"]) for row in t["rows"])
+    partial=tool("prescription_report",dict(args,wavelength=100))
+    assert partial["sections"] and partial["diagnostics"]
+    engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink();engine=start_engine()
+    recovered=tool("prescription_report",args)
+    assert recovered["revision"]!=revision and recovered["sections"]==result["sections"]
+    print("PASS: real prescription-report schemas, canonical sections and text, exact small/zero coefficients, duplicate/zero-weight spectra, localized spectral diagnostics, read-only saved state and same-relay restart")
+
+
 def field_curvature():
     global engine
     import copy
@@ -951,6 +992,9 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--prescription-report" in sys.argv:
+        prescription_report()
+        raise SystemExit(0)
     if "--field-curvature" in sys.argv:
         field_curvature()
         raise SystemExit(0)

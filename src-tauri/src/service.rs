@@ -1,6 +1,6 @@
 use crate::optics::{
     self, Field, PupilSampling, Spectrum, System, analysis, aperture, focus, inspection, material,
-    project, solve,
+    project, report, solve,
 };
 use serde_json::{Value, json};
 use std::{
@@ -178,6 +178,14 @@ impl Engine {
                 r["warnings"] = json!(glasses.warnings);
                 Ok(r)
             }
+            "prescription_report" => serde_json::to_value(report::generate(
+                &self.system,
+                self.revision,
+                serde_json::from_value(args["sections"].clone()).map_err(|e| e.to_string())?,
+                w,
+                args["precision"].as_u64().unwrap() as usize,
+            )?)
+            .map_err(|e| e.to_string()),
             "paraxial" => self.system.paraxial(w),
             "paraxial_trace" => inspection::paraxial_trace(&self.system, &field, w),
             "trace_inspect" => inspection::inspect(
@@ -348,11 +356,12 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
         if [
+            "prescription_report",
             "paraxial",
             "paraxial_trace",
             "trace_inspect",
@@ -584,6 +593,12 @@ pub fn tools() -> Value {
         "Continuous radial field sweep of analytic sagittal/tangential chief-ray foci for every stored wavelength, including zero weights and duplicates. Default endpoint is +Y at the maximum stored field radius; optional field_end selects a 2D slice. Shifts reference the stored image vertex; retain per-branch failures.",
         json!({"field_end":pair,"samples":integer(2,257)}),
         &["samples"],
+    );
+    add(
+        "prescription_report",
+        "Assemble selected saved-prescription sections as structured tables and the same canonical text. Includes endpoints, first-order/cardinal quantities, actual media, signed gaps, profiles and gap relations. Per-cell errors preserve other data; no sections returns header only. Does not mutate the system.",
+        json!({"sections":array(enumeration(&["general","specification","first_order","lens_data","surface_data"]),0,5),"wavelength":wave,"precision":integer(0,15)}),
+        &["sections", "wavelength", "precision"],
     );
     let common = json!({"wavelength":wave,"field_index":integer(0,63),"field":num(-1e9,1e9),"field_x":num(-1e9,1e9)});
     for (name, description) in [
@@ -1032,6 +1047,38 @@ pub fn relay() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prescription_reports_validate_requests_and_leave_saved_state_unchanged() {
+        let mut e = engine("prescription-report");
+        let saved = e.system.clone();
+        e.call("system_set", json!({"system":saved,"revision":e.revision}))
+            .unwrap();
+        let before = e.call("system_get", json!({})).unwrap();
+        let bytes = std::fs::read(&e.path).unwrap();
+        let report = e
+            .call(
+                "prescription_report",
+                json!({"sections":["lens_data","general"],"wavelength":587.5618,"precision":4}),
+            )
+            .unwrap();
+        assert_eq!(report["revision"], before["revision"]);
+        assert_eq!(report["sections"][0]["id"], "general");
+        assert_eq!(report["sections"][1]["id"], "lens_data");
+        for args in [
+            json!({}),
+            json!({"sections":[],"wavelength":500}),
+            json!({"sections":["general","general"],"wavelength":500,"precision":4}),
+            json!({"sections":["nope"],"wavelength":500,"precision":4}),
+            json!({"sections":[],"wavelength":500,"precision":4.5}),
+            json!({"sections":[],"wavelength":500,"precision":16}),
+            json!({"sections":[],"wavelength":99,"precision":4}),
+            json!({"sections":[],"wavelength":500,"precision":4,"revision":0}),
+        ] {
+            assert!(e.call("prescription_report", args).is_err());
+        }
+        assert_eq!(e.call("system_get", json!({})).unwrap(), before);
+        assert_eq!(std::fs::read(&e.path).unwrap(), bytes);
+    }
     fn engine(label: &str) -> Engine {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
