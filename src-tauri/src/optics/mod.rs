@@ -4,12 +4,14 @@ pub mod analysis;
 pub mod aperture;
 pub mod material;
 pub mod math;
+pub mod profile;
 pub mod project;
 pub mod sampling;
 pub mod solve;
 pub mod spec;
 mod trace;
 use math::*;
+pub use profile::{EndpointSurface, Profile};
 pub use sampling::{PupilSampling, SpectralComponent, Spectrum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -65,6 +67,8 @@ pub struct System {
     pub object_material: String,
     pub object_label: String,
     pub image_label: String,
+    pub object_surface: EndpointSurface,
+    pub image_surface: EndpointSurface,
     pub stop_index: usize,
     pub temperature: f64,
     pub pressure: f64,
@@ -109,6 +113,8 @@ impl Default for System {
             object_material: "AIR".into(),
             object_label: "Object".into(),
             image_label: "Image".into(),
+            object_surface: EndpointSurface::plane(),
+            image_surface: EndpointSurface::plane(),
             stop_index: 0,
             temperature: 20.,
             pressure: 101325.,
@@ -120,31 +126,7 @@ pub fn index(name: &str, nm: f64) -> Result<f64, String> {
     material::refractive_index(name, nm, None)
 }
 pub fn sag(s: &Surface, r: f64) -> Result<(f64, f64), String> {
-    if !r.is_finite() || r < 0. {
-        return Err("Invalid radial height".into());
-    }
-    let c = if s.radius == 0. { 0. } else { 1. / s.radius };
-    let q = 1. - (1. + s.conic) * c * c * r * r;
-    if q <= 0. {
-        return Err("Surface sag outside real domain".into());
-    }
-    let (mut z, mut dz) = (c * r * r / (1. + q.sqrt()), c * r / q.sqrt());
-    for (i, a) in s.even.iter().enumerate() {
-        let p = 4 + 2 * i as i32;
-        z += a * r.powi(p);
-        dz += a * p as f64 * r.powi(p - 1);
-    }
-    // Geopter's ODD profile includes every radial power beginning with r^3.
-    for (i, a) in s.odd.iter().enumerate() {
-        let p = 3 + i as i32;
-        z += a * r.powi(p);
-        dz += a * p as f64 * r.powi(p - 1);
-    }
-    if z.is_finite() && dz.is_finite() {
-        Ok((z, dz))
-    } else {
-        Err("Nonfinite surface sag".into())
-    }
+    s.profile().sag(r)
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Segment {
@@ -158,6 +140,8 @@ pub struct Segment {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Ray {
+    pub object_point: Option<V3>,
+    pub image_hit: Option<Segment>,
     pub points: Vec<V3>,
     pub segments: Vec<Segment>,
     pub opl: f64,
@@ -211,7 +195,7 @@ impl System {
         let mut image = [0.; 2];
         for axis in 0..2 {
             let (height, slope) = if let Some(object) = object {
-                let distance = self.object_distance.unwrap();
+                let distance = -object[2];
                 if (distance + shift).abs() < 1e-12 {
                     return Err("Object lies at entrance pupil".into());
                 }
@@ -282,6 +266,8 @@ impl System {
     }
     pub(super) fn update_semi_diameters(&mut self) -> Result<(), String> {
         let sizes = aperture::semi_diameters(self)?;
+        self.object_surface.semi_diameter = sizes.object.semi_diameter;
+        self.image_surface.semi_diameter = sizes.image.semi_diameter;
         for (surface, size) in self.surfaces.iter_mut().zip(sizes.surfaces) {
             surface.semi_diameter = size.semi_diameter;
         }
@@ -310,6 +296,19 @@ impl System {
         }
         if !self.pupil.value.is_finite() || self.pupil.value <= 0. {
             return Err("Positive pupil specification required".into());
+        }
+        self.object_surface
+            .validate()
+            .map_err(|e| format!("Object surface: {e}"))?;
+        self.image_surface
+            .validate()
+            .map_err(|e| format!("Image surface: {e}"))?;
+        if self.object_distance.is_none()
+            && (!self.object_surface.profile().is_plane() || self.object_surface.clear_aperture)
+        {
+            return Err(
+                "A curved or clipped object surface requires a finite object distance".into(),
+            );
         }
         if let Some(d) = self.object_distance {
             if !d.is_finite() || d <= 0. {
@@ -365,12 +364,10 @@ impl System {
                     .all(|x| x.is_finite())
                 || s.aperture <= 0.
                 || s.semi_diameter < 0.
-                || s.even.len() > 16
-                || s.odd.len() > 20
-                || !s.even.iter().chain(&s.odd).all(|x| x.is_finite())
             {
                 return Err("Invalid surface parameters".into());
             }
+            s.profile().validate()?;
             if s.clear_aperture {
                 sag(s, s.aperture)?;
             }
@@ -535,42 +532,54 @@ impl System {
     }
     fn object_point(&self, field: &Field, _w: f64) -> Result<V3, String> {
         let d = self.object_distance.ok_or("No finite object")?;
+        if self.field_type == FieldType::Angle {
+            let shift = self.entrance_pupil_distance(self.reference())?;
+            let direction = unit([field.x.to_radians().tan(), field.y.to_radians().tan(), 1.])?;
+            return self
+                .object_surface
+                .profile()
+                .intersect([0., 0., shift], direction, -d)
+                .map(|hit| hit.point)
+                .map_err(|e| format!("Object surface: {e}"));
+        }
         let (x, y) = match self.field_type {
-            FieldType::Angle => {
-                let ep = self.pupil_matrix(self.reference())?;
-                if ep.a.abs() < 1e-15 {
-                    return Err("Entrance pupil lies at infinity".into());
-                }
-                let l = d + self.entrance_pupil_distance(self.reference())?;
-                (
-                    -l * field.x.to_radians().tan(),
-                    -l * field.y.to_radians().tan(),
-                )
-            }
             FieldType::ObjectHeight => (field.x, field.y),
             FieldType::ImageHeight => {
                 let p = self.paraxial(self.reference())?;
-                let m = p["magnification"]
+                let magnification = p["magnification"]
                     .as_f64()
                     .ok_or("Undefined magnification")?;
-                if m.abs() < 1e-15 {
+                if magnification.abs() < 1e-15 {
                     return Err("Zero magnification".into());
                 }
-                (field.x / m, field.y / m)
+                (field.x / magnification, field.y / magnification)
             }
+            FieldType::Angle => unreachable!(),
         };
-        Ok([x, y, -d])
+        let z = self
+            .object_surface
+            .sag(x.hypot(y))
+            .map_err(|e| format!("Object surface: {e}"))?
+            .0;
+        Ok([x, y, -d + z])
     }
     fn launch(&self, first: [f64; 2], field: &Field, w: f64) -> Result<(V3, V3, f64), String> {
         let radial = first[0].hypot(first[1]);
         let sag_at_vertex = sag(&self.surfaces[0], radial)?.0;
         let plane = sag_at_vertex.min(0.) - radial.clamp(1., 100.) * 2.;
-        if let Some(d) = self.object_distance {
+        if self.object_distance.is_some() {
             let obj = self.object_point(field, w)?;
-            let direction = unit(sub([first[0], first[1], 0.], obj))?;
-            // Stay near the first surface for distant objects and never launch behind a finite object.
-            let z = plane.max(-d);
-            let distance = (z + d) / direction[2];
+            let object_distance = -obj[2];
+            if object_distance.abs() < 1e-12 {
+                return Err("Object point lies in the first vertex plane".into());
+            }
+            let direction = unit([
+                (first[0] - obj[0]) / object_distance,
+                (first[1] - obj[1]) / object_distance,
+                1.,
+            ])?;
+            let z = plane.max(obj[2]);
+            let distance = (z - obj[2]) / direction[2];
             let p = [
                 first[0] + z * direction[0] / direction[2],
                 first[1] + z * direction[1] / direction[2],

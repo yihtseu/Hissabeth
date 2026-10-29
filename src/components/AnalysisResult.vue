@@ -297,7 +297,7 @@ const raw = computed(() =>
         <div><dt>Extent</dt><dd>±{{ fmt(psfHalf) }} µm</dd></div>
         <div><dt>Failed pupil rays</dt><dd>{{ o.data.failed_pupil_rays }}</dd></div>
       </dl>
-      <p class="note">{{ o.data.model }}; {{ o.data.normalization }}.</p>
+      <p class="note">{{ o.data.model }}; {{ o.data.normalization }}. Image surface: {{ o.data.image_sampling }}.</p>
     </template>
 
     <!-- diffraction MTF -->
@@ -313,7 +313,7 @@ const raw = computed(() =>
         <div><dt>Failed pupil rays</dt><dd>{{ o.data.failed_pupil_rays }}</dd></div>
       </dl>
       <SpectralLedger :rows="diffRows" caption="Spectral ledger (each wavelength has its own PSF pixel pitch and contributes zero above its own cutoff)" />
-      <p class="note">{{ o.data.model }}. Cuts follow the field-local tangential and sagittal directions. OTFs are evaluated at common physical frequencies, placed at each real chief-ray intercept (origin {{ fmt(o.data.origin[0], 5) }}, {{ fmt(o.data.origin[1], 5) }} mm, global x, y) and combined as complex sums with effective spectral weights. {{ o.data.normalization }}.</p>
+      <p class="note">{{ o.data.model }}. Image surface: {{ o.data.image_sampling }}. Cuts follow the field-local tangential and sagittal directions. OTFs are evaluated at common physical frequencies, placed at each real chief-ray intercept (origin {{ fmt(o.data.origin[0], 5) }}, {{ fmt(o.data.origin[1], 5) }} mm, global x, y) and combined as complex sums with effective spectral weights. {{ o.data.normalization }}.</p>
     </template>
 
     <!-- encircled energy -->

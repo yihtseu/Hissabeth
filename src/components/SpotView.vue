@@ -129,6 +129,7 @@ const um = (v: number): string => (v * 1000).toFixed(2);
     <div v-if="mode === 'single' && spot && spotRun" class="legend" role="status">
       <span>Revision {{ spotRun.revision }} · Field {{ spotRun.field }} · {{ spotRun.wavelength }} nm · {{ describeSampling(spot.sampling) }} · {{ describeMapping(spotRun.mapping) }}</span>
       <span>{{ spot.points.length }} transmitted of {{ spot.sampled_rays }} sampled rays · {{ percent(spot.transmitted_weight) }} of nominal pupil area transmitted</span>
+      <span>Coordinates are lateral x, y of the actual image-surface intercept (not arc length)</span>
       <span>Invalid: {{ spot.blocked }} blocked · {{ spot.missed }} missed/failed · {{ spot.total_internal_reflection }} total internal reflection</span>
       <span>Area-weighted RMS {{ um(spot.rms_radius) }} µm · geometric radius {{ um(spot.geometric_radius) }} µm · centered on the weighted centroid</span>
     </div>

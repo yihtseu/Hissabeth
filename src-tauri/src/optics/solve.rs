@@ -42,7 +42,7 @@ impl GapSolve {
                 offset,
             } => source < system.surfaces.len() && source != gap && finite(&[scale, offset]),
             Self::EdgeThickness { height, value } => {
-                gap + 1 < system.surfaces.len()
+                gap < system.surfaces.len()
                     && finite(&[height, value])
                     && height >= 0.
                     && value >= 0.
@@ -94,7 +94,11 @@ impl Equation {
                 GapSolve::EdgeThickness { height, value } => {
                     thickness
                         - (value + sag(&s.surfaces[self.gap], height)?.0
-                            - sag(&s.surfaces[self.gap + 1], height)?.0)
+                            - if self.gap + 1 < s.surfaces.len() {
+                                sag(&s.surfaces[self.gap + 1], height)?.0
+                            } else {
+                                s.image_surface.sag(height)?.0
+                            })
                 }
                 GapSolve::OverallLength { first, last, value } => {
                     s.surfaces[first..last]
@@ -513,6 +517,31 @@ mod tests {
             )
             .unwrap();
         assert!(ray.image()[1].abs() < 1e-9);
+    }
+    #[test]
+    fn final_gap_edge_thickness_includes_image_sag_and_recalculates_on_profile_edits() {
+        let mut s = System::default();
+        s.image_surface.radius = 100.;
+        s.image_surface.conic = -1.;
+        s.image_surface.even = vec![0.0001];
+        let (mut next, _) = apply(
+            &s,
+            1,
+            GapSolve::EdgeThickness {
+                height: 3.,
+                value: 5.,
+            },
+        )
+        .unwrap();
+        let last_sag = -50. + 2491_f64.sqrt();
+        let image_sag = 9. / 200. + 0.0001 * 81.;
+        assert!((next.surfaces[1].thickness - (5. + last_sag - image_sag)).abs() < 1e-12);
+        next.image_surface.even[0] = 0.0002;
+        next.update().unwrap();
+        assert!(
+            (next.surfaces[1].thickness - (5. + last_sag - 9. / 200. - 0.0002 * 81.)).abs() < 1e-12
+        );
+        assert_eq!(s.surfaces[1].thickness, 46.64);
     }
     #[test]
     fn edge_thickness_reacts_to_curvature() {

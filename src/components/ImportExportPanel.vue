@@ -38,6 +38,18 @@ const geopterBlock = computed(() => {
   if (nonRefract >= 0) return `Geopter supports refracting surfaces only: set surface ${nonRefract + 1} to refract, or use the Hissabeth project format.`;
   const mixed = sys.surfaces.findIndex((x) => x.even.length > 0 && x.odd.length > 0);
   if (mixed >= 0) return `Geopter cannot store both even and odd asphere coefficients on one surface: clear one list on surface ${mixed + 1}, or use the Hissabeth project format.`;
+  for (const [name, e] of [['object', sys.object_surface], ['image', sys.image_surface]] as const)
+    if (e.even.length > 0 && e.odd.length > 0)
+      return `Geopter cannot store both even and odd asphere coefficients on one surface: clear one list on the ${name} surface, or use the Hissabeth project format.`;
+  // Geopter stores exactly ten even or odd coefficients per profile; shorter lists are padded with zeros on export.
+  const profiles = [
+    { where: 'Object', e: sys.object_surface },
+    ...sys.surfaces.map((x, i) => ({ where: `Surface ${i + 1}`, e: x })),
+    { where: 'Image', e: sys.image_surface },
+  ];
+  for (const { where, e } of profiles)
+    if (e.even.length > 10 || e.odd.length > 10)
+      return `${where} has more than 10 ${e.even.length > 10 ? 'even' : 'odd'} asphere coefficients; Geopter stores at most 10. Remove the higher terms, or use the Hissabeth project format.`;
   if (sys.surfaces.some((x) => x.gap_solve.kind !== 'fixed')) return 'Geopter does not store gap solves. Use the Hissabeth project format.';
   return '';
 });
@@ -132,7 +144,7 @@ async function doImport(): Promise<void> {
         <button type="button" :disabled="!text" @click="download">Download file</button>
         <button type="button" class="primary" :disabled="!!importBlock || busy" @click="doImport">Import (replaces saved system)</button>
       </div>
-      <p v-if="format === 'geopter'" class="note">Geopter files keep the object medium, endpoint labels and field and wavelength colors, but need a finite object distance, the Reference entrance pupil ray mapping and the standard environment, and cannot store gap solves or custom catalogs. Use the Hissabeth project format to keep those.</p>
+      <p v-if="format === 'geopter'" class="note">Geopter files keep the object medium, endpoint labels, endpoint profiles and apertures, and field and wavelength colors, but need a finite object distance, the Reference entrance pupil ray mapping and the standard environment, and cannot store gap solves or custom catalogs. Use the Hissabeth project format to keep those.</p>
       <p v-if="format === 'geopter' && online && exportBlock" class="note">{{ exportBlock }}</p>
       <p v-if="importBlock" class="note">{{ importBlock }}</p>
       <p id="ie-status" role="status" class="note">{{ status }}</p>

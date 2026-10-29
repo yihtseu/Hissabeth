@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { callTool } from '../api';
 import NumberField from './NumberField.vue';
+import { canonicalJson } from '../validation';
 import type { GapSolve, GapSolveEntry, OpticalSystem, SolveKind, SolveRecalculateResult, SolveResult } from '../types';
 
 const props = defineProps<{
@@ -20,9 +21,9 @@ type ActiveKind = Exclude<SolveKind, 'fixed'>;
 
 const KINDS: { id: ActiveKind; label: string; help: string }[] = [
   { id: 'pickup', label: 'Pickup', help: 'Thickness = source thickness × scale + offset.' },
-  { id: 'edge_thickness', label: 'Edge thickness', help: 'Thickness that gives the target edge thickness at a semi-height, using this and the next surface.' },
+  { id: 'edge_thickness', label: 'Edge thickness', help: 'Thickness that gives the target edge thickness at a semi-height, using this and the next surface. For the final gap the next surface is the image surface, so its actual sag at that height is included.' },
   { id: 'overall_length', label: 'Overall length', help: 'Thickness that makes the summed thickness of a range of gaps equal the target length.' },
-  { id: 'marginal_height', label: 'Marginal ray height', help: 'Thickness after which the marginal ray is at the target height. Zone is relative to the nominal pupil radius: 0 is the full-aperture paraxial axial ray, ±1 is the nominal rim; a nonzero zone traces the first prescribed field at the reference wavelength. Physical apertures and ray geometry decide whether it is valid.' },
+  { id: 'marginal_height', label: 'Marginal ray height', help: 'Thickness after which the marginal ray is at the target height, measured at the next vertex plane (not on a curved profile). Zone is relative to the nominal pupil radius: 0 is the full-aperture paraxial axial ray, ±1 is the nominal rim; a nonzero zone traces the first prescribed field at the reference wavelength. Physical apertures and ray geometry decide whether it is valid.' },
 ];
 
 // Gap numbers are shown 1-based ("gap after surface n"); converted to zero-based API indexes when sending.
@@ -72,7 +73,7 @@ function select(n: number): void {
 // definition changes (reload / external edit). The key covers only the definition, so unchanged
 // polls and thickness-only edits never reset in-progress typing.
 watch(
-  () => JSON.stringify([gap.value, props.system.surfaces[gap.value - 1]?.gap_solve ?? null]),
+  () => canonicalJson([gap.value, props.system.surfaces[gap.value - 1]?.gap_solve ?? null]),
   () => {
     const d = props.system.surfaces[gap.value - 1]?.gap_solve;
     if (d) load(d);
@@ -97,7 +98,6 @@ const block = computed(() => {
   const g = gap.value;
   if (kind.value === 'pickup' && source.value === g) return 'A pickup must refer to another gap.';
   if (kind.value === 'edge_thickness') {
-    if (g >= count.value) return 'Edge thickness needs a following surface.';
     if (!(height.value >= 0) || !(value.value >= 0)) return 'Edge height and thickness must be non-negative.';
   }
   if (kind.value === 'overall_length' && !(first.value <= g && g <= last.value))

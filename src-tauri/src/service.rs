@@ -334,7 +334,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -425,6 +425,18 @@ pub fn system_schema() -> Value {
             "gap_solve",
         ],
     );
+    let endpoint = object(
+        json!({"radius":finite,"conic":finite,"even":array(finite.clone(),0,16),"odd":array(finite.clone(),0,20),"aperture":{"type":"number","exclusiveMinimum":0.},"clear_aperture":{"type":"boolean"},"semi_diameter":nonnegative}),
+        &[
+            "radius",
+            "conic",
+            "even",
+            "odd",
+            "aperture",
+            "clear_aperture",
+            "semi_diameter",
+        ],
+    );
     let field = object(
         json!({"x":finite,"y":finite,"weight":nonnegative,"vignetting":array(json!({"type":"number","exclusiveMaximum":1.}),4,4),"color":array(num(0.,1.),4,4)}),
         &["x", "y", "weight", "vignetting", "color"],
@@ -449,7 +461,7 @@ pub fn system_schema() -> Value {
         ],
     );
     object(
-        json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"object_material":string(),"object_label":string(),"image_label":string(),"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
+        json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"object_material":string(),"object_label":string(),"image_label":string(),"object_surface":endpoint,"image_surface":endpoint,"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
         &[
             "name",
             "note",
@@ -464,6 +476,8 @@ pub fn system_schema() -> Value {
             "object_material",
             "object_label",
             "image_label",
+            "object_surface",
+            "image_surface",
             "stop_index",
             "temperature",
             "pressure",
@@ -1082,6 +1096,52 @@ mod tests {
         drop(e);
         let reopened = Engine::open(path).unwrap();
         assert_eq!(serde_json::to_value(reopened.system).unwrap(), current);
+    }
+    #[test]
+    fn endpoint_shapes_solved_image_gap_and_derived_envelopes_persist_atomically() {
+        let mut e = engine("endpoint-shapes");
+        let mut system = e.system.clone();
+        system.object_distance = Some(300.);
+        system.object_surface.radius = 500.;
+        system.image_surface.radius = 100.;
+        system.image_surface.conic = -1.;
+        system.image_surface.even = vec![0.0001];
+        e.call("system_set", json!({"system":system,"revision":e.revision}))
+            .unwrap();
+        e.call("solve",json!({"gap":1,"definition":{"kind":"edge_thickness","height":3.,"value":5.},"revision":e.revision})).unwrap();
+        let current = serde_json::to_value(&e.system).unwrap();
+        let saved = std::fs::read(&e.path).unwrap();
+        for mutation in 0..5 {
+            let mut broken = current.clone();
+            match mutation {
+                0 => {
+                    broken.as_object_mut().unwrap().remove("object_surface");
+                }
+                1 => broken["image_surface"]["thickness"] = json!(2.),
+                2 => broken["image_surface"]["semi_diameter"] = json!(-1.),
+                3 => broken["object_surface"]["aperture"] = json!(0.),
+                _ => broken["object_distance"] = Value::Null,
+            }
+            assert!(
+                e.call("system_set", json!({"system":broken,"revision":e.revision}))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&e.path).unwrap(), saved);
+            assert_eq!(serde_json::to_value(&e.system).unwrap(), current);
+        }
+        let mut stale = current.clone();
+        stale["object_surface"]["semi_diameter"] = json!(999.);
+        stale["image_surface"]["semi_diameter"] = json!(999.);
+        stale["surfaces"][1]["thickness"] = json!(999.);
+        let path = e.path.clone();
+        drop(e);
+        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let recovered = Engine::open(path.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&recovered.system).unwrap(), current);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(),
+            current
+        );
     }
     #[test]
     fn discovery_matches_dispatch() {

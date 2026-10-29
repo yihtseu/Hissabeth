@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, watch } from 'vue';
+import EndpointEditor from './EndpointEditor.vue';
 import NumberField from './NumberField.vue';
 import { rgbToHex, withHex } from '../color';
-import type { Field, FieldType, OpticalSystem, PupilKind, PupilMapping, Vignetting, Wavelength } from '../types';
-import { FIELD_TYPES, PUPIL_KINDS, fieldUnit, glassKey, newField, newWavelength } from '../validation';
+import type { EndpointSurface, Field, FieldType, OpticalSystem, PupilKind, PupilMapping, Vignetting, Wavelength } from '../types';
+import { FIELD_TYPES, PUPIL_KINDS, fieldUnit, glassKey, infiniteObjectProblem, newField, newWavelength } from '../validation';
 
 const props = defineProps<{ modelValue: OpticalSystem }>();
 const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
 
 const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   angle: 'Angle (°)',
-  object_height: 'Object height (mm)',
-  image_height: 'Image height (mm)',
+  object_height: 'Object height (lateral, mm)',
+  image_height: 'Paraxial image height (mm)',
 };
 const PUPIL_LABELS: Record<PupilKind, { name: string; unit: string }> = {
   entrance_pupil_diameter: { name: 'Entrance pupil diameter', unit: 'mm' },
@@ -76,9 +77,19 @@ function removeGlass(i: number): void {
   patch({ custom_glasses: s.value.custom_glasses.filter((_, k) => k !== i) });
 }
 
+/** Last finite distance, restored when infinity is switched off. Geometry is never reset by the toggle. */
+let lastFinite = s.value.object_distance ?? 1000;
+watch(() => s.value.object_distance, (d) => { if (d !== null) lastFinite = d; });
+
 function setInfinity(infinite: boolean): void {
-  patch({ object_distance: infinite ? null : 1000 });
+  patch({ object_distance: infinite ? null : lastFinite });
 }
+
+const infiniteProblem = computed(() => infiniteObjectProblem(s.value));
+const objectNote = computed(() =>
+  s.value.object_distance === null
+    ? 'Object at infinity: the object surface must be planar (radius 0, no nonzero coefficients) with clipping off.'
+    : `Finite source with its vertex at z = −${s.value.object_distance} mm. Object heights are lateral x/y on this profile; angle fields trace from where the ray direction meets it.`);
 </script>
 
 <template>
@@ -150,6 +161,20 @@ function setInfinity(infinite: boolean): void {
       </div>
     </div>
 
+    <EndpointEditor
+      name="Object"
+      :model-value="s.object_surface"
+      :note="objectNote"
+      :problem="infiniteProblem"
+      @update:model-value="(v: EndpointSurface) => patch({ object_surface: v })"
+    />
+    <EndpointEditor
+      name="Image"
+      :model-value="s.image_surface"
+      note="Vertex at the sum of the internal thicknesses; the last gap is signed, so a virtual image is allowed. Rays hit the actual profile."
+      @update:model-value="(v: EndpointSurface) => patch({ image_surface: v })"
+    />
+
     <div class="subpanel">
       <div class="panel-head flush">
         <h4 id="wl-title">Wavelengths</h4>
@@ -199,7 +224,7 @@ function setInfinity(infinite: boolean): void {
           </tbody>
         </table>
       </div>
-      <small class="hint">1–64 fields. Angles within ±80°. Vignetting factors &lt; 1: positive trims the boundary, negative enlarges it (no negative floor), 0 = unvignetted. Auto and Clear vignetting are under Aperture &amp; vignetting.</small>
+      <small class="hint">1–64 fields. Angles within ±80°; an angle is the ray direction from the object toward the reference entrance pupil. Image height is defined on the image vertex plane. Vignetting factors &lt; 1: positive trims the boundary, negative enlarges it (no negative floor), 0 = unvignetted. Auto and Clear vignetting are under Aperture &amp; vignetting.</small>
     </div>
 
     <div v-if="s.custom_glasses.length" class="subpanel">

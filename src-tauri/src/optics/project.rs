@@ -29,6 +29,70 @@ fn color(v: &Value) -> Result<[f64; 4], String> {
     }
     Ok(rgba)
 }
+fn endpoint(value: &Value) -> Result<EndpointSurface, String> {
+    let curvature = number(&value["Curvature"], "surface curvature")?;
+    let mut shape = EndpointSurface::plane();
+    shape.radius = if curvature == 0. { 0. } else { 1. / curvature };
+    match value["Type"]
+        .as_str()
+        .ok_or("Missing Geopter surface type")?
+    {
+        "SPH" => {}
+        "ASP" | "ODD" => {
+            shape.conic = number(&value["Conic"], "conic")?;
+            let coefficients = array(&value["Coefs"], "asphere coefficients")?
+                .iter()
+                .map(|v| number(v, "asphere coefficient"))
+                .collect::<Result<Vec<_>, _>>()?;
+            if value["Type"] == "ASP" {
+                shape.even = coefficients;
+            } else {
+                shape.odd = coefficients;
+            }
+        }
+        other => return Err(format!("Unknown Geopter surface profile {other}")),
+    }
+    if let Some(aperture) = value.get("Aperture") {
+        if aperture["Type"] != "Circular" {
+            return Err("Geopter aperture must be Circular".into());
+        }
+        shape.aperture = number(&aperture["Radius"], "aperture radius")?;
+        shape.clear_aperture = true;
+    }
+    shape.validate()?;
+    Ok(shape)
+}
+fn profile_json(
+    profile: Profile<'_>,
+    aperture: f64,
+    clear_aperture: bool,
+) -> Result<Value, String> {
+    if !profile.even.is_empty() && !profile.odd.is_empty() {
+        return Err(
+            "Geopter project profiles cannot combine even and odd coefficient lists".into(),
+        );
+    }
+    if profile.even.len() > 10 || profile.odd.len() > 10 {
+        return Err("Geopter project profiles store at most ten polynomial coefficients".into());
+    }
+    let mut value = json!({"Type":if !profile.odd.is_empty(){"ODD"}else if !profile.even.is_empty()||profile.conic!=0.{"ASP"}else{"SPH"},"Curvature":if profile.radius==0.{0.}else{1./profile.radius}});
+    if value["Type"] != "SPH" {
+        value["Conic"] = json!(profile.conic);
+        let terms = if !profile.odd.is_empty() {
+            profile.odd
+        } else {
+            profile.even
+        };
+        // Geopter's even profile reader indexes all ten entries.
+        let mut coefficients = vec![0.; 10];
+        coefficients[..terms.len()].copy_from_slice(terms);
+        value["Coefs"] = json!(coefficients);
+    }
+    if clear_aperture {
+        value["Aperture"] = json!({"Type":"Circular","Radius":aperture});
+    }
+    Ok(value)
+}
 pub fn import(text: &str) -> Result<System, String> {
     let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let a = root["Assembly"]
@@ -45,12 +109,13 @@ pub fn import(text: &str) -> Result<System, String> {
         );
     }
     let object = &a["0"];
-    if object["Type"] != "SPH" || number(&object["Curvature"], "object curvature")? != 0. {
-        return Err("Curved Geopter object surface is not implemented".into());
-    }
+    let object_surface = endpoint(object)?;
     let last = &a[&(keys.len() - 1).to_string()];
-    if last["Type"] != "SPH" || number(&last["Curvature"], "image curvature")? != 0. {
-        return Err("Curved image surface is not implemented".into());
+    let image_surface = endpoint(last)?;
+    if number(&last["Thickness"], "terminal thickness")? != 0. || last["Material"] != "AIR" {
+        return Err(
+            "Geopter terminal image entry requires zero following thickness and AIR".into(),
+        );
     }
     let spec = &root["Spec"];
     let fs = &spec["Field"];
@@ -117,46 +182,23 @@ pub fn import(text: &str) -> Result<System, String> {
     let mut surfaces = vec![];
     for i in 1..keys.len() - 1 {
         let value = &a[&i.to_string()];
-        let c = number(&value["Curvature"], "surface curvature")?;
+        let shape = endpoint(value)?;
         let mut surface = Surface::sphere(
-            if c == 0. { 0. } else { 1. / c },
+            shape.radius,
             number(&value["Thickness"], "thickness")?,
             value["Material"]
                 .as_str()
                 .ok_or("Missing Geopter material")?,
-            1.,
+            shape.aperture,
         );
         surface.label = value["Label"]
             .as_str()
             .ok_or("Missing Geopter surface label")?
             .into();
-        match value["Type"]
-            .as_str()
-            .ok_or("Missing Geopter surface type")?
-        {
-            "SPH" => {}
-            "ASP" | "ODD" => {
-                surface.conic = number(&value["Conic"], "conic")?;
-                let coefs = array(&value["Coefs"], "asphere coefficients")?
-                    .iter()
-                    .map(|v| number(v, "asphere coefficient"))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if value["Type"] == "ASP" {
-                    surface.even = coefs
-                } else {
-                    surface.odd = coefs
-                }
-            }
-            other => return Err(format!("Unknown Geopter surface profile {other}")),
-        }
-        if let Some(ap) = value.get("Aperture") {
-            if ap["Type"] != "Circular" {
-                return Err("Geopter aperture must be Circular".into());
-            }
-            surface.aperture = number(&ap["Radius"], "aperture radius")?;
-        } else {
-            surface.clear_aperture = false;
-        }
+        surface.conic = shape.conic;
+        surface.even = shape.even;
+        surface.odd = shape.odd;
+        surface.clear_aperture = shape.clear_aperture;
         surfaces.push(surface);
     }
     let distance = number(&object["Thickness"], "object thickness")?;
@@ -165,6 +207,8 @@ pub fn import(text: &str) -> Result<System, String> {
         return Err("Geopter stop must be a physical surface".into());
     }
     let mut system = System {
+        object_surface,
+        image_surface,
         name: root["Title"]
             .as_str()
             .ok_or("Missing Geopter Title")?
@@ -221,7 +265,18 @@ pub fn export(s: &System) -> Result<Value, String> {
         );
     }
     let mut assembly = Map::new();
-    assembly.insert("0".into(),json!({"Type":"SPH","Curvature":0.,"Thickness":s.object_distance.ok_or("Geopter JSON requires a finite object gap")?,"Material":s.object_material,"Label":s.object_label}));
+    let mut object = profile_json(
+        s.object_surface.profile(),
+        s.object_surface.aperture,
+        s.object_surface.clear_aperture,
+    )?;
+    object["Thickness"] = json!(
+        s.object_distance
+            .ok_or("Geopter JSON requires a finite object gap")?
+    );
+    object["Material"] = json!(s.object_material);
+    object["Label"] = json!(s.object_label);
+    assembly.insert("0".into(), object);
     for (i, surface) in s.surfaces.iter().enumerate() {
         if surface.material == "FUSED_SILICA" {
             return Err(format!(
@@ -232,29 +287,21 @@ pub fn export(s: &System) -> Result<Value, String> {
         if surface.interaction != Interaction::Refract {
             return Err("Geopter project export requires refractive surfaces".into());
         }
-        if !surface.even.is_empty() && !surface.odd.is_empty() {
-            return Err(
-                "Geopter project profiles cannot combine even and odd coefficient lists".into(),
-            );
-        }
-        let mut value = json!({"Type":if !surface.odd.is_empty(){"ODD"}else if !surface.even.is_empty()||surface.conic!=0.{"ASP"}else{"SPH"},"Curvature":if surface.radius==0.{0.}else{1./surface.radius},"Thickness":surface.thickness,"Material":surface.material,"Label":surface.label,"Aperture":{"Type":"Circular","Radius":surface.aperture}});
-        if !surface.clear_aperture {
-            value.as_object_mut().unwrap().remove("Aperture");
-        }
-        if value["Type"] != "SPH" {
-            value["Conic"] = json!(surface.conic);
-            value["Coefs"] = json!(if !surface.odd.is_empty() {
-                &surface.odd
-            } else {
-                &surface.even
-            });
-        }
+        let mut value = profile_json(surface.profile(), surface.aperture, surface.clear_aperture)?;
+        value["Thickness"] = json!(surface.thickness);
+        value["Material"] = json!(surface.material);
+        value["Label"] = json!(surface.label);
         assembly.insert((i + 1).to_string(), value);
     }
-    assembly.insert(
-        (s.surfaces.len() + 1).to_string(),
-        json!({"Type":"SPH","Curvature":0.,"Thickness":0.,"Material":"AIR","Label":s.image_label}),
-    );
+    let mut image = profile_json(
+        s.image_surface.profile(),
+        s.image_surface.aperture,
+        s.image_surface.clear_aperture,
+    )?;
+    image["Thickness"] = json!(0.);
+    image["Material"] = json!("AIR");
+    image["Label"] = json!(s.image_label);
+    assembly.insert((s.surfaces.len() + 1).to_string(), image);
     assembly.insert("Stop".into(), json!(s.stop_index + 1));
     let field = |axis: usize| {
         s.fields
@@ -333,6 +380,86 @@ mod tests {
         ] {
             let mut broken = source.clone();
             broken["Spec"]["Wvl"]["Color"][1] = invalid;
+            assert!(import(&broken.to_string()).is_err());
+        }
+    }
+    #[test]
+    fn endpoint_profiles_and_apertures_survive_geopter_exchange() {
+        for odd_object in [false, true] {
+            let mut s = System::default();
+            s.object_distance = Some(300.);
+            s.temperature = 25.;
+            s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
+            s.object_surface.radius = 500.;
+            s.object_surface.conic = -0.4;
+            s.object_surface.clear_aperture = true;
+            s.object_surface.aperture = 40.;
+            s.image_surface.radius = -100.;
+            s.image_surface.conic = -1.;
+            s.image_surface.clear_aperture = true;
+            s.image_surface.aperture = 10.;
+            if odd_object {
+                s.object_surface.odd = vec![0.000001];
+                s.image_surface.even = vec![0.0001];
+            } else {
+                s.object_surface.even = vec![0.000001];
+                s.image_surface.odd = vec![0.0001];
+            }
+            s.update().unwrap();
+            let exported = export(&s).unwrap();
+            assert_eq!(
+                exported["Assembly"]["0"]["Type"],
+                if odd_object { "ODD" } else { "ASP" }
+            );
+            assert_eq!(
+                exported["Assembly"]["3"]["Type"],
+                if odd_object { "ASP" } else { "ODD" }
+            );
+            let restored = import(&exported.to_string()).unwrap();
+            if odd_object {
+                s.object_surface.odd.resize(10, 0.);
+                s.image_surface.even.resize(10, 0.);
+            } else {
+                s.object_surface.even.resize(10, 0.);
+                s.image_surface.odd.resize(10, 0.);
+            }
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&s).unwrap()
+            );
+            let ray = restored
+                .trace_field(0., 0., &restored.fields[1], restored.reference())
+                .unwrap();
+            let source = ray.object_point.unwrap();
+            assert!(source[2] > -300.);
+            assert!(
+                ray.image_hit.unwrap().point[2]
+                    < restored.surfaces.iter().map(|s| s.thickness).sum::<f64>()
+            );
+            let mut mixed = s.clone();
+            mixed.object_surface.even = vec![0.];
+            mixed.object_surface.odd = vec![0.];
+            assert!(export(&mixed).is_err());
+            mixed = s.clone();
+            mixed.image_surface.even = vec![0.];
+            mixed.image_surface.odd = vec![0.];
+            assert!(export(&mixed).is_err());
+            for endpoint in [true, false] {
+                let mut excess = s.clone();
+                let e = if endpoint {
+                    &mut excess.object_surface
+                } else {
+                    &mut excess.image_surface
+                };
+                e.even = vec![0.; 11];
+                e.odd.clear();
+                assert!(export(&excess).unwrap_err().contains("ten polynomial"));
+            }
+            let mut excess = s.clone();
+            excess.surfaces[0].even = vec![0.; 11];
+            assert!(export(&excess).unwrap_err().contains("ten polynomial"));
+            let mut broken = exported;
+            broken["Assembly"]["3"]["Thickness"] = json!(2.);
             assert!(import(&broken.to_string()).is_err());
         }
     }
