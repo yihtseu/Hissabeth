@@ -160,12 +160,20 @@ export interface Segment {
 }
 
 export interface Ray {
-  /** Internal surfaces only; points[0] is the launch point near the first surface, not the finite object. */
+  /**
+   * points[0] is the launch point. Pupil and layout rays launch near the first surface, not at the finite object;
+   * an object-mode trace_inspect ray starts on the source profile, so points[0] equals object_point.
+   * The remaining entries are the internal surface hits, then the image hit.
+   */
   points: Point3[];
   /** Segments at the internal surfaces only; the image hit is `image_hit`. */
   segments: Segment[];
   /** Unit direction of the ray as launched, before the first surface. */
   launch_direction: Point3;
+  /** Direction after the last traced interaction. */
+  direction: Point3;
+  /** Reference offset of the entrance plane; segment and ray OPL are signed from `points[0]`. */
+  entrance_opl: number;
   /** Point on the source profile for a finite object; null at infinity. */
   object_point: Point3 | null;
   /** Terminal image-surface hit; null for rays that did not reach it. */
@@ -174,6 +182,60 @@ export interface Ray {
   field_x: number;
   wavelength: number;
   opl: number;
+}
+
+/**
+ * Paraxial row. Internal rows lie on the surface vertex planes and the image row on the image vertex plane;
+ * `surface_index` is zero-based and null for the endpoints. The object row is the actual source point for a
+ * finite chief ray (on the curved profile, not the vertex) and the source vertex for the axial ray.
+ */
+export interface ParaxialRow {
+  endpoint: 'object' | 'surface' | 'image';
+  surface_index: number | null;
+  point: Point3;
+  slope_in: [number, number];
+  slope_out: [number, number];
+  /** q = direction sign x physical index x slope. */
+  reduced_in: [number, number];
+  reduced_out: [number, number];
+  signed_index_in: number;
+  signed_index_out: number;
+}
+
+/** Axial and selected-field chief paraxial rays. The object row is absent for an object at infinity. */
+export interface ParaxialTrace {
+  revision: number;
+  wavelength: number;
+  field: [number, number];
+  entrance_pupil_radius: number;
+  axis: ParaxialRow[];
+  chief: ParaxialRow[];
+  model: string;
+  basis: string;
+}
+
+export type InspectLaunch =
+  | { kind: 'pupil'; pupil: [number, number]; field_index: number }
+  | { kind: 'object'; point: [number, number]; tangent: [number, number] };
+
+export interface TraceFailureInfo {
+  kind: 'invalid' | 'intersection' | 'blocked' | 'total_internal_reflection' | 'aiming' | 'image';
+  /** Zero-based internal surface, null for an endpoint or launch failure. */
+  surface: number | null;
+  endpoint: 'object' | 'image' | null;
+  /** The blocked hit appears only here, never in the ray. */
+  point: Point3 | null;
+  message: string;
+}
+
+export interface TraceInspect {
+  revision: number;
+  launch: InspectLaunch;
+  wavelength: number;
+  ray: Ray | null;
+  failure: TraceFailureInfo | null;
+  coordinates: string;
+  optical_path: string;
 }
 
 export interface RejectedRay {
@@ -626,6 +688,7 @@ export const TABS = [
   'Spot diagram',
   'MTF',
   'Analysis',
+  'Ray inspection',
   'Materials',
   'Import / Export',
   'Prescription',

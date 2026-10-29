@@ -1,5 +1,6 @@
 use crate::optics::{
-    self, Field, PupilSampling, Spectrum, System, analysis, aperture, material, project, solve,
+    self, Field, PupilSampling, Spectrum, System, analysis, aperture, inspection, material,
+    project, solve,
 };
 use serde_json::{Value, json};
 use std::{
@@ -178,6 +179,12 @@ impl Engine {
                 Ok(r)
             }
             "paraxial" => self.system.paraxial(w),
+            "paraxial_trace" => inspection::paraxial_trace(&self.system, &field, w),
+            "trace_inspect" => inspection::inspect(
+                &self.system,
+                serde_json::from_value(args["launch"].clone()).map_err(|e| e.to_string())?,
+                w,
+            ),
             "trace_ray" => serde_json::to_value(self.system.trace_field(
                 args["x"].as_f64().unwrap_or(0.),
                 args["y"].as_f64().unwrap_or(0.),
@@ -334,12 +341,14 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
         if [
             "paraxial",
+            "paraxial_trace",
+            "trace_inspect",
             "trace_ray",
             "layout",
             "spot_diagram",
@@ -545,6 +554,22 @@ pub fn tools() -> Value {
         "Get global 3D ray paths for stored fields, including explicit trace rejection reasons",
         json!({}),
         &[],
+    );
+    let pair = json!({"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2});
+    add(
+        "trace_inspect",
+        "Inspect a normalized pupil ray or a finite source XY / (dx/dz,dy/dz) launch with positive initial z direction; return partial paths and physical failures. Pupil rays use saved mapping and vignetting; object rays use the actual curved source without pupil aiming.",
+        json!({"wavelength":wave,"launch":{"oneOf":[
+            object(json!({"kind":enumeration(&["pupil"]),"pupil":pair,"field_index":integer(0,63)}), &["kind","pupil","field_index"]),
+            object(json!({"kind":enumeration(&["object"]),"point":pair,"tangent":pair}), &["kind","point","tangent"])
+        ]}}),
+        &["launch", "wavelength"],
+    );
+    add(
+        "paraxial_trace",
+        "Per-vertex linearized axial and stored-field chief ray tables in global x/y; signed reduced angles include centered reflections. No aperture clipping. The image row uses its vertex plane.",
+        json!({"wavelength":wave,"field_index":integer(0,63)}),
+        &["wavelength", "field_index"],
     );
     let common = json!({"wavelength":wave,"field_index":integer(0,63),"field":num(-1e9,1e9),"field_x":num(-1e9,1e9)});
     for (name, description) in [

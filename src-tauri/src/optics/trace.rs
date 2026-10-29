@@ -79,26 +79,29 @@ pub(super) struct TraceOptions {
     pub vignetting: bool,
 }
 
+pub(super) struct Launch {
+    pub point: V3,
+    pub direction: V3,
+    pub entrance_opl: f64,
+    pub object_point: Option<V3>,
+}
+
 impl System {
-    fn trace_path(
+    pub(super) fn trace_path(
         &self,
-        p: V3,
-        v: V3,
+        launch: Launch,
         w: f64,
         field: &Field,
-        entrance_opl: f64,
         last: usize,
         check_apertures: bool,
         image: bool,
     ) -> Result<Ray, TraceFailure> {
-        let object_point = if self.object_distance.is_some() {
-            Some(
-                self.object_point(field, w)
-                    .map_err(|e| TraceFailure::launch(e).at("object"))?,
-            )
-        } else {
-            None
-        };
+        let Launch {
+            point: p,
+            direction: v,
+            entrance_opl,
+            object_point,
+        } = launch;
         let mut ray = Ray {
             object_point,
             image_hit: None,
@@ -272,7 +275,7 @@ impl System {
         field: &Field,
         w: f64,
         apply_vignetting: bool,
-    ) -> Result<(V3, V3, f64), String> {
+    ) -> Result<Launch, String> {
         if ![x, y, field.x, field.y, w].iter().all(|v| v.is_finite()) {
             return Err("Nonfinite ray input".into());
         }
@@ -321,9 +324,9 @@ impl System {
             ]
         };
         let hit_at_stop = |first: [f64; 2]| -> Result<[f64; 2], String> {
-            let (p, v, e) = self.launch(first, field, w)?;
+            let launch = self.launch(first, field, w)?;
             let r = self
-                .trace_path(p, v, w, field, e, self.stop_index, false, false)
+                .trace_path(launch, w, field, self.stop_index, false, false)
                 .map_err(|e| e.to_string())?;
             let p = r.last().point;
             Ok([p[0], p[1]])
@@ -359,7 +362,7 @@ impl System {
         field: &Field,
         w: f64,
         apply_vignetting: bool,
-    ) -> Result<(V3, V3, f64), String> {
+    ) -> Result<Launch, String> {
         if self.pupil_mapping == PupilMapping::RealStop {
             return self.stop_launch(x, y, field, w, apply_vignetting);
         }
@@ -369,7 +372,8 @@ impl System {
         // A reference chief ray defines the center of the reference entrance
         // pupil. Its offset and plane are held fixed across the spectrum.
         let reference = self.reference();
-        let (chief, direction, _) = self.stop_launch(0., 0., field, reference, false)?;
+        let chief = self.stop_launch(0., 0., field, reference, false)?;
+        let direction = chief.direction;
         let radius = self.pupil_radius(w)?;
         let mut pupil = [x / radius, y / radius];
         if apply_vignetting {
@@ -402,7 +406,7 @@ impl System {
             1.
         };
         let first = [0, 1].map(|axis| {
-            chief[axis] - chief[2] * direction[axis] / direction[2]
+            chief.point[axis] - chief.point[2] * direction[axis] / direction[2]
                 + reference_radius * scale * pupil[axis]
         });
         self.launch(first, field, w)
@@ -424,15 +428,13 @@ impl System {
             self.object_point(field, w)
                 .map_err(|e| TraceFailure::launch(e).at("object"))?;
         }
-        let (p, v, e) = self
+        let launch = self
             .aimed_launch(x, y, field, w, options.vignetting)
             .map_err(TraceFailure::launch)?;
         self.trace_path(
-            p,
-            v,
+            launch,
             w,
             field,
-            e,
             options.last,
             options.apertures,
             options.image,

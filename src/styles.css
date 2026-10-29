@@ -150,3 +150,11 @@ footer{padding:10px 24px;display:flex;justify-content:space-between;font-size:11
 .ledger caption{text-align:left;font-size:11px;color:#55707f;padding:4px 0}
 .ledger-wrap{padding:0 20px 12px}
 .spot-canvas{display:block;width:100%;aspect-ratio:900/360;max-height:440px;object-fit:contain}
+.ray-table{font-size:11px}
+.ray-table caption{text-align:left;font-size:12px;font-weight:600;padding:8px 0 4px}
+.ray-table th,.ray-table td{white-space:nowrap}
+.ray-table td{text-align:right;font-variant-numeric:tabular-nums}
+.ray-table thead th{text-align:center;background:#f8fafc}
+.ray-table .group-start{border-left:1px solid #dfe7ed}
+.ray-table thead th:first-child,.ray-table tbody th{position:sticky;left:0;z-index:1;background:#fff;text-align:left}
+.ray-table tr.failed td,.ray-table tr.failed th{background:#fff3df;color:#6e4a0c}

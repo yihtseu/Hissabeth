@@ -60,6 +60,67 @@ def tool(name, args=None, error=False):
     return result if error else json.loads(result["content"][0]["text"])
 
 
+def ray_inspection():
+    global engine
+    snapshot = tool("system_get")
+    revision = snapshot["revision"]
+    w = snapshot["system"]["wavelengths"][snapshot["system"]["reference_wavelength"]]["value"]
+    assert {t["name"] for t in tools} >= {"trace_inspect", "paraxial_trace"}
+    capabilities = tool("capabilities")["scope"]
+    assert capabilities["ray_inspection"] and capabilities["paraxial_ray_tables"]
+    launch = dict(kind="pupil", pupil=[0.1, 0.2], field_index=0)
+    radius = tool("paraxial")["entrance_pupil_radius"]
+    exact = tool("trace_ray", dict(x=0.1*radius, y=0.2*radius, field_index=0, wavelength=w))
+    result = tool("trace_inspect", dict(launch=launch, wavelength=w))
+    assert result["failure"] is None and result["revision"] == revision
+    assert result["ray"] == {k:v for k,v in exact.items() if k != "revision"}
+    table = tool("paraxial_trace", dict(field_index=1, wavelength=w))
+    assert len(table["axis"]) == len(snapshot["system"]["surfaces"])+1
+    assert table["chief"][0]["endpoint"] == "surface" and table["chief"][-1]["endpoint"] == "image"
+    for bad in [dict(launch=launch), dict(launch={**launch,"pupil":[1]},wavelength=w),
+                dict(launch={**launch,"point":[0,0]},wavelength=w),
+                dict(launch={**launch,"field_index":63},wavelength=w),
+                dict(launch=dict(kind="object",point=[0,0],tangent=[0,0]),wavelength=w)]:
+        tool("trace_inspect",bad,error=True)
+    assert tool("system_get")["revision"] == revision
+    system = snapshot["system"]
+    system["object_distance"] = 100
+    system["object_surface"]["radius"] = 20
+    system["pupil"]["value"] = 1
+    system["surfaces"] = [dict(system["surfaces"][0],radius=0,thickness=10,material="AIR",aperture=20,clear_aperture=True)]
+    system["stop_index"] = 0
+    system["fields"] = [dict(system["fields"][0],x=0,y=0)]
+    revision = tool("system_set",dict(system=system,revision=revision))["revision"]
+    args = dict(launch=dict(kind="object",point=[1,2],tangent=[0.1,-0.05]),wavelength=w)
+    result = tool("trace_inspect",args)
+    ray = result["ray"]
+    z = -100+20-math.sqrt(395)
+    assert result["failure"] is None and abs(ray["object_point"][2]-z)<1e-12
+    assert ray["points"][0] == ray["object_point"] and ray["entrance_opl"] == 0
+    expected_x = 1+(10-z)*0.1
+    expected_y = 2+(10-z)*(-0.05)
+    assert abs(ray["image_hit"]["point"][0]-expected_x)<1e-10
+    assert abs(ray["image_hit"]["point"][1]-expected_y)<1e-10
+    assert abs(ray["opl"]-(10-z)*math.sqrt(1.0125))<1e-10
+    table = tool("paraxial_trace",dict(field_index=0,wavelength=w))
+    assert [r["endpoint"] for r in table["axis"]] == ["object","surface","image"]
+    assert table["axis"][0]["point"] == [0,0,-100]
+    system["image_surface"].update(clear_aperture=True,aperture=0.1)
+    revision = tool("system_set",dict(system=system,revision=revision))["revision"]
+    failed = tool("trace_inspect",args)
+    assert failed["failure"]["endpoint"] == "image" and failed["failure"]["kind"] == "blocked"
+    assert len(failed["ray"]["segments"]) == 1 and failed["ray"]["image_hit"] is None
+    assert tool("system_get")["revision"] == revision
+    engine.terminate()
+    engine.wait(timeout=5)
+    (DATA / "endpoint.json").unlink()
+    engine = start_engine()
+    recovered = tool("trace_inspect",args)
+    assert recovered["ray"] == failed["ray"] and recovered["failure"] == failed["failure"]
+    assert recovered["revision"] != revision
+    print("PASS: typed inspection schemas; normalized pupil identity, real curved source XY/slopes/OPL, paraxial vertex tables, retained physical failure, read-only revisions and same-relay recovery")
+
+
 def persistent_solves():
     global engine
     initial = tool("system_get")
@@ -797,6 +858,9 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--ray-inspection" in sys.argv:
+        ray_inspection()
+        raise SystemExit(0)
     if "--mirrors" in sys.argv:
         mirrors()
         raise SystemExit(0)
