@@ -6,6 +6,8 @@ pub mod material;
 pub mod math;
 pub mod profile;
 pub mod project;
+#[cfg(test)]
+mod reflection;
 pub mod sampling;
 pub mod solve;
 pub mod spec;
@@ -245,15 +247,20 @@ impl System {
         }
         Ok(self.object_index(w)? * ep.b / ep.a)
     }
-    fn medium_before(&self, surface: usize, w: f64) -> Result<f64, String> {
-        match self.surfaces[..surface]
+    fn paraxial_index_before(&self, surface: usize, w: f64) -> Result<f64, String> {
+        let index = match self.surfaces[..surface]
             .iter()
             .rev()
-            .find(|s| s.interaction != Interaction::Dummy)
+            .find(|s| s.interaction == Interaction::Refract)
         {
             Some(s) => self.material_index(&s.material, w),
             None => self.object_index(w),
-        }
+        }?;
+        let reflections = self.surfaces[..surface]
+            .iter()
+            .filter(|s| s.interaction == Interaction::Reflect)
+            .count();
+        Ok(if reflections % 2 == 0 { index } else { -index })
     }
     pub fn update(&mut self) -> Result<(), String> {
         self.validate_parameters()?;
@@ -382,26 +389,22 @@ impl System {
             return Err("Invalid matrix surface range".into());
         }
         let mut matrix = Matrix::identity();
-        let mut n = self.medium_before(start, w)?;
+        // The reduced ray is [height, direction_sign * physical_index * dy/dz].
+        // Real backward travel has negative dz and negative paraxial index.
+        let mut n = self.paraxial_index_before(start, w)?;
         for i in start..end {
             let s = &self.surfaces[i];
-            let next = self.material_index(&s.material, w)?;
-            match s.interaction {
-                Interaction::Refract => matrix.refract(if s.radius == 0. {
-                    0.
-                } else {
-                    (next - n) / s.radius
-                }),
-                Interaction::Reflect => {
-                    return Err("Paraxial analysis of folded systems is not implemented".into());
-                }
-                Interaction::Dummy => {}
-            }
-            n = if s.interaction == Interaction::Dummy {
-                n
-            } else {
-                next
+            let next = match s.interaction {
+                Interaction::Refract => n.signum() * self.material_index(&s.material, w)?,
+                Interaction::Reflect => -n,
+                Interaction::Dummy => n,
             };
+            matrix.refract(if s.radius == 0. {
+                0.
+            } else {
+                (next - n) / s.radius
+            });
+            n = next;
             if i + 1 < end {
                 matrix.transfer(s.thickness, n)
             }
@@ -448,14 +451,15 @@ impl System {
                 (d + shift).abs() * self.pupil.value / (n0 * n0 - self.pupil.value.powi(2)).sqrt()
             }
             PupilType::ImageNa => {
-                if self.pupil.value >= n {
+                if self.pupil.value >= n.abs() {
                     return Err("Image NA must be smaller than image medium index".into());
                 }
                 if q_gain.abs() < 1e-15 {
                     return Err("Image NA undefined for afocal system".into());
                 }
                 let slope = q_gain;
-                n * self.pupil.value / ((n * n - self.pupil.value.powi(2)).sqrt() * slope.abs())
+                n.abs() * self.pupil.value
+                    / ((n * n - self.pupil.value.powi(2)).sqrt() * slope.abs())
             }
         };
         if r.is_finite() && r > 0. {
@@ -481,11 +485,11 @@ impl System {
         let (m, n) = self.matrix(w, 0, self.surfaces.len())?;
         let n0 = self.object_index(w)?;
         let entrance_distance = self.entrance_pupil_distance(w)?;
-        if m.c.abs() < 1e-14 {
-            return Err("Afocal system: focal lengths undefined".into());
-        }
-        let efl = -n / m.c;
-        let bfl = -n * m.a / m.c;
+        let powered = m.c.abs() >= 1e-14;
+        // EFL is measured along image-space propagation; axial focus distances
+        // retain the global z sign used by stored thicknesses.
+        let efl = powered.then(|| -n.abs() / m.c);
+        let bfl = powered.then(|| -n * m.a / m.c);
         let ep = self.pupil_matrix(w)?;
         if ep.a.abs() < 1e-15 {
             return Err("Entrance pupil lies at infinity".into());
@@ -497,7 +501,7 @@ impl System {
             }
             -n * (m.a * t / n0 + m.b) / den
         } else {
-            bfl
+            bfl.ok_or("Afocal system: infinite object has no finite image conjugate")?
         };
         if !image_distance.is_finite() {
             return Err("Nonfinite paraxial image distance".into());
@@ -527,7 +531,7 @@ impl System {
             None
         };
         Ok(
-            json!({"efl":efl,"bfl":bfl,"f_number":1./(2.*(q_gain*r).abs()),"matrix":[m.a,m.b,m.c,m.d],"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n,"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":n0*m.d/m.c}),
+            json!({"efl":efl,"bfl":bfl,"f_number":1./(2.*(q_gain*r).abs()),"matrix":[m.a,m.b,m.c,m.d],"matrix_basis":"height, direction_sign * physical_index * dy/dz","image_direction":n.signum(),"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n.abs(),"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":powered.then(||n0*m.d/m.c)}),
         )
     }
     fn object_point(&self, field: &Field, _w: f64) -> Result<V3, String> {

@@ -51,6 +51,9 @@ const objectCurve = computed(() => (showObject.value ? curveOf(props.system.obje
 
 const drawnPoints = (r: Ray): Point3[] => (showObject.value && r.object_point ? [r.object_point, ...r.points] : r.points);
 
+/** Actual internal profile curves, so bounds follow vertices that move back after a reflection. */
+const surfaceCurves = computed(() => props.system.surfaces.map((s, i) => profileCurve(s, vertices.value[i]!)));
+
 const bounds = computed(() => {
   let zmin = Math.min(0, imageZ.value), zmax = Math.max(0, imageZ.value), ymax = opticsYmax.value;
   const take = (z: number, y: number): void => {
@@ -58,6 +61,8 @@ const bounds = computed(() => {
     zmax = Math.max(zmax, z);
     ymax = Math.max(ymax, Math.abs(y));
   };
+  for (const v of vertices.value) take(v, 0);
+  for (const curve of surfaceCurves.value) for (const [z, y] of curve) take(z, y);
   for (const [z, y] of imageCurve.value) take(z, y);
   for (const [z, y] of objectCurve.value) take(z, y);
   for (const r of props.layout.rays) for (const p of drawnPoints(r)) take(p[2], p[1]);
@@ -82,7 +87,7 @@ const surfaceShapes = computed(() =>
   props.system.surfaces.map((s, i) => {
     const vz = vertices.value[i]!;
     return {
-      points: polyline(profileCurve(s, vz)),
+      points: polyline(surfaceCurves.value[i]!),
       interaction: s.interaction,
       label: s.label,
       top: py(drawRadius(s)) - 6,
@@ -100,6 +105,50 @@ const objectShape = computed(() => ({
   points: polyline(objectCurve.value),
   clips: clipTicks(props.system.object_surface, objectZ.value),
 }));
+
+/** Centered reflections reverse real travel along z; the count gives the image-space direction. */
+const reflections = computed(() => props.system.surfaces.filter((s) => s.interaction === 'reflect').length);
+
+const MIN_ARROW_LEG = 48;
+const MAX_ARROWS = 200;
+/** Physical direction of light on leg `j` of the drawn path (object leg first when the object is drawn). */
+function legDirection(ray: Ray, j: number): Point3 | null {
+  const objectLeg = showObject.value && ray.object_point ? 1 : 0;
+  if (objectLeg && j === 0) return ray.launch_direction;
+  const leg = j - objectLeg;
+  return leg < ray.segments.length ? ray.segments[leg]!.incoming : (ray.image_hit?.incoming ?? null);
+}
+
+/**
+ * Direction arrows, only when a reflection exists, on one representative ray per field (the middle traced ray,
+ * the chief when all are traced). Each leg gets its own arrow at the leg midpoint, oriented by the physical
+ * incoming ray vector of that leg (so it stays correct along virtual extrapolations), and only when the leg is
+ * long enough on screen.
+ */
+const arrows = computed(() => {
+  const out: { x: number; y: number; deg: number; color: string }[] = [];
+  if (reflections.value === 0) return out;
+  const byField = new Map<number, number[]>();
+  props.layout.rays.forEach((_r, i) => {
+    const f = props.layout.field_indices[i];
+    if (f !== undefined) byField.set(f, [...(byField.get(f) ?? []), i]);
+  });
+  for (const [field, indices] of byField) {
+    const ray = props.layout.rays[indices[Math.floor(indices.length / 2)]!]!;
+    const pts = drawnPoints(ray);
+    for (let k = 0; k + 1 < pts.length && out.length < MAX_ARROWS; k++) {
+      const x0 = px(pts[k]![2]), y0 = py(pts[k]![1]), x1 = px(pts[k + 1]![2]), y1 = py(pts[k + 1]![1]);
+      const length = Math.hypot(x1 - x0, y1 - y0);
+      if (!(length >= MIN_ARROW_LEG)) continue;
+      const v = legDirection(ray, k);
+      if (!v) continue;
+      const dx = v[2] * sx.value, dy = -v[1] * sy.value;
+      if (!(Math.hypot(dx, dy) > 0)) continue;
+      out.push({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, deg: (Math.atan2(dy, dx) * 180) / Math.PI, color: fieldColor(field) });
+    }
+  }
+  return out;
+});
 
 const style = (i: (typeof props.system.surfaces)[number]['interaction']): { stroke: string; width: number; dash?: string } =>
   i === 'reflect' ? { stroke: '#b5532f', width: 3.4 } : i === 'dummy' ? { stroke: '#8da2b0', width: 1.4, dash: '5 4' } : { stroke: '#24526c', width: 2.8 };
@@ -120,6 +169,7 @@ const shapeText = (p: Profile): string => (p.radius === 0 && !p.even.length && !
       <rect :width="W" :height="H" fill="url(#grid)" />
       <line :x1="10" :y1="CY" :x2="W - 10" :y2="CY" stroke="#a7bac7" stroke-dasharray="6 5" />
       <polyline v-for="(r, i) in layout.rays" :key="`r${i}`" :points="rayPath(r)" fill="none" :stroke="fieldColor(layout.field_indices[i])" stroke-width="1.15" opacity=".8" />
+      <polygon v-for="(a, i) in arrows" :key="`a${i}`" points="6,0 -5,3.5 -5,-3.5" :transform="`translate(${a.x} ${a.y}) rotate(${a.deg})`" :fill="a.color" />
       <g v-for="(s, i) in surfaceShapes" :key="`s${i}`">
         <polyline :points="s.points" fill="none" :stroke="style(s.interaction).stroke" :stroke-width="style(s.interaction).width" :stroke-dasharray="style(s.interaction).dash" />
         <line v-for="(c, k) in s.clips" :key="k" :x1="c.x - 5" :y1="c.y" :x2="c.x + 5" :y2="c.y" stroke="#c0392b" stroke-width="2.4" />
@@ -140,6 +190,8 @@ const shapeText = (p: Profile): string => (p.radius === 0 && !p.even.length && !
       <li>Object: {{ objectCaption }}, {{ objectPlace }} · Image: {{ imageCaption }}, vertex at z = {{ imageZ }} mm</li>
       <li>λ {{ wavelength }} nm</li>
       <li><span class="reflect-key">Red ticks</span>: physical clear radius (only where Clip rays is on); curves extend to the derived draw semi-diameter, which never clips</li>
+      <li v-if="reflections > 0">Arrows: physical travel direction on one ray per field, per leg where there is room; shown even along legs drawn as virtual extrapolations</li>
+      <li v-if="reflections > 0">{{ reflections }} centered reflection{{ reflections === 1 ? '' : 's' }}: travel reverses along the axis, so light leaves the last surface toward {{ reflections % 2 ? '−z (left)' : '+z (right)' }}. Tilted or decentered folds are not supported.</li>
       <li>Solid: refract · <span class="reflect-key">Thick: reflect</span> · Dashed: dummy</li>
     </ul>
     <details v-if="layout.rejected.length" class="data-table wide" open>

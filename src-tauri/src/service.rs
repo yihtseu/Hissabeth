@@ -334,7 +334,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -400,7 +400,7 @@ fn solve_schema() -> Value {
     json!({"oneOf":[
         object(json!({"kind":enumeration(&["fixed"])}), &["kind"]),
         object(json!({"kind":enumeration(&["pickup"]),"source":integer(0,127),"scale":number,"offset":number}), &["kind","source","scale","offset"]),
-        object(json!({"kind":enumeration(&["edge_thickness"]),"height":num(0.,1e6),"value":num(0.,1e15)}), &["kind","height","value"]),
+        object(json!({"kind":enumeration(&["edge_thickness"]),"height":num(0.,1e6),"value":number}), &["kind","height","value"]),
         object(json!({"kind":enumeration(&["overall_length"]),"first":integer(0,127),"last":integer(1,128),"value":number}), &["kind","first","last","value"]),
         object(json!({"kind":enumeration(&["marginal_height"]),"value":number,"zone":{"type":"number"}}), &["kind","value","zone"])
     ]})

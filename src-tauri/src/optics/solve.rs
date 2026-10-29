@@ -42,10 +42,7 @@ impl GapSolve {
                 offset,
             } => source < system.surfaces.len() && source != gap && finite(&[scale, offset]),
             Self::EdgeThickness { height, value } => {
-                gap < system.surfaces.len()
-                    && finite(&[height, value])
-                    && height >= 0.
-                    && value >= 0.
+                gap < system.surfaces.len() && finite(&[height, value]) && height >= 0.
             }
             Self::OverallLength { first, last, value } => {
                 first <= gap && gap < last && last <= system.surfaces.len() && value.is_finite()
@@ -392,9 +389,6 @@ fn resolve(s: &mut System, focus: Option<f64>) -> Result<(), String> {
             equations.len(),
         )?;
         if current <= 1. {
-            if focus.is_some() && work.surfaces.last().unwrap().thickness < 0. {
-                return Err("Focus lies before last surface".into());
-            }
             *s = work;
             return Ok(());
         }
