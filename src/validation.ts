@@ -1,4 +1,5 @@
 import { tr } from './i18n';
+import { benchProblems, type Bench } from './bench';
 import { paletteColor } from './color';
 import type {
     Field,
@@ -111,10 +112,12 @@ function exactKeys(
     o: Record<string, unknown>,
     keys: readonly string[],
     where: string,
+    optional: readonly string[] = [],
 ): string | null {
     for (const k of keys) if (!(k in o)) return tr('validation.m3', { p0: where, p1: k });
     for (const k of Object.keys(o))
-        if (!keys.includes(k)) return tr('validation.m4', { p0: where, p1: k });
+        if (!keys.includes(k) && !optional.includes(k))
+            return tr('validation.m4', { p0: where, p1: k });
     return null;
 }
 
@@ -292,8 +295,10 @@ function parseEndpoint(value: unknown, where: string): EndpointSurface | string 
 /** Parse untrusted JSON into an OpticalSystem; returns an error string on failure. */
 export function parseSystem(value: unknown): OpticalSystem | string {
     if (!isRecord(value)) return tr('validation.m26');
-    const top = exactKeys(value, SYSTEM_KEYS, 'System');
+    const top = exactKeys(value, SYSTEM_KEYS, 'System', ['bench']);
     if (top) return top;
+    const benchErrors = benchProblems(value.bench);
+    if (benchErrors.length) return benchErrors[0]!;
     const v = value;
     if (typeof v.name !== 'string') return tr('validation.m27');
     if (typeof v.note !== 'string') return tr('validation.m28');
@@ -398,6 +403,7 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     }
     return {
         name: v.name,
+        bench: v.bench as Bench | null | undefined,
         note: v.note,
         surfaces,
         wavelengths,
@@ -424,7 +430,7 @@ export function parseSystem(value: unknown): OpticalSystem | string {
  * ray aiming, pupil feasibility, …) is left to the backend, whose errors are shown as-is.
  */
 export function validateSystem(s: OpticalSystem): string[] {
-    const p: string[] = [];
+    const p: string[] = benchProblems(s.bench);
     if (s.name.length > 256) p.push(tr('validation.m59'));
     if (s.note.length > 100_000) p.push(tr('validation.m60'));
     if (s.surfaces.length < 1 || s.surfaces.length > 128) p.push(tr('validation.m61'));

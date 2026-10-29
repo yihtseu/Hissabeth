@@ -1,6 +1,6 @@
 use crate::optics::{
-    self, Field, PupilSampling, Spectrum, System, analysis, aperture, editing, focus, inspection,
-    material, project, report, solve,
+    self, Field, PupilSampling, Spectrum, System, analysis, aperture, bench, editing, focus,
+    inspection, material, project, report, solve,
 };
 use serde_json::{Value, json};
 use std::{
@@ -139,6 +139,35 @@ impl Engine {
                 .ok_or_else(|| "revision is required".to_string())
         };
         let mut result = match name {
+            "bench_get" => Ok(json!({"bench":self.system.bench,"revision":self.revision})),
+            "bench_example" => Ok(json!({"bench":bench::example()})),
+            "bench_set" => {
+                let scene: bench::Bench =
+                    serde_json::from_value(args["bench"].clone()).map_err(|e| e.to_string())?;
+                scene.validate()?;
+                let mut next = self.system.clone();
+                next.bench = Some(scene);
+                self.commit(next, expected()?)
+            }
+            "bench_trace" | "bench_assembly" => {
+                let supplied: Option<bench::Bench> = args
+                    .get("bench")
+                    .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+                    .transpose()?;
+                let scene = supplied
+                    .as_ref()
+                    .or(self.system.bench.as_ref())
+                    .ok_or("Create a free-space bench first")?;
+                scene.validate()?;
+                let mut value = if name == "bench_trace" {
+                    serde_json::to_value(scene.trace()?).map_err(|e| e.to_string())?
+                } else {
+                    scene.assembly()
+                };
+                value["revision"] = json!(self.revision);
+                value["saved"] = json!(supplied.is_none());
+                Ok(value)
+            }
             "system_get" => Ok(json!({"system":self.system,"revision":self.revision})),
             "system_set" => {
                 let s: System =
@@ -396,7 +425,7 @@ impl Engine {
                 )
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false,"free_space_bench":true,"bench_spatial_poses":true,"bench_scalar_splitters":true,"bench_nearest_hits":true,"bench_assembly":true,"bench_lens_model":"ideal thin lens; slope approximation"}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -526,7 +555,7 @@ pub fn system_schema() -> Value {
             "comment",
         ],
     );
-    object(
+    let mut schema = object(
         json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"object_material":string(),"object_label":string(),"image_label":string(),"object_surface":endpoint,"image_surface":endpoint,"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
         &[
             "name",
@@ -549,6 +578,61 @@ pub fn system_schema() -> Value {
             "pressure",
             "custom_glasses",
         ],
+    );
+    schema["properties"]["bench"] = json!({"oneOf":[bench_schema(),{"type":"null"}]});
+    schema
+}
+pub fn bench_schema() -> Value {
+    let xyz = array(num(-1e6, 1e6), 3, 3);
+    let mount = object(
+        json!({"part":string(),"base_size":array(num(1e-9,1e5),2,2),"height_range":array(num(0.,1e6),2,2)}),
+        &["part", "base_size", "height_range"],
+    );
+    let element = object(
+        json!({"id":string(),"label":string(),"kind":enumeration(&["mirror","lens","splitter","detector","aperture","blocker"]),"position":xyz,"rotation":xyz,"aperture":num(1e-9,1e5),"body_radius":num(1e-9,1e5),"focal_length":num(-1e6,1e6),"reflectance":num(0.,1.),"transmittance":num(0.,1.),"mount":{"oneOf":[mount,{"type":"null"}]}}),
+        &[
+            "id",
+            "label",
+            "kind",
+            "position",
+            "rotation",
+            "aperture",
+            "body_radius",
+            "focal_length",
+            "reflectance",
+            "transmittance",
+            "mount",
+        ],
+    );
+    let source = object(
+        json!({"id":string(),"position":xyz,"direction":xyz,"wavelength":num(100.,20000.),"power":num(1e-12,1e6),"beam_radius":num(0.,1e5),"rings":integer(0,8)}),
+        &[
+            "id",
+            "position",
+            "direction",
+            "wavelength",
+            "power",
+            "beam_radius",
+            "rings",
+        ],
+    );
+    let connection = object(
+        json!({"from":string(),"port":enumeration(&["out","reflected","transmitted"]),"to":string()}),
+        &["from", "port", "to"],
+    );
+    object(
+        json!({"name":string(),"table_size":array(num(1e-9,1e6),2,2),"hole_pitch":num(1e-9,1e6),"origin":xyz,"elements":array(element,0,128),"sources":array(source,1,16),"connections":array(connection,0,384),"max_interactions":integer(1,128),"min_power":num(0.,1.)}),
+        &[
+            "name",
+            "table_size",
+            "hole_pitch",
+            "origin",
+            "elements",
+            "sources",
+            "connections",
+            "max_interactions",
+            "min_power",
+        ],
     )
 }
 pub fn tools() -> Value {
@@ -556,6 +640,36 @@ pub fn tools() -> Value {
     let mut add = |name: &str, description: &str, properties: Value, required: &[&str]| {
         list.push(json!({"name":name,"description":description,"inputSchema":object(properties,required)}))
     };
+    add(
+        "bench_get",
+        "Read the saved free-space laser bench and shared project revision. Table XY; Z height; mm; rotations [roll,pitch,yaw] in degrees.",
+        json!({}),
+        &[],
+    );
+    add(
+        "bench_example",
+        "Get a read-only two-arm laser bench example. Nothing is saved until bench_set or system_set.",
+        json!({}),
+        &[],
+    );
+    add(
+        "bench_set",
+        "Atomically save a validated free-space bench in the current project. Requires the current shared project revision. Retains the sequential prescription.",
+        json!({"bench":bench_schema(),"revision":integer(0,9_007_199_254_740_991)}),
+        &["bench", "revision"],
+    );
+    add(
+        "bench_trace",
+        "Trace the saved bench or supplied draft without writing. Nearest disk/mount hits, optional intended port connections, ideal thin lenses, scalar splitter power, bounded ray trees. Return partial paths and complete power accounting. This does not compute phase or polarization.",
+        json!({"bench":bench_schema()}),
+        &[],
+    );
+    add(
+        "bench_assembly",
+        "Read assembly coordinates, surface normals, holes/offsets, mounts, BOM and clearance diagnostics from the saved bench or supplied draft. Missing hardware is unresolved. No writes.",
+        json!({"bench":bench_schema()}),
+        &[],
+    );
     add(
         "workspace_status",
         "Read the workspace state before requesting optical data. A recovery state is connected but has no active optical system.",
@@ -1120,6 +1234,79 @@ pub fn relay() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bench_transaction_preview_roundtrip_and_restart() {
+        let mut e = engine("bench-transaction");
+        let revision = e.revision;
+        let sequential = e.system.surfaces.clone();
+        let scene = bench::example();
+        let before = std::fs::read(&e.path).ok();
+        let preview = e.call("bench_trace", json!({"bench":scene})).unwrap();
+        assert_eq!(preview["saved"], false);
+        assert_eq!(e.revision, revision);
+        assert_eq!(before, std::fs::read(&e.path).ok());
+        for args in [
+            json!({"bench":scene}),
+            json!({"bench":scene,"revision":revision+1}),
+            json!({"bench":scene,"revision":revision,"extra":0}),
+        ] {
+            assert!(e.call("bench_set", args).is_err());
+        }
+        e.call("bench_set", json!({"bench":scene,"revision":revision}))
+            .unwrap();
+        let bytes = std::fs::read(&e.path).unwrap();
+        assert!(
+            e.call("bench_set", json!({"bench":scene,"revision":revision}))
+                .is_err()
+        );
+        assert_eq!(bytes, std::fs::read(&e.path).unwrap());
+        let mut invalid = scene.clone();
+        invalid.connections[0].to = "missing".into();
+        assert!(
+            e.call("bench_set", json!({"bench":invalid,"revision":e.revision}))
+                .is_err()
+        );
+        assert_eq!(bytes, std::fs::read(&e.path).unwrap());
+        assert_eq!(
+            serde_json::to_value(sequential).unwrap(),
+            serde_json::to_value(&e.system.surfaces).unwrap()
+        );
+        assert_eq!(e.call("bench_trace", json!({})).unwrap()["saved"], true);
+        let report = e.call("bench_assembly", json!({})).unwrap();
+        assert_eq!(report["items"].as_array().unwrap().len(), 5);
+        let export = e
+            .call("project_export", json!({"format":"hissabeth"}))
+            .unwrap();
+        assert!(
+            e.call("project_export", json!({"format":"geopter"}))
+                .is_err()
+        );
+        let path = e.path.clone();
+        drop(e);
+        let mut reopened = Engine::open(path).unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.system.bench.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(&scene).unwrap()
+        );
+        let snapshot = reopened.call("system_get", json!({})).unwrap();
+        let mut system = snapshot["system"].clone();
+        system["name"] = json!("edited prescription");
+        reopened
+            .call(
+                "system_set",
+                json!({"system":system,"revision":reopened.revision}),
+            )
+            .unwrap();
+        assert!(reopened.system.bench.is_some());
+        let current = reopened.revision;
+        reopened
+            .call(
+                "project_import",
+                json!({"format":"hissabeth","text":export["text"],"revision":current}),
+            )
+            .unwrap();
+        assert_eq!(reopened.system.bench.unwrap().name, scene.name);
+    }
     #[test]
     fn project_new_clears_project_data_saves_and_reloads() {
         let mut e = engine("project-new");

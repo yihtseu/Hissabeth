@@ -89,6 +89,7 @@ export interface Glass {
 }
 
 export interface OpticalSystem {
+  bench?: import('./bench').Bench | null;
   name: string;
   note: string;
   surfaces: Surface[];
@@ -847,6 +848,7 @@ export interface AgentRegistration {
 
 export const TABS = [
   'Layout',
+  'Laser bench',
   'Spot diagram',
   'MTF',
   'Analysis',

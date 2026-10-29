@@ -137,6 +137,7 @@ impl Preferences {
             &self.workspace.default_view,
             &[
                 "Layout",
+                "Laser bench",
                 "Spot diagram",
                 "MTF",
                 "Analysis",

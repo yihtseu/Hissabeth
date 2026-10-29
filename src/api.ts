@@ -55,6 +55,23 @@ interface FieldArgs extends WavelengthArgs {
 }
 
 interface ToolMap {
+    bench_example: { args: NoArgs; result: { bench: import('./bench').Bench } };
+    bench_get: {
+        args: NoArgs;
+        result: { bench: import('./bench').Bench | null; revision: number };
+    };
+    bench_set: {
+        args: { bench: import('./bench').Bench; revision: number };
+        result: { revision: number };
+    };
+    bench_trace: {
+        args: { bench?: import('./bench').Bench };
+        result: import('./bench').BenchTrace;
+    };
+    bench_assembly: {
+        args: { bench?: import('./bench').Bench };
+        result: import('./bench').BenchAssembly;
+    };
     /** Workspace state; the only read that also works during recovery. */
     workspace_status: { args: NoArgs; result: WorkspaceStatus };
     /** Recovery only: rereads the file; the revision must be the one the caller last observed. */
