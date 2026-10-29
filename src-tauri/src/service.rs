@@ -10,11 +10,14 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+mod workspace;
+pub use workspace::Workspace;
+
 pub struct Engine {
     pub system: System,
     pub revision: u64,
     pub path: PathBuf,
-    _lease: std::fs::File,
+    _lease: Arc<std::fs::File>,
 }
 fn persist_system(path: &std::path::Path, system: &System) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(system).map_err(|e| e.to_string())?;
@@ -43,41 +46,68 @@ pub fn field_argument(s: &System, args: &Value) -> Result<Field, String> {
     }
     Ok(s.fields[0].clone())
 }
+fn acquire_lease(path: &std::path::Path) -> Result<Arc<std::fs::File>, String> {
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .map_err(|e| e.to_string())?;
+    lease
+        .try_lock()
+        .map_err(|_| "This workspace is already open in another Hissabeth process")?;
+    Ok(Arc::new(lease))
+}
+fn fresh_revision() -> Result<u64, String> {
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|e| e.to_string())?;
+    Ok(u64::from_le_bytes(random) & ((1u64 << 48) - 1))
+}
+pub trait ToolCaller {
+    fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String>;
+}
+impl ToolCaller for Engine {
+    fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        self.call(name, args)
+    }
+}
 impl Engine {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let lease = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.with_extension("lock"))
-            .map_err(|e| e.to_string())?;
-        lease
-            .try_lock()
-            .map_err(|_| "This workspace is already open in another Hissabeth process")?;
-        let loaded = path.exists();
-        let mut system: System = if loaded {
-            serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
-                .map_err(|e| format!("Invalid optical project: {e}"))?
-        } else {
-            System::default()
+        let lease = acquire_lease(&path)?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        Self::load_bytes(path, lease, fresh_revision()?, bytes.as_deref())
+    }
+    fn load_bytes(
+        path: PathBuf,
+        lease: Arc<std::fs::File>,
+        revision: u64,
+        bytes: Option<&[u8]>,
+    ) -> Result<Self, String> {
+        let mut system: System = match bytes {
+            Some(bytes) => serde_json::from_slice(bytes)
+                .map_err(|e| format!("Invalid optical project: {e}"))?,
+            None => System::default(),
         };
         let stored = serde_json::to_value(&system).map_err(|e| e.to_string())?;
         system.update()?;
-        if loaded && stored != serde_json::to_value(&system).map_err(|e| e.to_string())? {
+        system.validate()?;
+        if bytes.is_some() && stored != serde_json::to_value(&system).map_err(|e| e.to_string())? {
+            if std::fs::read(&path).map_err(|e| e.to_string())?.as_slice() != bytes.unwrap() {
+                return Err("Saved file changed while loading; retry from disk".into());
+            }
             persist_system(&path, &system)?;
         }
-        let mut random = [0u8; 8];
-        getrandom::fill(&mut random).map_err(|e| e.to_string())?;
-        let revision = u64::from_le_bytes(random) & ((1u64 << 48) - 1);
-        let e = Self {
+        Ok(Self {
             system,
             revision,
             path,
             _lease: lease,
-        };
-        e.system.validate()?;
-        Ok(e)
+        })
     }
     fn replace(&mut self, mut next: System, expected: u64) -> Result<Value, String> {
         if expected != self.revision {
@@ -356,7 +386,7 @@ impl Engine {
                 Ok(json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?}))
             }
             "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false}}),
             ),
             _ => Err(format!("Unknown tool {name}")),
         }?;
@@ -516,6 +546,24 @@ pub fn tools() -> Value {
     let mut add = |name: &str, description: &str, properties: Value, required: &[&str]| {
         list.push(json!({"name":name,"description":description,"inputSchema":object(properties,required)}))
     };
+    add(
+        "workspace_status",
+        "Read the workspace state before requesting optical data. A recovery state is connected but has no active optical system.",
+        json!({}),
+        &[],
+    );
+    add(
+        "workspace_retry",
+        "While recovery is active, reread a user-repaired saved file under the current workspace lease. A missing or invalid file stays in recovery. Requires its current recovery revision.",
+        json!({"revision":integer(0,9_007_199_254_740_991)}),
+        &["revision"],
+    );
+    add(
+        "workspace_recover",
+        "While recovery is active, validate a chosen native/Geopter project or create a new system. Preserve the original file before installing the chosen system; reject changed disk contents and stale recovery revisions. No optical tool can write through recovery.",
+        json!({"revision":integer(0,9_007_199_254_740_991),"source":{"oneOf":[object(json!({"kind":enumeration(&["default"])}),&["kind"]),object(json!({"kind":enumeration(&["project"]),"format":enumeration(&["hissabeth","geopter"]),"text":string()}),&["kind","format","text"])]}}),
+        &["revision", "source"],
+    );
     add(
         "system_get",
         "Read the entire current optical prescription and revision",
@@ -897,17 +945,17 @@ fn validate_args(name: &str, args: &Value) -> Result<(), String> {
     }
     validate_schema(args, &tool["inputSchema"], "arguments")
 }
-pub fn rpc(request: Value, engine: &mut Engine) -> Option<Value> {
+pub fn rpc(request: Value, engine: &mut impl ToolCaller) -> Option<Value> {
     let id = request.get("id")?.clone();
     let result = match request["method"].as_str().unwrap_or("") {
         "initialize" => Ok(
-            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"hissabeth","version":env!("CARGO_PKG_VERSION")},"instructions":"Read system_get before editing. All dimensions are mm and wavelengths nm. GUI reflects changes. Use field_index for stored fields. Every mutating operation requires the current revision."}),
+            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"hissabeth","version":env!("CARGO_PKG_VERSION")},"instructions":"Read workspace_status first; if recovery is active, use workspace_retry or workspace_recover before optical tools. Read system_get before editing. All dimensions are mm and wavelengths nm. GUI reflects changes. Use field_index for stored fields. Every mutating operation requires the current revision."}),
         ),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools":tools()})),
         "tools/call" => {
             let p = &request["params"];
-            let r = engine.call(
+            let r = engine.call_tool(
                 p["name"].as_str().unwrap_or(""),
                 p.get("arguments").cloned().unwrap_or(json!({})),
             );
@@ -940,7 +988,7 @@ pub fn data_dir() -> PathBuf {
             root.unwrap_or_else(|| PathBuf::from(".")).join("hissabeth")
         })
 }
-pub fn serve(engine: Arc<Mutex<Engine>>) -> Result<(), String> {
+pub fn serve(engine: Arc<Mutex<Workspace>>) -> Result<(), String> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -981,7 +1029,7 @@ pub fn serve(engine: Arc<Mutex<Engine>>) -> Result<(), String> {
                 continue;
             }
             let response = match engine.lock() {
-                Ok(mut e) => rpc(req["request"].clone(), &mut e),
+                Ok(mut e) => rpc(req["request"].clone(), &mut *e),
                 Err(_) => None,
             };
             if let Some(r) = response {

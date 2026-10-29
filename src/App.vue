@@ -14,6 +14,7 @@ import MetricsBar from './components/MetricsBar.vue';
 import MtfView from './components/MtfView.vue';
 import PrescriptionReport from './components/PrescriptionReport.vue';
 import RayInspection from './components/RayInspection.vue';
+import RecoveryPanel from './components/RecoveryPanel.vue';
 import SpotView from './components/SpotView.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
 import SystemEditor from './components/SystemEditor.vue';
@@ -59,7 +60,7 @@ const imageSolved = computed(() => {
   return !!surfaces && surfaces.length > 0 && surfaces[surfaces.length - 1].gap_solve.kind !== 'fixed';
 });
 const canSave = computed(
-  () => wb.online.value && !wb.busy.value && !wb.stale.value && !wb.refreshPending.value && wb.dirty.value && wb.problems.value.length === 0,
+  () => wb.online.value && !wb.recovery.value && !wb.busy.value && !wb.stale.value && !wb.refreshPending.value && wb.dirty.value && wb.problems.value.length === 0,
 );
 
 function onTabKey(e: KeyboardEvent, index: number): void {
@@ -78,7 +79,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
     <header>
       <div class="brand"><span class="mark" aria-hidden="true">◈</span> Hissabeth <small>Optical workbench</small></div>
       <div class="header-actions">
-        <span role="status"><span class="status-dot" :class="{ offline: !wb.online.value }" aria-hidden="true"></span>{{ wb.online.value ? 'Engine connected' : 'Engine offline' }}</span>
+        <span role="status"><span class="status-dot" :class="{ offline: !wb.online.value }" aria-hidden="true"></span>{{ !wb.online.value ? 'Engine offline' : wb.recovery.value ? 'Engine connected · Workspace recovery' : 'Engine connected' }}</span>
         <button type="button" @click="connect">Connect agents</button>
       </div>
     </header>
@@ -104,7 +105,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
         <div class="aside-bottom">
           <span class="status-dot" aria-hidden="true"></span>CPU · f64 precision
           <p>Small optical workloads stay on CPU.</p>
-          <p>Revision {{ wb.revision.value }}</p>
+          <p>Revision {{ wb.recovery.value ? wb.recovery.value.revision : wb.revision.value }}</p>
         </div>
       </aside>
       <main id="main" tabindex="-1" role="tabpanel" :aria-labelledby="`tab-${TABS.indexOf(tab)}`">
@@ -113,11 +114,11 @@ function onTabKey(e: KeyboardEvent, index: number): void {
           <div>
             <button
               type="button"
-              :disabled="!wb.online.value || !wb.system.value || wb.dirty.value || wb.busy.value || wb.stale.value || wb.refreshPending.value || imageSolved"
+              :disabled="!wb.online.value || !wb.system.value || !!wb.recovery.value || wb.dirty.value || wb.busy.value || wb.stale.value || wb.refreshPending.value || imageSolved"
               :title="imageSolved ? 'The final gap is controlled by a gap solve; remove that solve to use paraxial focus.' : undefined"
               @click="wb.autofocus()"
             >Paraxial focus</button>
-            <button type="button" :disabled="!wb.dirty.value || wb.busy.value" @click="wb.revert()">Revert</button>
+            <button type="button" :disabled="!wb.dirty.value || wb.busy.value || !!wb.recovery.value" @click="wb.revert()">Revert</button>
             <button type="button" class="primary" :disabled="!canSave" @click="wb.save()">{{ wb.dirty.value ? 'Apply changes' : 'Save system' }}</button>
           </div>
         </div>
@@ -125,12 +126,18 @@ function onTabKey(e: KeyboardEvent, index: number): void {
         <div v-if="!wb.online.value" role="alert" class="banner error">
           Engine offline — {{ wb.offlineReason.value || 'no response from the optical engine' }}. Retrying automatically; analysis results are cleared until the engine responds.
         </div>
-        <div v-if="wb.stale.value" role="alert" class="banner warn">
+        <div v-if="wb.stale.value && wb.recovery.value" role="status" class="banner warn">
+          Your unapplied draft is kept while the workspace is in recovery; the reload choice returns once a valid system loads.
+        </div>
+        <div v-else-if="wb.stale.value" role="alert" class="banner warn">
           The saved system changed while your draft was open, so the draft must be reloaded before it can be applied.
           <button type="button" @click="wb.discardAndReload()">Discard draft and reload</button>
         </div>
         <div v-if="wb.refreshPending.value" role="alert" class="banner warn">
-          <template v-if="wb.stale.value">
+          <template v-if="wb.stale.value && wb.recovery.value">
+            Your change was saved, but the view could not refresh, and your draft has changed since. The draft is kept and will not be replaced automatically; the reload choice returns once a valid system loads. Do not repeat the operation.
+          </template>
+          <template v-else-if="wb.stale.value">
             Your change was saved, but the view could not refresh, and your draft has changed since. It will not be replaced automatically: use “Discard draft and reload” to see the saved system. Do not repeat the operation.
           </template>
           <template v-else>
@@ -138,17 +145,40 @@ function onTabKey(e: KeyboardEvent, index: number): void {
           </template>
         </div>
         <div v-if="wb.actionError.value" role="alert" class="banner error">{{ wb.actionError.value }}</div>
+        <div v-if="wb.recoveryNotice.value" role="status" class="banner ok">
+          <span>
+            The workspace is ready again.
+            <template v-if="wb.recoveryNotice.value.path">The previous file was preserved at <code>{{ wb.recoveryNotice.value.path }}</code>.</template>
+            <template v-else>No previous file existed, so nothing was preserved.</template>
+          </span>
+          <button type="button" @click="wb.dismissRecoveryNotice()">Dismiss</button>
+        </div>
         <div v-if="wb.analysisError.value" role="alert" class="banner error">{{ wb.analysisError.value }}</div>
         <div v-if="agentError" role="alert" class="banner error">{{ agentError }}</div>
         <ul v-if="wb.dirty.value && wb.problems.value.length" class="problems" aria-label="Draft problems">
           <li v-for="p in wb.problems.value" :key="p">{{ p }}</li>
         </ul>
 
-        <p v-if="!wb.system.value && tab !== 'Agent connections'" class="empty" role="status">
+        <p v-if="!wb.recovery.value && !wb.system.value && tab !== 'Agent connections'" class="empty" role="status">
           {{ wb.online.value ? 'Loading system…' : 'No system loaded.' }}
         </p>
 
-        <template v-if="wb.system.value && wb.draft.value">
+        <RecoveryPanel
+          v-if="wb.recovery.value && tab !== 'Agent connections'"
+          :recovery="wb.recovery.value"
+          :online="wb.online.value"
+          :busy="wb.recoveryBusy.value || wb.recoveryPending.value"
+          :error="wb.recoveryError.value"
+          :text="wb.recoveryText.value"
+          :format="wb.recoveryFormat.value"
+          @update:text="wb.recoveryText.value = $event"
+          @update:format="wb.recoveryFormat.value = $event"
+          @retry="wb.retryFromDisk()"
+          @restore="wb.restoreFromText()"
+          @create="wb.createNewSystem()"
+        />
+
+        <template v-if="!wb.recovery.value && wb.system.value && wb.draft.value">
           <MetricsBar v-if="wb.paraxial.value && showMetrics" :paraxial="wb.paraxial.value" :spot="wb.spot.value" />
 
           <LayoutView v-if="tab === 'Layout'" :system="wb.system.value" :layout="wb.layout.value" :wavelength="wb.layoutWavelength.value" />

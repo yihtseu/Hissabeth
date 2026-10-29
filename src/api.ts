@@ -26,6 +26,8 @@ import type {
   PrescriptionReport,
   PupilSampling,
   RayFan,
+  RecoveryResult,
+  RecoverySource,
   SectionId,
   SolveArgs,
   SolveRecalculateResult,
@@ -37,6 +39,7 @@ import type {
   TraceInspect,
   VignettingUpdateResult,
   Wavefront,
+  WorkspaceStatus,
 } from './types';
 
 type NoArgs = Record<string, never>;
@@ -50,6 +53,12 @@ interface FieldArgs extends WavelengthArgs {
 }
 
 interface ToolMap {
+  /** Workspace state; the only read that also works during recovery. */
+  workspace_status: { args: NoArgs; result: WorkspaceStatus };
+  /** Recovery only: rereads the file; the revision must be the one the caller last observed. */
+  workspace_retry: { args: { revision: number }; result: WorkspaceStatus };
+  /** Recovery only: validates the source fully before any disk change. */
+  workspace_recover: { args: { revision: number; source: RecoverySource }; result: RecoveryResult };
   system_get: { args: NoArgs; result: SystemSnapshot };
   system_set: { args: { system: OpticalSystem; revision: number }; result: { revision: number } };
   materials_list: { args: NoArgs; result: string[] };

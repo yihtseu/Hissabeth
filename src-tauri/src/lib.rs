@@ -9,7 +9,7 @@ mod desktop {
     use std::sync::{Arc, Mutex};
     #[tauri::command]
     fn optical_call(
-        state: tauri::State<'_, Arc<Mutex<service::Engine>>>,
+        state: tauri::State<'_, Arc<Mutex<service::Workspace>>>,
         name: String,
         args: Value,
     ) -> Result<Value, String> {
@@ -27,7 +27,7 @@ mod desktop {
         let dir = service::data_dir();
         std::fs::create_dir_all(&dir).expect("Create application data directory");
         let engine = Arc::new(Mutex::new(
-            service::Engine::open(dir.join("system.json")).expect("Load optical system"),
+            service::Workspace::open(dir.join("system.json")).expect("Open application workspace"),
         ));
         service::serve(engine.clone()).expect("Start optical service");
         tauri::Builder::default()

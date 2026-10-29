@@ -15,6 +15,9 @@ DATA = ROOT / "target/transport-workspace"
 DATA.mkdir(exist_ok=True)
 for filename in ("system.json", "endpoint.json"):
     (DATA / filename).unlink(missing_ok=True)
+if "--workspace-recovery" in sys.argv:
+    (DATA / "system.json").write_bytes(b"{ broken saved project\n")
+
 ENV = dict(os.environ, HISSABETH_DATA_DIR=str(DATA))
 
 
@@ -59,6 +62,53 @@ def tool(name, args=None, error=False):
     assert result["isError"] is error, result
     return result if error else json.loads(result["content"][0]["text"])
 
+
+def workspace_recovery():
+    global engine
+    status=tool("workspace_status")
+    assert status["state"]=="recovery" and status["source_text"]=="{ broken saved project\n"
+    revision=status["revision"];original=(DATA/"system.json").read_bytes()
+    for name,args in [("system_get",{}),("layout",{}),("capabilities",{}),("materials_list",{}),("project_import",dict(format="hissabeth",text="{}",revision=revision))]:
+        tool(name,args,error=True)
+    for args in [{},dict(revision=revision+1,source=dict(kind="default")),dict(revision=revision,source=dict(kind="default",extra=True)),dict(revision=revision,source=dict(kind="project",format="hissabeth",text="{}"))]:
+        tool("workspace_recover",args,error=True)
+    assert (DATA/"system.json").read_bytes()==original and tool("workspace_status")==status
+    restored=tool("workspace_recover",dict(revision=revision,source=dict(kind="default")))
+    assert restored["revision"]==revision+1
+    assert Path(restored["preserved_path"]).read_bytes()==original
+    snapshot=tool("system_get")
+    assert snapshot["revision"]==restored["revision"]
+    assert tool("workspace_status")["state"]=="ready"
+    assert tool("capabilities")["scope"]["startup_recovery"]
+    import copy
+    exchange=copy.deepcopy(snapshot["system"]);exchange.update(pupil_mapping="reference_entrance_pupil",object_distance=1e10,temperature=25)
+    tool("system_set",dict(system=exchange,revision=snapshot["revision"]))
+    geopter=tool("project_export",dict(format="geopter"))["text"]
+    engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink()
+    (DATA/"system.json").write_bytes(b"another broken source")
+    engine=start_engine();status=tool("workspace_status");revision=status["revision"]
+    (DATA/"system.json").write_bytes(b"changed externally")
+    tool("workspace_recover",dict(revision=revision,source=dict(kind="default")),error=True)
+    assert (DATA/"system.json").read_bytes()==b"changed externally"
+    retried=tool("workspace_retry",dict(revision=revision))
+    assert retried["state"]=="recovery" and retried["revision"]==revision+1 and retried["source_text"]=="changed externally"
+    tool("workspace_retry",dict(revision=revision),error=True)
+    system=snapshot["system"];system["name"]="Externally repaired optics"
+    (DATA/"system.json").write_text(json.dumps(system))
+    ready=tool("workspace_retry",dict(revision=revision+1))
+    assert ready["state"]=="ready" and ready["revision"]==revision+2
+    assert tool("system_get")["system"]["name"]==system["name"]
+    for format,text in [("hissabeth",json.dumps(system)),("geopter",geopter)]:
+        engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink()
+        original=b"\xff\xfe\x00broken"
+        (DATA/"system.json").write_bytes(original);engine=start_engine()
+        status=tool("workspace_status")
+        assert status["state"]=="recovery" and status["source_text"] is None and status["source_bytes"]==len(original)
+        result=tool("workspace_recover",dict(revision=status["revision"],source=dict(kind="project",format=format,text=text)))
+        assert Path(result["preserved_path"]).read_bytes()==original
+        assert tool("system_get")["system"]["name"]==("Externally repaired optics" if format=="hissabeth" else "BK7 singlet")
+        assert math.isfinite(tool("paraxial",dict(wavelength=587.5618))["efl"])
+    print("PASS: real connected startup recovery; blocked optical writes, strict/stale schemas, byte-exact preservation, native/Geopter/new-system recovery, changed-disk rejection, invalid/valid external retry and same-relay restart")
 
 def prescription_report():
     global engine
@@ -992,6 +1042,13 @@ try:
     relay.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     relay.stdin.flush()
     tools = request("tools/list")["tools"]
+    if "--workspace-recovery" in sys.argv:
+        workspace_recovery()
+        raise SystemExit(0)
+    setup_status=tool("workspace_status")
+    if setup_status["state"]=="recovery":
+        assert setup_status["source_text"] is None and setup_status["source_bytes"]==0
+        tool("workspace_recover",dict(revision=setup_status["revision"],source=dict(kind="default")))
     if "--prescription-report" in sys.argv:
         prescription_report()
         raise SystemExit(0)
