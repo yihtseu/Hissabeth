@@ -97,7 +97,9 @@ const lines = computed(() =>
             dash: b.dash,
             muted: c.weight === 0,
             runs: runsOf(c, b.id).map((r) => ({
-                ...r,
+                points: r.points,
+                openStart: r.openStart,
+                openEnd: r.openEnd,
                 path: r.points.map((q) => `${px(q.x)},${py(q.y)}`).join(' '),
             })),
         })),

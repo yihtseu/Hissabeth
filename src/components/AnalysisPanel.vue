@@ -30,6 +30,8 @@ const props = defineProps<{
 const CURVE_SAMPLES = 33;
 const WAVEFRONT_GRID = 17;
 const DIFFRACTION_GRID = 32;
+const ZERNIKE_GRID = 33;
+const ZERNIKE_TERMS = 37;
 
 const CURVATURE_MIN = 2;
 const CURVATURE_MAX = 257;
@@ -45,6 +47,10 @@ interface Params {
     /** Field curvature only: sweep samples and the optional endpoint (omitted means +Y at the largest field). */
     curvatureSamples: number;
     fieldEnd: [number, number] | undefined;
+    /** Gaussian tools only: input 1/e² waist radius in mm, its global z, and the fiber mode field diameter. */
+    waist: number;
+    waistZ: number;
+    mfd: number;
 }
 interface Def {
     id: AnalysisKind;
@@ -325,6 +331,119 @@ const DEFS: Def[] = [
             }),
         }),
     },
+    {
+        id: 'wavefront_zernike',
+        get label() {
+            return tr('analysis.defs.wavefront_zernike.label');
+        },
+        get help() {
+            return tr('analysis.defs.wavefront_zernike.help');
+        },
+        field: true,
+        wavelength: true,
+        get sampling() {
+            return tr('analysis.zernikeDesc', { grid: ZERNIKE_GRID, terms: ZERNIKE_TERMS });
+        },
+        run: async (p) => ({
+            kind: 'wavefront_zernike',
+            data: await callTool('wavefront_zernike', {
+                field_index: p.fieldIndex,
+                wavelength: p.wavelength,
+                grid: ZERNIKE_GRID,
+                terms: ZERNIKE_TERMS,
+            }),
+        }),
+    },
+    {
+        id: 'huygens_psf',
+        get label() {
+            return tr('analysis.defs.huygens_psf.label');
+        },
+        get help() {
+            return tr('analysis.defs.huygens_psf.help');
+        },
+        field: true,
+        wavelength: true,
+        get sampling() {
+            return tr('analysis.pupilGrid', { n: DIFFRACTION_GRID });
+        },
+        run: async (p) => ({
+            kind: 'huygens_psf',
+            data: await callTool('huygens_psf', {
+                field_index: p.fieldIndex,
+                wavelength: p.wavelength,
+                grid: DIFFRACTION_GRID,
+            }),
+        }),
+    },
+    {
+        id: 'huygens_mtf',
+        get label() {
+            return tr('analysis.defs.huygens_mtf.label');
+        },
+        get help() {
+            return tr('analysis.defs.huygens_mtf.help');
+        },
+        field: true,
+        wavelength: false,
+        spectral: true,
+        get sampling() {
+            return tr('analysis.pupilGrid', { n: DIFFRACTION_GRID });
+        },
+        run: async (p) => ({
+            kind: 'huygens_mtf',
+            data: await callTool('huygens_mtf', {
+                field_index: p.fieldIndex,
+                spectrum: p.spectrum,
+                grid: DIFFRACTION_GRID,
+            }),
+        }),
+    },
+    {
+        id: 'gaussian_beam',
+        get label() {
+            return tr('analysis.defs.gaussian_beam.label');
+        },
+        get help() {
+            return tr('analysis.defs.gaussian_beam.help');
+        },
+        field: false,
+        wavelength: true,
+        get sampling() {
+            return tr('analysis.gaussianDesc');
+        },
+        run: async (p) => ({
+            kind: 'gaussian_beam',
+            data: await callTool('gaussian_beam', {
+                wavelength: p.wavelength,
+                waist: p.waist,
+                waist_z: p.waistZ,
+            }),
+        }),
+    },
+    {
+        id: 'fiber_coupling',
+        get label() {
+            return tr('analysis.defs.fiber_coupling.label');
+        },
+        get help() {
+            return tr('analysis.defs.fiber_coupling.help');
+        },
+        field: false,
+        wavelength: true,
+        get sampling() {
+            return tr('analysis.gaussianDesc');
+        },
+        run: async (p) => ({
+            kind: 'fiber_coupling',
+            data: await callTool('fiber_coupling', {
+                wavelength: p.wavelength,
+                waist: p.waist,
+                waist_z: p.waistZ,
+                mode_field_diameter: p.mfd,
+            }),
+        }),
+    },
 ];
 
 const kind = ref<AnalysisKind>('ray_fan');
@@ -340,6 +459,22 @@ const slice = ref('default');
 /** Applied sweep sample count (drives requests) and the raw text being edited; only Apply moves text into the count. */
 const curvatureSamples = ref(33);
 const samplesText = ref(String(curvatureSamples.value));
+/** Gaussian beam inputs (mm); kept across kinds, validated before any request. */
+const gaussianWaist = ref(1);
+const gaussianWaistZ = ref(0);
+const fiberMfd = ref(0.02);
+const isGaussian = computed(
+    () => kind.value === 'gaussian_beam' || kind.value === 'fiber_coupling',
+);
+const gaussianValid = computed(
+    () =>
+        Number.isFinite(gaussianWaist.value) &&
+        gaussianWaist.value > 0 &&
+        gaussianWaist.value <= 1000 &&
+        Math.abs(gaussianWaistZ.value) <= 1e9 &&
+        (kind.value !== 'fiber_coupling' ||
+            (Number.isFinite(fiberMfd.value) && fiberMfd.value > 0 && fiberMfd.value <= 1000)),
+);
 const parsedSamples = computed(() => {
     const t = samplesText.value.trim();
     const n = t === '' ? NaN : Number(t);
@@ -468,6 +603,11 @@ async function run(): Promise<void> {
         error.value = tr('analysis.needsTwoWavelengths');
         return;
     }
+    if (isGaussian.value && !gaussianValid.value) {
+        outcome.value = null;
+        error.value = '';
+        return;
+    }
     // Everything the response is labeled with is captured here, before dispatch.
     const revisionAtRequest = props.revision;
     const field = fieldIndex.value;
@@ -484,6 +624,9 @@ async function run(): Promise<void> {
             sampling: { ...energySampling.value },
             curvatureSamples: curvatureSamples.value,
             fieldEnd: sliceEnd(sys),
+            waist: gaussianWaist.value,
+            waistZ: gaussianWaistZ.value,
+            mfd: fiberMfd.value,
             spectrum:
                 spectralMode.value === 'poly'
                     ? { kind: 'polychromatic' }
@@ -521,6 +664,9 @@ watch(
         spectralMode,
         energySampling,
         curvatureKey,
+        gaussianWaist,
+        gaussianWaistZ,
+        fiberMfd,
         () => props.revision,
         () => props.online,
     ],
@@ -607,6 +753,34 @@ watch(
                         {{ tr('analysis.applySamples') }}
                     </button>
                 </form>
+                <template v-if="isGaussian">
+                    <label
+                        >{{ tr('analysis.waistMm') }}
+                        <input
+                            v-model.number="gaussianWaist"
+                            type="number"
+                            min="0.000001"
+                            max="1000"
+                            step="any"
+                            required
+                        />
+                    </label>
+                    <label
+                        >{{ tr('analysis.waistZMm') }}
+                        <input v-model.number="gaussianWaistZ" type="number" step="any" required />
+                    </label>
+                    <label v-if="kind === 'fiber_coupling'"
+                        >{{ tr('analysis.mfdMm') }}
+                        <input
+                            v-model.number="fiberMfd"
+                            type="number"
+                            min="0.000001"
+                            max="1000"
+                            step="any"
+                            required
+                        />
+                    </label>
+                </template>
                 <RaySamplingControl v-if="def.rays" v-model="energySampling" />
                 <span v-if="def.range"
                     >{{ tr('sys.wavelengths') }} {{ range.lower }}–{{ range.upper }}
@@ -615,7 +789,10 @@ watch(
                 <button
                     type="button"
                     :disabled="
-                        !online || loading || (isCurvature && (!samplesValid || samplesUnapplied))
+                        !online ||
+                        loading ||
+                        (isCurvature && (!samplesValid || samplesUnapplied)) ||
+                        (isGaussian && !gaussianValid)
                     "
                     @click="run()"
                 >

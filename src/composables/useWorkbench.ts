@@ -1,5 +1,6 @@
 import { tr } from '../i18n';
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { callTool, errorMessage, inDesktop } from '../api';
 import type {
     GeometricMtf,
@@ -39,6 +40,9 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     const actionError = ref('');
     const analysisError = ref('');
     const materials = ref<string[]>(FALLBACK_MATERIALS);
+    const canUndo = ref(false);
+    const canRedo = ref(false);
+    const activeProjectPath = ref<string | null>(null);
 
     /** Recovery state from the last workspace_status poll; null when the workspace is ready. */
     const recovery = ref<RecoveryWorkspace | null>(null);
@@ -108,13 +112,32 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     const problems = computed(() => (draft.value ? validateSystem(draft.value) : []));
 
     let timer: ReturnType<typeof setInterval> | undefined;
+    let unlistenWorkspace: UnlistenFn | undefined;
     let polling = false;
     let materialsLoaded = false;
     /** Serialized draft captured when a request starts; the poll may adopt over the draft only while it still matches. */
     let pendingDraftText: string | null = null;
-    let analysisToken = 0;
+    let paraxialToken = 0;
+    let layoutToken = 0;
     let spotToken = 0;
     let mtfToken = 0;
+
+    async function refreshWorkspaceMeta(): Promise<void> {
+        if (recovery.value || !online.value) return;
+        const rev = revision.value;
+        const [hist, proj] = await Promise.allSettled([
+            callTool('history_list', {}),
+            callTool('project_list', {}),
+        ]);
+        if (rev !== revision.value || recovery.value) return;
+        if (hist.status === 'fulfilled') {
+            canUndo.value = hist.value.can_undo;
+            canRedo.value = hist.value.can_redo;
+        }
+        if (proj.status === 'fulfilled') {
+            activeProjectPath.value = proj.value.active_file;
+        }
+    }
 
     function adopt(snapshot: SystemSnapshot): void {
         if (snapshot.revision !== revision.value) materialsLoaded = false; // custom glasses may have changed
@@ -139,6 +162,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         }
         if (wavelengthIndex.value >= wavelengths.length) wavelengthIndex.value = 0;
         void loadMaterials();
+        void refreshWorkspaceMeta();
     }
 
     async function loadMaterials(): Promise<void> {
@@ -331,6 +355,16 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
                 applyRecoveryStatus(status);
                 return; // every optical tool is blocked; nothing else may be read
             }
+            // Fast path: skip heavy system_get serialization when revision is unchanged and already synced.
+            if (
+                !recovery.value &&
+                !refreshPending.value &&
+                system.value !== null &&
+                status.revision === revision.value
+            ) {
+                void loadMaterials();
+                return;
+            }
             const snapshot = await callTool('system_get', {});
             if (epoch !== recoveryEpoch) return;
             if (recovery.value) {
@@ -379,46 +413,48 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     const selectedColor = (sys: OpticalSystem) =>
         sys.wavelengths[wavelengthIndex.value]?.color ?? FALLBACK_COLOR;
 
-    async function analyze(): Promise<void> {
-        const token = ++analysisToken;
+    async function analyzeParaxial(): Promise<void> {
+        const token = ++paraxialToken;
         const captured = revision.value;
-        // Paraxial depends on the wavelength; the layout only on the revision, so it stays while the revision matches.
         paraxial.value = null;
+        setError('paraxial', '');
+        if (!online.value || !system.value || recovery.value) return;
+        const w = wavelength.value;
+        try {
+            const result = await callTool('paraxial', { wavelength: w });
+            if (token !== paraxialToken || revision.value !== captured) return;
+            if (checkRevision(captured, revision.value, result.revision) !== 'ok') {
+                setError('paraxial', savedSystemChanged('Paraxial', captured, result.revision));
+                return;
+            }
+            paraxial.value = result;
+        } catch (e) {
+            if (token === paraxialToken) setError('paraxial', `Paraxial: ${errorMessage(e)}`);
+        }
+    }
+
+    async function analyzeLayout(): Promise<void> {
+        const token = ++layoutToken;
+        const captured = revision.value;
         if (layout.value.revision !== captured)
             layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
-        setError('core', '');
+        setError('layout', '');
         if (!online.value || !system.value || recovery.value) {
             layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
             return;
         }
-        const w = wavelength.value;
-        // Settled independently so one failing analysis (e.g. afocal paraxial) does not hide the rest.
-        const [p, l] = await Promise.allSettled([
-            callTool('paraxial', { wavelength: w }),
-            callTool('layout', {}),
-        ]);
-        if (token !== analysisToken || revision.value !== captured) return;
-        const errors: string[] = [];
-        const take = <T extends { revision: number }>(
-            r: PromiseSettledResult<T>,
-            label: string,
-        ): T | null => {
-            if (r.status === 'rejected') {
-                errors.push(`${label}: ${errorMessage(r.reason)}`);
-                return null;
+        try {
+            const result = await callTool('layout', {});
+            if (token !== layoutToken || revision.value !== captured) return;
+            if (checkRevision(captured, revision.value, result.revision) !== 'ok') {
+                layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 };
+                setError('layout', savedSystemChanged('Layout', captured, result.revision));
+                return;
             }
-            if (checkRevision(captured, revision.value, r.value.revision) !== 'ok') {
-                errors.push(savedSystemChanged(label, captured, r.value.revision));
-                return null;
-            }
-            return r.value;
-        };
-        paraxial.value = take(p, 'Paraxial');
-        const lay = take(l, 'Layout');
-        if (lay) layout.value = lay;
-        else if (l.status === 'fulfilled')
-            layout.value = { rays: [], field_indices: [], rejected: [], revision: -1 }; // reply from another revision
-        setError('core', errors.join(' · '));
+            layout.value = result;
+        } catch (e) {
+            if (token === layoutToken) setError('layout', `Layout: ${errorMessage(e)}`);
+        }
     }
 
     /** Drops the previous spot immediately, then requests the current field/wavelength/sampling. */
@@ -558,6 +594,16 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         );
     }
 
+    async function undo(): Promise<boolean> {
+        if (!canUndo.value) return false;
+        return mutate((rev) => callTool('history_undo', { revision: rev }));
+    }
+
+    async function redo(): Promise<boolean> {
+        if (!canRedo.value) return false;
+        return mutate((rev) => callTool('history_redo', { revision: rev }));
+    }
+
     /**
      * Run a backend operation that rewrites the saved system (import, catalog import),
      * then adopt the result. Refused while a draft is pending so it cannot be lost silently.
@@ -595,7 +641,8 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     }
 
     const hasSystem = computed(() => system.value !== null);
-    watch([revision, fieldIndex, wavelengthIndex, hasSystem, recovery], () => void analyze());
+    watch([revision, wavelengthIndex, hasSystem, online, recovery], () => void analyzeParaxial());
+    watch([revision, hasSystem, online, recovery], () => void analyzeLayout());
     watch(
         [revision, fieldIndex, wavelengthIndex, hasSystem, spotSampling, online, recovery],
         () => void analyzeSpot(),
@@ -617,12 +664,18 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         ],
         () => void analyzeMtf(),
     );
-    watch(online, () => void analyze());
 
     onMounted(async () => {
         if (!inDesktop()) {
             offlineReason.value = tr('workbench.m4');
             return;
+        }
+        try {
+            unlistenWorkspace = await listen<{ revision: number }>('workspace-changed', () => {
+                void poll();
+            });
+        } catch {
+            // Event listener optional outside Tauri runtime; polling fallback remains active.
         }
         await poll();
         timer = setInterval(() => void poll(), preferences.preferences.analysis.pollIntervalMs);
@@ -638,6 +691,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     );
     onBeforeUnmount(() => {
         if (timer !== undefined) clearInterval(timer);
+        unlistenWorkspace?.();
     });
 
     return {
@@ -654,6 +708,9 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         actionError,
         analysisError,
         materials,
+        canUndo,
+        canRedo,
+        activeProjectPath,
         fieldIndex,
         wavelengthIndex,
         wavelength,
@@ -680,6 +737,8 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         recoveryNotice,
         save,
         autofocus,
+        undo,
+        redo,
         revert,
         discardAndReload,
         mutate,

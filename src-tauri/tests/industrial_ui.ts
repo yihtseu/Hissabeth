@@ -12,9 +12,9 @@ import assert from 'node:assert/strict';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const target = resolve(root, 'src-tauri/target');
 const workspace = resolve(target, 'ui-workspace');
-const errors = [];
-const calls = [];
-let engine;
+const errors: string[] = [];
+const calls: any[] = [];
+let engine!: import('node:child_process').ChildProcess;
 let requestId = 0;
 async function startEngine() {
     engine = spawn(resolve(target, 'debug/hissabeth'), ['--engine'], {
@@ -22,7 +22,7 @@ async function startEngine() {
         stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
-    engine.stderr.on('data', (chunk) => { stderr += chunk; });
+    engine.stderr!.on('data', (chunk) => { stderr += chunk; });
     for (let attempt = 0; attempt < 150; attempt++) {
         if (engine.exitCode !== null) throw new Error(stderr);
         try { JSON.parse(await readFile(resolve(workspace, 'endpoint.json'), 'utf8')); return; } catch {}
@@ -30,10 +30,10 @@ async function startEngine() {
     }
     throw new Error('Rust service did not start: ' + stderr);
 }
-async function optical(name, args = {}) {
+async function optical(name: string, args: any = {}) {
     const endpoint = JSON.parse(await readFile(resolve(workspace, 'endpoint.json'), 'utf8'));
     const [host, port] = endpoint.address.split(':');
-    return new Promise((resolveResult, reject) => {
+    return new Promise<any>((resolveResult, reject) => {
         const socket = createConnection({ host, port: Number(port) });
         let response = '';
         socket.setTimeout(15000);
@@ -55,27 +55,27 @@ async function optical(name, args = {}) {
         } }) + '\n'));
     });
 }
-import { defaultPreferences } from './ui_preferences.mjs';
+import { defaultPreferences } from './ui_preferences';
 
-let snapshot = { preferences: structuredClone(defaultPreferences), revision: 0 };
+let snapshot: { preferences: any; revision: number; warning?: string } = { preferences: structuredClone(defaultPreferences), revision: 0 };
 let failSave = false;
 let holdSave = false;
-let releaseSave;
+let releaseSave: ((value?: unknown) => void) | undefined;
 let saveHeld = false;
 let openSettingsCalls = 0;
-const listeners = [];
+const listeners: any[] = [];
 let listenerId = 0;
 async function broadcast() {
     for (const entry of [...listeners]) {
-        if (entry.event === 'preferences-changed' && !entry.page.isClosed()) await entry.page.evaluate(({ handler, event }) => {
+        if (entry.event === 'preferences-changed' && !entry.page.isClosed()) await entry.page.evaluate(({ handler, event }: any) => {
             window.__testTauriCallback(handler, event);
         }, { handler: entry.handler, event: { event: 'preferences-changed', id: entry.id, payload: snapshot } });
     }
 }
-async function installBridge(page) {
-    page.on('pageerror', (error) => errors.push(error.message));
-    page.on('console', (message) => { if (message.type() === 'error' || (message.type() === 'warning' && message.text().includes('[intlify]'))) errors.push(message.text()); });
-    await page.exposeFunction('__testInvoke', async (command, args = {}) => {
+async function installBridge(page: import('@playwright/test').Page) {
+    page.on('pageerror', (error: Error) => errors.push(error.message));
+    page.on('console', (message: any) => { if (message.type() === 'error' || (message.type() === 'warning' && message.text().includes('[intlify]'))) errors.push(message.text()); });
+    await page.exposeFunction('__testInvoke', async (command: string, args: any = {}) => {
         calls.push({ command, args: structuredClone(args), time: Date.now() });
         if (command === 'optical_call') return optical(args.name, args.args);
         if (command === 'get_preferences') return structuredClone(snapshot);
@@ -96,7 +96,7 @@ async function installBridge(page) {
         if (command === 'open_settings') {
             openSettingsCalls++;
             for (const entry of [...listeners]) if (entry.event === 'settings-section' && !entry.page.isClosed()) {
-                await entry.page.evaluate(({handler,event}) => window.__testTauriCallback(handler,event), {handler:entry.handler,event:{event:'settings-section',id:entry.id,payload:args.section}});
+                await entry.page.evaluate(({handler,event}: any) => window.__testTauriCallback(handler,event), {handler:entry.handler,event:{event:'settings-section',id:entry.id,payload:args.section}});
             }
             return;
         }
@@ -104,7 +104,7 @@ async function installBridge(page) {
             { name: 'codex', installed: true, executable: '/fixture/codex' },
             { name: 'claude', installed: true, executable: '/fixture/claude' },
         ];
-        if (command === 'configure_agents') return args.agents.map((name) => ({ name, success: true, message: 'Fixture registered' }));
+        if (command === 'configure_agents') return args.agents.map((name: string) => ({ name, success: true, message: 'Fixture registered' }));
         if (command === 'plugin:event|listen') {
             const entry = { page, handler: args.handler, event: args.event, id: ++listenerId };
             listeners.push(entry); return entry.id;
@@ -121,17 +121,17 @@ async function installBridge(page) {
         window.isTauri = true;
         window.__testTauriCallback = (id, value) => callbacks.get(id)?.(value);
         window.__TAURI_INTERNALS__ = {
-            invoke: async (command, args) => {
+            invoke: async (command: string, args: any) => {
                 const result = await window.__testInvoke(command, args);
                 if (result?.__fixtureRejection) throw result.__fixtureRejection;
                 return result;
             },
-            transformCallback: (callback, once = false) => {
+            transformCallback: (callback: any, once = false) => {
                 const id = ++serial;
-                callbacks.set(id, (value) => { if (once) callbacks.delete(id); callback(value); });
+                callbacks.set(id, (value: any) => { if (once) callbacks.delete(id); callback(value); });
                 return id;
             },
-            unregisterCallback: (id) => callbacks.delete(id),
+            unregisterCallback: (id: number) => callbacks.delete(id),
             metadata: { currentWindow: { label: location.search.includes('settings') ? 'settings' : 'main' },
                 currentWebview: { label: location.search.includes('settings') ? 'settings' : 'main' } },
         };
@@ -140,16 +140,16 @@ async function installBridge(page) {
 }
 const server = createServer(async (req, res) => {
     try {
-        const pathname = new URL(req.url, 'http://localhost').pathname;
+        const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
         const file = resolve(root, 'dist', pathname === '/' ? 'index.html' : pathname.slice(1));
         if (!file.startsWith(resolve(root, 'dist') + '/')) { res.writeHead(403).end(); return; }
         res.setHeader('Content-Type', { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.ico': 'image/x-icon' }[extname(file)] || 'application/octet-stream');
         res.end(await readFile(file));
     } catch { res.writeHead(404).end(); }
 });
-let browser;
-let main;
-let settings;
+let browser!: import('@playwright/test').Browser;
+let main!: import('@playwright/test').Page;
+let settings!: import('@playwright/test').Page;
 try {
     await unlink(resolve(workspace, 'endpoint.json')).catch(() => {});
     await startEngine();
@@ -160,11 +160,11 @@ try {
     await optical('project_new', { revision: existing.revision });
     const blank = await optical('system_get');
     await optical('project_import', { format: 'geopter', text: await readFile(resolve(root, 'reference/upstream/example/book/kingslake_doublet.json'), 'utf8'), revision: blank.revision });
-    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     main = await context.newPage(); await installBridge(main);
-    const origin = `http://127.0.0.1:${server.address().port}`;
+    const origin = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
     await main.goto(origin);
     settings = await context.newPage(); await installBridge(settings);
     await settings.goto(origin + '/?window=settings');
@@ -173,8 +173,8 @@ try {
     await expect(main.locator('.prescription-dock')).toBeVisible();
     await expect(main.locator('html')).toHaveAttribute('lang', 'zh-CN');
     const apply = () => settings.locator('.settings-footer button.primary').click();
-    const section = (name) => settings.getByRole('tab', {name, exact:true}).click();
-    const view = (name) => main.locator('.command-toolbar select').selectOption(name);
+    const section = (name: string) => settings.getByRole('tab', {name, exact:true}).click();
+    const view = (name: string) => main.locator('.command-toolbar select').selectOption(name);
     await settings.getByLabel('语言', {exact:true}).selectOption('en-US');
     await apply();
     await expect(settings.getByRole('heading',{name:'Settings',exact:true})).toBeVisible();
@@ -326,7 +326,7 @@ try {
     // Edits made while persistence is pending survive the confirmation of an earlier form.
     await settings.getByLabel(/Font size/).fill('14');holdSave=true;await apply();
     await expect.poll(()=>saveHeld).toBe(true);
-    await settings.getByLabel(/Font size/).fill('13');holdSave=false;releaseSave();
+    await settings.getByLabel(/Font size/).fill('13');holdSave=false;releaseSave!();
     await expect(settings.locator('.settings-footer button.primary')).toBeEnabled();
     await expect(settings.getByLabel(/Font size/)).toHaveValue('13');await apply();
     await expect(main.locator('body')).toHaveCSS('font-size','13px');

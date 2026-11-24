@@ -52,7 +52,15 @@ pub fn chromatic_focus(
     let mut points = vec![];
     for i in 0..samples {
         let w = lower + (upper - lower) * i as f64 / (samples - 1) as f64;
-        match s.paraxial(w){Ok(p)=>points.push(json!({"wavelength":w,"focus":p["image_distance"],"shift":p["image_distance"].as_f64().unwrap()-reference,"error":null})),Err(e)=>points.push(json!({"wavelength":w,"focus":null,"shift":null,"error":e}))}
+        let focus = s.paraxial(w).and_then(|p| {
+            p["image_distance"]
+                .as_f64()
+                .ok_or_else(|| "No finite paraxial focus".into())
+        });
+        points.push(match focus {
+            Ok(focus) => json!({"wavelength":w,"focus":focus,"shift":focus-reference,"error":null}),
+            Err(error) => json!({"wavelength":w,"focus":null,"shift":null,"error":error}),
+        });
     }
     Ok(
         json!({"reference_wavelength":s.reference(),"reference_focus":reference,"points":points,"units":"mm"}),
@@ -63,7 +71,9 @@ pub fn longitudinal(s: &System, w: f64, samples: usize) -> Result<Value, String>
         return Err("Longitudinal samples must be 3–257".into());
     }
     let radius = s.pupil_radius(w)?;
-    let paraxial = s.paraxial(w)?["image_distance"].as_f64().unwrap();
+    let paraxial = s.paraxial(w)?["image_distance"]
+        .as_f64()
+        .ok_or("No finite paraxial focus")?;
     let vertex = s
         .surfaces
         .iter()
@@ -426,6 +436,39 @@ struct PsfData {
     valid: usize,
     chief_image: [f64; 2],
 }
+struct ExitMapping {
+    index: f64,
+    radius: f64,
+    image_distance: f64,
+    chief_image: [f64; 2],
+}
+fn exit_mapping(s: &System, w: f64, wf: &Wavefront) -> Result<ExitMapping, String> {
+    let paraxial = s.paraxial(w)?;
+    let exit_z = paraxial["exit_pupil_distance"]
+        .as_f64()
+        .ok_or("Exit pupil at infinity")?;
+    let last_vertex = s
+        .surfaces
+        .iter()
+        .take(s.surfaces.len() - 1)
+        .map(|s| s.thickness)
+        .sum::<f64>();
+    let exit_plane = last_vertex + exit_z;
+    let chief = &wf.chief;
+    let distance = (exit_plane - chief.last().point[2]) / chief.direction[2];
+    let pupil_center = add(chief.last().point, scale(chief.direction, distance));
+    let image_distance = norm(sub(chief.image(), pupil_center));
+    let radius = paraxial["exit_pupil_radius"]
+        .as_f64()
+        .ok_or("Undefined exit pupil radius")?;
+    let chief_image = chief.image();
+    Ok(ExitMapping {
+        index: chief.last().n_after,
+        radius,
+        image_distance,
+        chief_image: [chief_image[0], chief_image[1]],
+    })
+}
 fn psf_data(s: &System, f: &Field, w: f64, grid: usize) -> Result<PsfData, String> {
     if !(8..=128).contains(&grid) || !grid.is_power_of_two() {
         return Err("Diffraction pupil grid must be a power of two from 8 to 128".into());
@@ -460,31 +503,12 @@ fn psf_data(s: &System, f: &Field, w: f64, grid: usize) -> Result<PsfData, Strin
             centered[i * n + j] = raw[((i + n / 2) % n) * n + (j + n / 2) % n]
         }
     }
-    let paraxial = s.paraxial(w)?;
-    let exit_z = paraxial["exit_pupil_distance"]
-        .as_f64()
-        .ok_or("Exit pupil at infinity")?;
-    let last_vertex = s
-        .surfaces
-        .iter()
-        .take(s.surfaces.len() - 1)
-        .map(|s| s.thickness)
-        .sum::<f64>();
-    let exit_plane = last_vertex + exit_z;
-    let chief = &wf.chief;
-    let distance = (exit_plane - chief.last().point[2]) / chief.direction[2];
-    let pupil_center = add(chief.last().point, scale(chief.direction, distance));
-    let image_distance = norm(sub(chief.image(), pupil_center));
-    let diameter = 2.
-        * paraxial["exit_pupil_radius"]
-            .as_f64()
-            .ok_or("Undefined exit pupil radius")?;
+    let map = exit_mapping(s, w, &wf)?;
     let pixel =
-        w * 1e-6 / chief.last().n_after * image_distance * grid as f64 / (n as f64 * diameter);
+        w * 1e-6 / map.index * map.image_distance * grid as f64 / (n as f64 * 2. * map.radius);
     if !pixel.is_finite() || pixel <= 0. {
         return Err("Undefined diffraction image sampling".into());
     }
-    let chief_image = chief.image();
     Ok(PsfData {
         intensity: centered,
         n,
@@ -492,7 +516,7 @@ fn psf_data(s: &System, f: &Field, w: f64, grid: usize) -> Result<PsfData, Strin
         strehl: peak / (wf.valid * wf.valid) as f64,
         failed: wf.failed,
         valid: wf.valid,
-        chief_image: [chief_image[0], chief_image[1]],
+        chief_image: map.chief_image,
     })
 }
 pub fn diffraction_psf(s: &System, f: &Field, w: f64, grid: usize) -> Result<Value, String> {
@@ -502,6 +526,124 @@ pub fn diffraction_psf(s: &System, f: &Field, w: f64, grid: usize) -> Result<Val
         "wavelength":w,"normalization":"sum intensity = 1","model":"Fraunhofer with paraxial exit pupil mapping","image_sampling":IMAGE_SAMPLING,
         "failed_pupil_rays":psf.failed,"units":"mm"}),
     )
+}
+
+// Direct Huygens-Fresnel summation over the traced pupil samples, evaluated at
+// arbitrary image coordinates with the same paraxial exit pupil mapping as the
+// FFT path. Independent of the FFT lattice, so the two cross-validate.
+fn huygens_psf_data(
+    s: &System,
+    f: &Field,
+    w: f64,
+    grid: usize,
+    size: usize,
+    pitch: Option<f64>,
+) -> Result<PsfData, String> {
+    if !(5..=129).contains(&grid) {
+        return Err("Huygens pupil grid must be 5–129".into());
+    }
+    if !(3..=129).contains(&size) {
+        return Err("Huygens image size must be 3–129".into());
+    }
+    let wf = wavefront(s, f, w, grid)?;
+    let map = exit_mapping(s, w, &wf)?;
+    let pixel = pitch.unwrap_or(w * 1e-6 / map.index * map.image_distance / (4. * map.radius));
+    if !pixel.is_finite() || pixel <= 0. {
+        return Err("Undefined diffraction image sampling".into());
+    }
+    let scale = std::f64::consts::TAU * map.index / (w * 1e-6 * map.image_distance);
+    let valid_pupils: Vec<(f64, f64, f64)> = wf
+        .pupils
+        .iter()
+        .zip(&wf.values)
+        .filter_map(|(p, value)| {
+            value.map(|opd| (p[0] * map.radius, p[1] * map.radius, std::f64::consts::TAU * opd))
+        })
+        .collect();
+    let half = (size / 2) as f64;
+    let rows: Vec<Vec<f64>> = super::parallel::par_map_index(size, 4, |i| {
+        let y = (i as f64 - half) * pixel;
+        let mut row_re = vec![0.; size];
+        let mut row_im = vec![0.; size];
+        for &(px, py, phase_opd) in &valid_pupils {
+            let row = scale * y * py - phase_opd;
+            for j in 0..size {
+                let x = (j as f64 - half) * pixel;
+                let (sin, cos) = (row + scale * x * px).sin_cos();
+                row_re[j] += cos;
+                row_im[j] -= sin;
+            }
+        }
+        row_re
+            .into_iter()
+            .zip(row_im)
+            .map(|(re, im)| re * re + im * im)
+            .collect()
+    });
+    let mut intensity: Vec<f64> = rows.into_iter().flatten().collect();
+    let peak = intensity.iter().copied().fold(0., f64::max);
+    let total = intensity.iter().sum::<f64>();
+    if total <= 0. {
+        return Err("Zero diffraction energy".into());
+    }
+    for v in &mut intensity {
+        *v /= total
+    }
+    Ok(PsfData {
+        intensity,
+        n: size,
+        pixel,
+        strehl: peak / (wf.valid * wf.valid) as f64,
+        failed: wf.failed,
+        valid: wf.valid,
+        chief_image: map.chief_image,
+    })
+}
+pub fn huygens_psf(
+    s: &System,
+    f: &Field,
+    w: f64,
+    grid: usize,
+    size: Option<usize>,
+    pitch: Option<f64>,
+) -> Result<Value, String> {
+    let size = size.unwrap_or(2 * grid);
+    let psf = huygens_psf_data(s, f, w, grid, size, pitch)?;
+    Ok(
+        json!({"intensity":psf.intensity,"grid":psf.n,"pupil_grid":grid,"pixel_size":psf.pixel,"strehl":psf.strehl,
+        "wavelength":w,"normalization":"sum intensity = 1","model":"direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping","image_sampling":IMAGE_SAMPLING,
+        "failed_pupil_rays":psf.failed,"units":"mm"}),
+    )
+}
+pub fn huygens_mtf(
+    s: &System,
+    f: &Field,
+    spectrum: Spectrum,
+    grid: usize,
+    max_frequency: Option<f64>,
+) -> Result<Value, String> {
+    let mut components = vec![];
+    for wave in spectrum.wavelengths(s)? {
+        let data = huygens_psf_data(s, f, wave.value, grid, 2 * grid, None)
+            .map_err(|e| format!("{} nm: {e}", wave.value))?;
+        let fraction = data.valid as f64 / (data.valid + data.failed) as f64;
+        let spectral = SpectralComponent {
+            wavelength: wave.value,
+            weight: wave.weight,
+            color: wave.color,
+            pupil_samples: data.valid + data.failed,
+            transmitted_samples: data.valid,
+            transmitted_fraction: fraction,
+            effective_weight: wave.weight * fraction,
+        };
+        components.push(PsfComponent { data, spectral });
+    }
+    let mut result =
+        compose_diffraction_mtf(&components, spectrum, s.field_frame(f), grid, max_frequency)?;
+    result["model"] = json!(
+        "direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color"
+    );
+    Ok(result)
 }
 
 // The Fourier transform is evaluated on a common physical frequency grid.
@@ -712,6 +854,53 @@ mod tests {
                 .iter()
                 .all(|v| v.as_f64().unwrap() <= 1.00000001)
         );
+    }
+    #[test]
+    fn huygens_matches_fft_psf_and_mtf() {
+        let s = System::default();
+        let f = Field::meridional(3.);
+        let w = s.reference();
+        let fft = diffraction_psf(&s, &f, w, 32).unwrap();
+        let huygens = huygens_psf(&s, &f, w, 32, None, None).unwrap();
+        assert_eq!(fft["grid"], huygens["grid"]);
+        assert!(
+            (fft["pixel_size"].as_f64().unwrap() - huygens["pixel_size"].as_f64().unwrap()).abs()
+                < 1e-15
+        );
+        let peak = fft["intensity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .fold(0., f64::max);
+        for (a, b) in fft["intensity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(huygens["intensity"].as_array().unwrap())
+        {
+            let a = a.as_f64().unwrap();
+            let b = b.as_f64().unwrap();
+            assert!((a - b).abs() < 1e-9 * peak, "psf {a} vs {b}");
+        }
+        assert!(
+            (fft["strehl"].as_f64().unwrap() - huygens["strehl"].as_f64().unwrap()).abs() < 1e-9
+        );
+        let spectrum = Spectrum::Monochromatic { wavelength: w };
+        let a = diffraction_mtf(&s, &f, spectrum, 16, None).unwrap();
+        let b = huygens_mtf(&s, &f, spectrum, 16, None).unwrap();
+        for axis in ["sagittal", "tangential"] {
+            for (x, y) in a[axis]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(b[axis].as_array().unwrap())
+            {
+                let x = x.as_f64().unwrap();
+                let y = y.as_f64().unwrap();
+                assert!((x - y).abs() < 1e-9, "mtf {axis}: {x} vs {y}");
+            }
+        }
     }
     #[test]
     fn fft_known_impulse() {

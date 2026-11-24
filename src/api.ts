@@ -10,8 +10,13 @@ import type {
     DiffractionPsf,
     Distortion,
     EncircledEnergy,
+    FiberCoupling,
     FieldCurvature,
+    GaussianBeam,
     GeometricMtf,
+    HistoryCompareResult,
+    HistoryList,
+    HuygensPsf,
     ImportFormat,
     InspectLaunch,
     Layout,
@@ -20,10 +25,14 @@ import type {
     MtfAxis,
     OpdFan,
     OpticalSystem,
+    OptimizeOperand,
+    OptimizeResult,
+    OptimizeVariable,
     Paraxial,
     ParaxialTrace,
     PolychromaticSpot,
     PrescriptionReport,
+    ProjectListResult,
     PupilSampling,
     RayFan,
     RecoveryResult,
@@ -38,10 +47,16 @@ import type {
     SurfaceEditOperation,
     SurfaceEditResult,
     SystemSnapshot,
+    ToleranceCompensator,
+    ToleranceCriterion,
+    ToleranceMonteCarloResult,
+    ToleranceOperand,
+    ToleranceSensitivityResult,
     TraceInspect,
     VignettingUpdateResult,
     Wavefront,
     WorkspaceStatus,
+    ZernikeFit,
 } from './types';
 
 type NoArgs = Record<string, never>;
@@ -71,6 +86,42 @@ interface ToolMap {
     bench_assembly: {
         args: { bench?: import('./bench').Bench };
         result: import('./bench').BenchAssembly;
+    };
+    bench_catalog: {
+        args: { query?: string; kind?: string };
+        result: { items: import('./bench').BenchCatalogItem[] };
+    };
+    bench_template: {
+        args: { name: string; apply?: boolean; revision?: number };
+        result: { bench: import('./bench').Bench; applied?: boolean; revision?: number };
+    };
+    bench_auto_aim: {
+        args: {
+            bench?: import('./bench').Bench;
+            snap_holes?: boolean;
+            uniform_z?: number;
+            apply?: boolean;
+            revision?: number;
+        };
+        result: {
+            bench: import('./bench').Bench;
+            adjusted_elements: string[];
+            warnings: string[];
+            applied?: boolean;
+            revision?: number;
+        };
+    };
+    bench_lab_check: {
+        args: { bench?: import('./bench').Bench };
+        result: import('./bench').BenchLabCheck;
+    };
+    bench_alignment_guide: {
+        args: { bench?: import('./bench').Bench };
+        result: import('./bench').BenchAlignmentGuide;
+    };
+    bench_export_blueprint: {
+        args: { bench?: import('./bench').Bench; format: 'svg' | 'dxf' | 'stl' | 'alignment_md' };
+        result: import('./bench').BenchBlueprintExport;
     };
     /** Workspace state; the only read that also works during recovery. */
     workspace_status: { args: NoArgs; result: WorkspaceStatus };
@@ -168,6 +219,80 @@ interface ToolMap {
     encircled_energy: {
         args: FieldArgs & { sampling: PupilSampling; samples: number };
         result: EncircledEnergy;
+    };
+    wavefront_zernike: { args: FieldArgs & { grid: number; terms: number }; result: ZernikeFit };
+    huygens_psf: {
+        args: FieldArgs & { grid: number; size?: number; pitch?: number };
+        result: HuygensPsf;
+    };
+    huygens_mtf: {
+        args: { field_index: number; spectrum: Spectrum; grid: number; max_frequency?: number };
+        result: DiffractionMtf;
+    };
+    gaussian_beam: {
+        args: WavelengthArgs & { waist: number; waist_z?: number };
+        result: GaussianBeam;
+    };
+    fiber_coupling: {
+        args: WavelengthArgs & { waist: number; waist_z?: number; mode_field_diameter: number };
+        result: FiberCoupling;
+    };
+    design_summary: { args: NoArgs; result: Record<string, unknown> };
+    optimize: {
+        args: {
+            variables: OptimizeVariable[];
+            operands: OptimizeOperand[];
+            max_iterations?: number;
+            initial_damping?: number;
+            tolerance?: number;
+            apply?: boolean;
+            revision?: number;
+        };
+        result: OptimizeResult;
+    };
+    tolerance_sensitivity: {
+        args: {
+            tolerances: ToleranceOperand[];
+            compensator?: ToleranceCompensator;
+            criterion: ToleranceCriterion;
+        };
+        result: ToleranceSensitivityResult;
+    };
+    tolerance_monte_carlo: {
+        args: {
+            tolerances: ToleranceOperand[];
+            compensator?: ToleranceCompensator;
+            criterion: ToleranceCriterion;
+            trials?: number;
+            distribution?: 'normal' | 'uniform';
+            seed?: number;
+            pass_threshold?: number | null;
+            lower_is_better?: boolean | null;
+        };
+        result: ToleranceMonteCarloResult;
+    };
+    history_list: { args: NoArgs; result: HistoryList };
+    history_undo: {
+        args: { revision: number };
+        result: { revision: number; cursor: number; can_undo: boolean; can_redo: boolean };
+    };
+    history_redo: {
+        args: { revision: number };
+        result: { revision: number; cursor: number; can_undo: boolean; can_redo: boolean };
+    };
+    history_restore: { args: { index: number; revision: number }; result: { revision: number } };
+    history_compare: {
+        args: { from_index?: number; to_index?: number };
+        result: HistoryCompareResult;
+    };
+    project_list: { args: NoArgs; result: ProjectListResult };
+    project_open: {
+        args: { path: string; revision: number };
+        result: { revision: number; path: string; linked: boolean };
+    };
+    project_save_as: {
+        args: { path: string; revision: number };
+        result: { revision: number; path: string };
     };
 }
 

@@ -2,23 +2,13 @@
 import { tr } from '../i18n';
 import { computed, onMounted, ref } from 'vue';
 import { callTool, errorMessage } from '../api';
-import type {
-    CatalogImportResult,
-    CatalogWarning,
-    MaterialSearchResult,
-    OpticalSystem,
-} from '../types';
+import type { CatalogWarning, MaterialSearchResult, OpticalSystem } from '../types';
 import { fmt } from '../chart';
 
 const props = defineProps<{
     modelValue: OpticalSystem;
     online: boolean;
-    dirty: boolean;
-    busy: boolean;
-    /** Runs a backend operation that rewrites the saved system; resolves false when refused or failed. */
-    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
 }>();
-const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
 
 const LIMIT = 20;
 const query = ref('');
@@ -69,18 +59,6 @@ function warningText(w: CatalogWarning): string {
     return `${w.catalog}${w.glass ? ` / ${w.glass}` : ''}, line ${w.line}: ${w.message}`;
 }
 
-// ---- assign to a surface ---------------------------------------------------
-const target = ref(0);
-const assigned = ref('');
-function assign(key: string): void {
-    const i = Math.min(target.value, props.modelValue.surfaces.length - 1);
-    emit('update:modelValue', {
-        ...props.modelValue,
-        surfaces: props.modelValue.surfaces.map((s, k) => (k === i ? { ...s, material: key } : s)),
-    });
-    assigned.value = tr('mats.assigned', { n: i + 1, key: key });
-}
-
 // ---- index evaluation ---------------------------------------------------------
 const material = ref('');
 const evalWavelength = ref(
@@ -110,60 +88,6 @@ async function evaluate(): Promise<void> {
         });
     } catch (e) {
         indexError.value = errorMessage(e);
-    }
-}
-
-// ---- catalog import --------------------------------------------------------------
-const importName = ref('');
-const importText = ref('');
-const importStatus = ref('');
-const importError = ref('');
-const importWarnings = ref<CatalogWarning[]>([]);
-const importBlock = computed(() =>
-    !props.online
-        ? tr('common.offline')
-        : props.dirty
-          ? tr('mats.blockDirty')
-          : !importName.value.trim()
-            ? tr('mats.blockName')
-            : !importText.value.trim()
-              ? tr('mats.blockText')
-              : importName.value.trim().length > 128
-                ? tr('mats.blockNameLong')
-                : '',
-);
-
-async function onFile(e: Event): Promise<void> {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    importText.value = await file.text();
-    if (!importName.value.trim()) importName.value = file.name.replace(/\.[^.]*$/, '');
-    input.value = '';
-}
-async function doImport(): Promise<void> {
-    importStatus.value = '';
-    importError.value = '';
-    importWarnings.value = [];
-    const name = importName.value.trim();
-    const text = importText.value;
-    let imported: CatalogImportResult | null = null;
-    const ok = await props.mutate(async (revision) => {
-        imported = await callTool('catalog_import', { catalog: name, text, revision });
-        return imported;
-    });
-    if (ok) {
-        const done = imported as CatalogImportResult | null;
-        const count = done?.glasses_imported;
-        importStatus.value =
-            count === undefined
-                ? tr('mats.imported', { name: name })
-                : `Catalog ${name} imported: ${count} ${count === 1 ? 'glass' : 'glasses'}.`;
-        importWarnings.value = done?.warnings ?? [];
-        importText.value = '';
-        void search(0);
-    } else {
-        importError.value = tr('mats.importFailed');
     }
 }
 </script>
@@ -260,14 +184,6 @@ async function doImport(): Promise<void> {
                             <button
                                 type="button"
                                 class="small"
-                                :aria-label="tr('mats.useAria', { key: g.key })"
-                                @click="assign(g.key)"
-                            >
-                                {{ tr('mats.use') }}
-                            </button>
-                            <button
-                                type="button"
-                                class="small"
                                 :aria-label="tr('mats.indexAria', { key: g.key })"
                                 @click="material = g.key"
                             >
@@ -299,15 +215,6 @@ async function doImport(): Promise<void> {
             >
                 {{ tr('mats.next') }}
             </button>
-            <label class="inline"
-                >{{ tr('mats.useOnSurface') }}
-                <select v-model.number="target">
-                    <option v-for="(_, i) in modelValue.surfaces" :key="i" :value="i">
-                        {{ i + 1 }}
-                    </option>
-                </select>
-            </label>
-            <span v-if="assigned" role="status">{{ assigned }}</span>
         </div>
 
         <div class="subpanel">
@@ -335,52 +242,6 @@ async function doImport(): Promise<void> {
                 <output v-if="indexResult">{{ indexResult }}</output>
             </div>
             <p v-if="indexError" role="alert" class="json-error">{{ indexError }}</p>
-        </div>
-
-        <div class="subpanel">
-            <h4>{{ tr('mats.importCatalog') }}</h4>
-            <p class="note">
-                {{ tr('mats.importNote') }}
-            </p>
-            <div class="controls">
-                <label
-                    >{{ tr('mats.catalogName') }}
-                    <input v-model="importName" type="text" maxlength="128"
-                /></label>
-                <label
-                    >{{ tr('mats.file') }}
-                    <input type="file" accept=".agf,.txt,text/plain" @change="onFile"
-                /></label>
-            </div>
-            <textarea
-                v-model="importText"
-                class="paste"
-                rows="6"
-                spellcheck="false"
-                :aria-label="tr('mats.catalogText')"
-            />
-            <div class="controls">
-                <button
-                    type="button"
-                    class="primary"
-                    :disabled="!!importBlock || busy"
-                    @click="doImport"
-                >
-                    {{ tr('mats.importCatalog') }}
-                </button>
-                <span v-if="importBlock" class="note">{{ importBlock }}</span>
-                <span v-if="importStatus" role="status">{{ importStatus }}</span>
-                <span v-if="importError" role="alert" class="json-error">{{ importError }}</span>
-            </div>
-            <details v-if="importWarnings.length" class="catalog-warnings" open>
-                <summary>
-                    {{ importWarnings.length }} {{ tr('fragments.import') }}
-                    {{ importWarnings.length === 1 ? 'warning' : 'warnings' }}
-                </summary>
-                <ul>
-                    <li v-for="(w, i) in importWarnings" :key="i">{{ warningText(w) }}</li>
-                </ul>
-            </details>
         </div>
     </section>
 </template>

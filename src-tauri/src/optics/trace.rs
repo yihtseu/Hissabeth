@@ -130,42 +130,94 @@ impl System {
             }
         }
         let n0 = self.object_index(w).map_err(TraceFailure::launch)?;
-        let (mut p, mut v, mut vertex, mut n) = (p, v, 0., n0);
+        let (mut p, mut v, mut n) = (p, v, n0);
+        let mut frame = coord::Frame::identity();
         for (i, s) in self.surfaces.iter().enumerate().take(last + 1) {
-            if v[2].abs() < 1e-14 {
-                return Err(TraceFailure::path(
-                    FailureKind::Intersection,
-                    Some(i),
-                    None,
-                    ray,
-                    format!("Ray parallel to surface {i}"),
-                ));
+            let saved_frame = frame;
+            if let Some(t) = &s.transform {
+                frame = frame.apply(t);
             }
-            let intersection = match s.profile().intersect(p, v, vertex) {
-                Ok(hit) => hit,
-                Err(e) => {
+            let (hit, normal, distance) = if frame.is_centered() {
+                if v[2].abs() < 1e-14 {
                     return Err(TraceFailure::path(
                         FailureKind::Intersection,
                         Some(i),
                         None,
                         ray,
-                        format!("Surface {i}: {e}"),
+                        format!("Ray parallel to surface {i}"),
                     ));
                 }
+                let intersection = match s.profile().intersect(p, v, frame.origin[2]) {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        return Err(TraceFailure::path(
+                            FailureKind::Intersection,
+                            Some(i),
+                            None,
+                            ray,
+                            format!("Surface {i}: {e}"),
+                        ));
+                    }
+                };
+                if check_apertures
+                    && s.clear_aperture
+                    && intersection.point[0].hypot(intersection.point[1]) > s.aperture + 1e-9
+                {
+                    return Err(TraceFailure::path(
+                        FailureKind::Blocked,
+                        Some(i),
+                        Some(intersection.point),
+                        ray,
+                        format!("Ray blocked at surface {i}"),
+                    ));
+                }
+                (
+                    intersection.point,
+                    intersection.normal,
+                    intersection.distance,
+                )
+            } else {
+                let pl = frame.to_local_point(p);
+                let vl = frame.to_local_vec(v);
+                if vl[2].abs() < 1e-14 {
+                    return Err(TraceFailure::path(
+                        FailureKind::Intersection,
+                        Some(i),
+                        None,
+                        ray,
+                        format!("Ray parallel to surface {i}"),
+                    ));
+                }
+                let intersection = match s.profile().intersect(pl, vl, 0.) {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        return Err(TraceFailure::path(
+                            FailureKind::Intersection,
+                            Some(i),
+                            None,
+                            ray,
+                            format!("Surface {i}: {e}"),
+                        ));
+                    }
+                };
+                let global_hit = frame.to_global_point(intersection.point);
+                if check_apertures
+                    && s.clear_aperture
+                    && intersection.point[0].hypot(intersection.point[1]) > s.aperture + 1e-9
+                {
+                    return Err(TraceFailure::path(
+                        FailureKind::Blocked,
+                        Some(i),
+                        Some(global_hit),
+                        ray,
+                        format!("Ray blocked at surface {i}"),
+                    ));
+                }
+                let global_normal = frame.to_global_vec(intersection.normal);
+                (global_hit, global_normal, intersection.distance)
             };
-            let hit = intersection.point;
-            if check_apertures && s.clear_aperture && hit[0].hypot(hit[1]) > s.aperture + 1e-9 {
-                return Err(TraceFailure::path(
-                    FailureKind::Blocked,
-                    Some(i),
-                    Some(hit),
-                    ray,
-                    format!("Ray blocked at surface {i}"),
-                ));
-            }
-            ray.opl += intersection.distance * n;
+            ray.opl += distance * n;
             ray.points.push(hit);
-            let normal = intersection.normal;
             let incoming = v;
             let before = n;
             match s.interaction {
@@ -225,42 +277,79 @@ impl System {
             });
             ray.direction = v;
             p = hit;
-            vertex += s.thickness;
+            if s.transform.as_ref().is_some_and(|t| t.return_after) {
+                frame = saved_frame;
+            }
+            frame.translate_z(s.thickness);
         }
         if image {
-            let hit = match self.image_surface.profile().intersect(p, v, vertex) {
-                Ok(hit) => hit,
-                Err(e) => {
+            let (hit_point, hit_normal, hit_distance) = if frame.is_centered() {
+                let hit = match self.image_surface.profile().intersect(p, v, frame.origin[2]) {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        return Err(TraceFailure::path(
+                            FailureKind::Image,
+                            None,
+                            None,
+                            ray,
+                            format!("Image surface: {e}"),
+                        )
+                        .at("image"));
+                    }
+                };
+                if check_apertures
+                    && self.image_surface.clear_aperture
+                    && hit.point[0].hypot(hit.point[1]) > self.image_surface.aperture + 1e-9
+                {
                     return Err(TraceFailure::path(
-                        FailureKind::Image,
+                        FailureKind::Blocked,
                         None,
-                        None,
+                        Some(hit.point),
                         ray,
-                        format!("Image surface: {e}"),
+                        "Ray blocked at image aperture".into(),
                     )
                     .at("image"));
                 }
+                (hit.point, hit.normal, hit.distance)
+            } else {
+                let pl = frame.to_local_point(p);
+                let vl = frame.to_local_vec(v);
+                let hit = match self.image_surface.profile().intersect(pl, vl, 0.) {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        return Err(TraceFailure::path(
+                            FailureKind::Image,
+                            None,
+                            None,
+                            ray,
+                            format!("Image surface: {e}"),
+                        )
+                        .at("image"));
+                    }
+                };
+                let global_hit = frame.to_global_point(hit.point);
+                if check_apertures
+                    && self.image_surface.clear_aperture
+                    && hit.point[0].hypot(hit.point[1]) > self.image_surface.aperture + 1e-9
+                {
+                    return Err(TraceFailure::path(
+                        FailureKind::Blocked,
+                        None,
+                        Some(global_hit),
+                        ray,
+                        "Ray blocked at image aperture".into(),
+                    )
+                    .at("image"));
+                }
+                (global_hit, frame.to_global_vec(hit.normal), hit.distance)
             };
-            if check_apertures
-                && self.image_surface.clear_aperture
-                && hit.point[0].hypot(hit.point[1]) > self.image_surface.aperture + 1e-9
-            {
-                return Err(TraceFailure::path(
-                    FailureKind::Blocked,
-                    None,
-                    Some(hit.point),
-                    ray,
-                    "Ray blocked at image aperture".into(),
-                )
-                .at("image"));
-            }
-            ray.opl += hit.distance * n;
-            ray.points.push(hit.point);
+            ray.opl += hit_distance * n;
+            ray.points.push(hit_point);
             ray.image_hit = Some(Segment {
-                point: hit.point,
+                point: hit_point,
                 incoming: v,
                 direction: v,
-                normal: hit.normal,
+                normal: hit_normal,
                 n_before: n,
                 n_after: n,
                 opl: ray.opl,
@@ -323,12 +412,13 @@ impl System {
                 effective[1] - shift * field.y.to_radians().tan(),
             ]
         };
+        let stop_frame = self.surface_frames().0[self.stop_index];
         let hit_at_stop = |first: [f64; 2]| -> Result<[f64; 2], String> {
             let launch = self.launch(first, field, w)?;
             let r = self
                 .trace_path(launch, w, field, self.stop_index, false, false)
                 .map_err(|e| e.to_string())?;
-            let p = r.last().point;
+            let p = stop_frame.to_local_point(r.last().point);
             Ok([p[0], p[1]])
         };
         for _ in 0..20 {
@@ -592,5 +682,60 @@ mod tests {
             assert!((first(&ray, 0) - first(&chief, 0) - 0.5 * scale).abs() < 1e-11);
             assert!((first(&ray, 1) - first(&chief, 1) + 0.25 * scale).abs() < 1e-11);
         }
+    }
+    #[test]
+    fn tilted_fold_mirror_redirects_beam_90_degrees_into_folded_frame() {
+        let mut s = System::default();
+        let mut fold = Surface::sphere(0., -20., "AIR", 20.);
+        fold.interaction = Interaction::Reflect;
+        // Tilt mirror 45 deg about X so local Z points along (0, -sin45, cos45), reflecting +Z -> +Y.
+        // Then a coordinate break tilts another 45 deg (total 90 deg) so -Z in folded frame points along +Y.
+        fold.transform = Some(CoordinateTransform {
+            decenter: [0., 0.],
+            tilt: [45., 0., 0.],
+            tilt_first: false,
+            return_after: false,
+        });
+        let mut post_cb = Surface::sphere(0., -30., "AIR", 20.);
+        post_cb.interaction = Interaction::Dummy;
+        post_cb.transform = Some(CoordinateTransform {
+            decenter: [0., 0.],
+            tilt: [45., 0., 0.],
+            tilt_first: false,
+            return_after: false,
+        });
+        fold.thickness = 0.;
+        s.surfaces = vec![fold, post_cb];
+        s.stop_index = 0;
+        s.fields = vec![Field::meridional(0.)];
+        s.pupil.value = 4.;
+        s.update().unwrap();
+        let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
+        // After 45 deg reflection, outgoing direction is (0, +1, 0) and image sits at (0, +30, 0).
+        assert!(ray.segments[0].direction[0].abs() < 1e-12);
+        assert!((ray.segments[0].direction[1] - 1.).abs() < 1e-12);
+        assert!(ray.segments[0].direction[2].abs() < 1e-12);
+        let img = ray.image();
+        assert!(img[0].abs() < 1e-12);
+        assert!((img[1] - 30.).abs() < 1e-12);
+        assert!(img[2].abs() < 1e-12);
+    }
+    #[test]
+    fn return_after_decenter_shifts_only_perturbed_surface() {
+        let mut s = System::default();
+        s.fields = vec![Field::meridional(0.)];
+        s.surfaces[0].transform = Some(CoordinateTransform {
+            decenter: [0., 0.5],
+            tilt: [0., 0., 0.],
+            tilt_first: false,
+            return_after: true,
+        });
+        s.update().unwrap();
+        let (frames, img_frame) = s.surface_frames();
+        assert!((frames[0].origin[1] - 0.5).abs() < 1e-12);
+        assert!(frames[1].origin[1].abs() < 1e-12);
+        assert!(img_frame.origin[1].abs() < 1e-12);
+        let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
+        assert!(ray.image()[1].abs() > 1e-3);
     }
 }

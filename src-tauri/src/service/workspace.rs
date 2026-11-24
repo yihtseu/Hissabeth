@@ -2,6 +2,209 @@
 // One workspace lease spans loaded systems and recoverable startup failures.
 use super::*;
 
+const PROJECT_META: &str = "workspace-meta.json";
+
+#[derive(Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(super) struct ProjectFiles {
+    pub linked_path: Option<PathBuf>,
+    recent_projects: Vec<String>,
+}
+
+fn workspace_dir(workspace_file: &Path) -> &Path {
+    workspace_file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+impl ProjectFiles {
+    pub fn load(workspace_file: &Path) -> Self {
+        std::fs::read(workspace_dir(workspace_file).join(PROJECT_META))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn resolve(workspace_file: &Path, path: &str, save: bool) -> Result<PathBuf, String> {
+        if path.trim().is_empty() {
+            return Err("Project path is required".into());
+        }
+        let path = Path::new(path);
+        let mut resolved = if let Ok(relative) = path.strip_prefix("~") {
+            std::env::home_dir()
+                .ok_or("Home directory is unavailable")?
+                .join(relative)
+        } else if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_dir(workspace_file).join("projects").join(path)
+        };
+        if save && resolved.extension().is_none() {
+            resolved.set_extension("hissabeth.json");
+        }
+        let parent = resolved
+            .parent()
+            .ok_or("Project file has no parent directory")?;
+        let name = resolved.file_name().ok_or("Project file has no name")?;
+        if save {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let workspace_dir = workspace_dir(workspace_file)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let resolved = parent.canonicalize().map_err(|e| e.to_string())?.join(name);
+        let target = match resolved.canonicalize() {
+            Ok(path) if path.is_file() => path,
+            Ok(_) => return Err("Project path must be a file".into()),
+            Err(e) if save && e.kind() == std::io::ErrorKind::NotFound => resolved,
+            Err(e) => return Err(e.to_string()),
+        };
+        let workspace_file = workspace_dir.join(workspace_file.file_name().unwrap());
+        if [
+            workspace_dir.join(PROJECT_META),
+            workspace_file.with_extension("lock"),
+            workspace_file.with_extension("pending"),
+        ]
+        .contains(&target)
+        {
+            return Err("Project path is reserved for workspace storage".into());
+        }
+        Ok(target)
+    }
+
+    pub fn select(&mut self, path: &Path, linked: bool) {
+        self.linked_path = linked.then(|| path.to_path_buf());
+        let path = path.display().to_string();
+        self.recent_projects.retain(|recent| recent != &path);
+        self.recent_projects.insert(0, path);
+    }
+
+    pub fn list(&self, workspace_file: &Path) -> Value {
+        let projects_dir = workspace_dir(workspace_file).join("projects");
+        let mut saved_projects: Vec<_> = std::fs::read_dir(&projects_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                    && path.is_file()
+            })
+            .collect();
+        saved_projects.sort();
+        json!({
+            "active_file": self.linked_path,
+            "workspace_file": workspace_file,
+            "projects_dir": projects_dir,
+            "saved_projects": saved_projects,
+            "recent": self.recent_projects,
+        })
+    }
+}
+
+fn stage_file(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {
+    let mut file =
+        tempfile::NamedTempFile::new_in(workspace_dir(path)).map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+struct ProjectWrite {
+    path: PathBuf,
+    next: tempfile::NamedTempFile,
+    previous: Option<tempfile::NamedTempFile>,
+}
+
+impl ProjectWrite {
+    fn stage(path: PathBuf, bytes: &[u8]) -> Result<Self, String> {
+        let previous = match std::fs::read(&path) {
+            Ok(bytes) => Some(stage_file(&path, &bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let next = stage_file(&path, bytes)?;
+        Ok(Self {
+            path,
+            next,
+            previous,
+        })
+    }
+}
+
+pub(super) fn persist_system(
+    path: &Path,
+    system: &System,
+    projects: &ProjectFiles,
+    save_metadata: bool,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(system).map_err(|e| e.to_string())?;
+    let mut writes = Vec::new();
+    if let Some(linked) = &projects.linked_path {
+        let workspace_file = path
+            .canonicalize()
+            .or_else(|_| {
+                workspace_dir(path)
+                    .canonicalize()
+                    .map(|dir| dir.join(path.file_name().unwrap()))
+            })
+            .map_err(|e| e.to_string())?;
+        if linked != &workspace_file {
+            writes.push(ProjectWrite::stage(linked.clone(), &bytes)?);
+        }
+    }
+    if save_metadata {
+        let metadata = serde_json::to_vec_pretty(projects).map_err(|e| e.to_string())?;
+        writes.push(ProjectWrite::stage(
+            workspace_dir(path).join(PROJECT_META),
+            &metadata,
+        )?);
+    }
+
+    let pending_path = path.with_extension("pending");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&pending_path)
+        .map_err(|e| e.to_string())?;
+    let pending = Pending(pending_path);
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    drop(file);
+
+    let mut installed = Vec::new();
+    let result = (|| {
+        for ProjectWrite {
+            path,
+            next,
+            previous,
+        } in writes
+        {
+            next.persist(&path)
+                .map_err(|e| format!("{}: {}", path.display(), e.error))?;
+            installed.push((path, previous));
+        }
+        std::fs::rename(&pending.0, path).map_err(|e| e.to_string())
+    })();
+    if let Err(mut error) = result {
+        for (path, previous) in installed.into_iter().rev() {
+            let restored = match previous {
+                Some(previous) => previous.persist(&path).map(|_| ()).map_err(|e| e.error),
+                None => std::fs::remove_file(&path),
+            };
+            if let Err(e) = restored {
+                error.push_str(&format!("; could not restore {}: {e}", path.display()));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum Observed {
     Bytes(Vec<u8>),
@@ -44,6 +247,31 @@ impl Drop for Pending {
     }
 }
 impl Workspace {
+    pub(super) fn revision(&self) -> u64 {
+        match &self.state {
+            State::Ready(engine) => engine.revision,
+            State::Recovery(recovery) => recovery.revision,
+        }
+    }
+
+    pub(super) fn engine(&self) -> Result<&Engine, String> {
+        match &self.state {
+            State::Ready(engine) => Ok(engine),
+            State::Recovery(_) => Err(Self::recovery_required()),
+        }
+    }
+
+    pub(super) fn engine_mut(&mut self) -> Result<&mut Engine, String> {
+        match &mut self.state {
+            State::Ready(engine) => Ok(engine),
+            State::Recovery(_) => Err(Self::recovery_required()),
+        }
+    }
+
+    fn recovery_required() -> String {
+        "Workspace recovery is required. Read workspace_status; optical tools are unavailable until a valid system is loaded.".into()
+    }
+
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let lease = acquire_lease(&path)?;
         let revision = fresh_revision()?;
@@ -181,6 +409,7 @@ impl Workspace {
                 "hissabeth" => serde_json::from_str(&text)
                     .map_err(|e| format!("Invalid optical project: {e}"))?,
                 "geopter" => project::import(&text)?,
+                "zmx" => crate::optics::zmx::import(&text)?,
                 _ => return Err("Unknown project format".into()),
             },
         };
@@ -242,25 +471,29 @@ impl Workspace {
                     .unwrap_or_else(|| "no source file was present".into())
             ));
         }
-        self.state = State::Ready(Engine {
+        self.state = State::Ready(Engine::new(
+            self.path.clone(),
+            self.lease.clone(),
+            next,
             system,
-            revision: next,
-            path: self.path.clone(),
-            _lease: self.lease.clone(),
-        });
+            ProjectFiles::load(&self.path),
+        ));
         Ok(json!({"revision":next,"preserved_path":preserved.map(|p|p.display().to_string())}))
     }
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
         validate_args(name, &args)?;
+        self.call_validated(name, args)
+    }
+
+    pub(super) fn call_validated(&mut self, name: &str, args: Value) -> Result<Value, String> {
         match name {
-            "workspace_status"=>Ok(self.status()),
-            "workspace_retry"=>self.retry(args["revision"].as_u64().unwrap()),
-            "workspace_recover"=>self.recover(args["revision"].as_u64().unwrap(),
-                serde_json::from_value(args["source"].clone()).map_err(|e|e.to_string())?),
-            _=>match &mut self.state {
-                State::Ready(engine)=>engine.call(name,args),
-                State::Recovery(_)=>Err("Workspace recovery is required. Read workspace_status; optical tools are unavailable until a valid system is loaded.".into()),
-            },
+            "workspace_status" => Ok(self.status()),
+            "workspace_retry" => self.retry(args["revision"].as_u64().unwrap()),
+            "workspace_recover" => self.recover(
+                args["revision"].as_u64().unwrap(),
+                serde_json::from_value(args["source"].clone()).map_err(|e| e.to_string())?,
+            ),
+            _ => self.engine_mut()?.call_validated(name, args),
         }
     }
 }
