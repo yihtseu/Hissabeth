@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { useWindowSize, useEventListener } from '@vueuse/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useWindowSize, useEventListener, useLocalStorage } from '@vueuse/core';
 import { Splitpanes, Pane, type SplitpanesResizedPayload } from 'splitpanes';
 import {
     MenubarRoot,
@@ -28,13 +29,14 @@ import {
 } from 'reka-ui';
 import {
     Settings2,
+    MessageSquare,
     PanelLeft,
     PanelBottom,
     Save,
     Undo2,
-    Focus,
-    FilePlus2,
-    FileInput,
+    Redo2,
+    RotateCcw,
+    Crosshair,
     X,
 } from 'lucide-vue-next';
 import { usePreferencesStore } from './stores/preferences';
@@ -44,40 +46,79 @@ import { errorMessage } from './api';
 import { useWorkbench } from './composables/useWorkbench';
 import AnalysisPanel from './components/AnalysisPanel.vue';
 import ApertureTools from './components/ApertureTools.vue';
+import ConfigurationPanel from './components/ConfigurationPanel.vue';
 import GapSolveEditor from './components/GapSolveEditor.vue';
+import HistoryPanel from './components/HistoryPanel.vue';
 import ImportExportPanel from './components/ImportExportPanel.vue';
-import JsonEditor from './components/JsonEditor.vue';
 import MaterialsPanel from './components/MaterialsPanel.vue';
-import LayoutView from './components/LayoutView.vue';
-import BenchView from './components/BenchView.vue';
+import OpticalLayoutView from './components/OpticalLayoutView.vue';
+import OptimizePanel from './components/OptimizePanel.vue';
+import PrescriptionView from './components/PrescriptionView.vue';
+import ChatPanel from './components/ChatPanel.vue';
 import MetricsBar from './components/MetricsBar.vue';
+import SurfaceTable from './components/SurfaceTable.vue';
+import SystemEditor from './components/SystemEditor.vue';
+import TolerancePanel from './components/TolerancePanel.vue';
 import MtfView from './components/MtfView.vue';
 import PrescriptionReport from './components/PrescriptionReport.vue';
 import RayInspection from './components/RayInspection.vue';
 import RecoveryPanel from './components/RecoveryPanel.vue';
 import SpotView from './components/SpotView.vue';
-import SurfaceTable from './components/SurfaceTable.vue';
-import SystemEditor from './components/SystemEditor.vue';
 import { TABS, type Tab } from './types';
 
 useAppearance();
 const preferences = usePreferencesStore();
 const p = computed(() => preferences.preferences);
-const savedView = localStorage.getItem('hissabeth.activeView');
+const savedView = useLocalStorage('hissabeth.activeView', '');
 const initialView =
-    p.value.workspace.restoreLastView && TABS.includes(savedView as Tab)
-        ? (savedView as Tab)
+    p.value.workspace.restoreLastView && TABS.includes(savedView.value as Tab)
+        ? (savedView.value as Tab)
         : p.value.workspace.defaultView;
 const tab = ref<Tab>(initialView === 'Agent connections' ? 'Layout' : initialView);
 const views = TABS.filter((view) => view !== 'Agent connections');
+type WorkbenchView = (typeof views)[number];
+const navGroups: { key: string; items: WorkbenchView[] }[] = [
+    { key: 'inspect', items: ['Layout', 'Spot diagram', 'MTF', 'Analysis', 'Ray inspection'] },
+    { key: 'design', items: ['Edit', 'Optimize', 'Tolerance', 'Configurations'] },
+    {
+        key: 'project',
+        items: ['Prescription', 'Prescription report', 'Materials', 'History', 'Import / Export'],
+    },
+];
 const wantMtf = computed(() => tab.value === 'MTF');
 const wb = useWorkbench(wantMtf);
 const { width } = useWindowSize();
 const narrow = computed(() => width.value < 800);
+const canSave = computed(
+    () =>
+        wb.online.value &&
+        !wb.recovery.value &&
+        !wb.busy.value &&
+        !wb.stale.value &&
+        !wb.refreshPending.value &&
+        wb.dirty.value &&
+        wb.problems.value.length === 0,
+);
+const canQuickAction = computed(
+    () =>
+        wb.online.value &&
+        !wb.recovery.value &&
+        !wb.busy.value &&
+        !wb.stale.value &&
+        !wb.refreshPending.value &&
+        !wb.dirty.value &&
+        !!wb.system.value,
+);
+const activeFileName = computed(() => {
+    const filePath = wb.activeProjectPath.value;
+    if (!filePath) return '';
+    return filePath.split(/[\\/]/).pop() ?? filePath;
+});
 const navDrawer = ref(false);
 const settingsError = ref('');
-const exchange = ref<InstanceType<typeof ImportExportPanel>>();
-watch(tab, (value) => localStorage.setItem('hissabeth.activeView', value));
+const chatOpen = useLocalStorage('hissabeth.assistantOpen', true);
+const chatSize = useLocalStorage('hissabeth.assistantSize', 32);
+watch(tab, (value) => (savedView.value = value));
 async function openSettings(section: unknown = 'general'): Promise<void> {
     try {
         await invoke('open_settings', { section: section === 'agents' ? 'agents' : 'general' });
@@ -90,6 +131,7 @@ function activate(view: Tab): void {
     tab.value = view;
     navDrawer.value = false;
 }
+const exchange = ref<InstanceType<typeof ImportExportPanel>>();
 async function newSystem(): Promise<void> {
     tab.value = 'Import / Export';
     await nextTick();
@@ -105,7 +147,11 @@ function toggleDock(): void {
     });
 }
 function resizeNav(event: SplitpanesResizedPayload): void {
-    if (event.event && event.panes[0])
+    if (event.event && chatOpen.value && !narrow.value) {
+        const pane = event.panes[event.panes.length - 1];
+        if (pane) chatSize.value = pane.size;
+    }
+    if (event.event && event.panes[0] && p.value.workspace.showNavigator && !narrow.value)
         void preferences.patchWorkspace({
             navigatorSize: Math.max(10, Math.min(40, Math.round(event.panes[0].size))),
         });
@@ -117,6 +163,13 @@ function resizeDock(event: SplitpanesResizedPayload): void {
         });
 }
 useEventListener('keydown', (event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null;
+    const typing =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable);
     if (event.ctrlKey || event.metaKey) {
         if (event.key === ',') {
             event.preventDefault();
@@ -124,6 +177,19 @@ useEventListener('keydown', (event: KeyboardEvent) => {
         } else if (event.key.toLowerCase() === 's') {
             event.preventDefault();
             if (canSave.value) void wb.save();
+        } else if (!typing && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+            if (canQuickAction.value && wb.canUndo.value) {
+                event.preventDefault();
+                void wb.undo();
+            }
+        } else if (
+            !typing &&
+            ((event.key.toLowerCase() === 'z' && event.shiftKey) || event.key.toLowerCase() === 'y')
+        ) {
+            if (canQuickAction.value && wb.canRedo.value) {
+                event.preventDefault();
+                void wb.redo();
+            }
         } else if (event.key.toLowerCase() === 'b') {
             event.preventDefault();
             toggleNavigator();
@@ -133,30 +199,15 @@ useEventListener('keydown', (event: KeyboardEvent) => {
         }
     }
 });
-const showTable = computed(() =>
-    ['Layout', 'Spot diagram', 'MTF', 'Prescription'].includes(tab.value),
-);
-const showMetrics = computed(() => showTable.value || tab.value === 'Analysis');
-/** Autofocus moves the image distance, which an active solve on the final gap already controls. */
-const imageSolved = computed(() => {
-    const surfaces = wb.system.value?.surfaces;
-    return (
-        !!surfaces &&
-        surfaces.length > 0 &&
-        surfaces[surfaces.length - 1].gap_solve.kind !== 'fixed'
-    );
-});
-const canSave = computed(
+const layoutSection = ref(true);
+const showTable = computed(
     () =>
-        wb.online.value &&
-        !wb.recovery.value &&
-        !wb.busy.value &&
-        !wb.stale.value &&
-        !wb.refreshPending.value &&
-        wb.dirty.value &&
-        wb.problems.value.length === 0,
+        (tab.value === 'Layout' && layoutSection.value) ||
+        ['Spot diagram', 'MTF', 'Prescription'].includes(tab.value),
 );
-
+const showMetrics = computed(
+    () => showTable.value || ['Analysis', 'Optimize', 'Tolerance'].includes(tab.value),
+);
 function onTabKey(e: KeyboardEvent, index: number): void {
     const step =
         e.key === 'ArrowDown' || e.key === 'ArrowRight'
@@ -183,29 +234,20 @@ function onTabKey(e: KeyboardEvent, index: number): void {
         <div class="industrial-app">
             <a class="skip-link" href="#main">{{ tr('app.skip') }}</a>
             <div class="menubar-shell">
-                <span class="instrument-brand"><img src="/app-icon.png" alt="" />Hissabeth</span>
                 <MenubarRoot class="menubar" :aria-label="tr('app.workbenchViews')">
                     <MenubarMenu
                         ><MenubarTrigger>{{ tr('menu.file') }}</MenubarTrigger
                         ><MenubarPortal
                             ><MenubarContent class="menu-popup"
-                                ><MenubarItem
-                                    @select="newSystem"
-                                    :disabled="
-                                        !wb.system.value ||
-                                        !!wb.recovery.value ||
-                                        wb.busy.value ||
-                                        wb.dirty.value
-                                    "
-                                    >{{ tr('menu.newSystem') }}</MenubarItem
+                                ><MenubarItem @select="newSystem">{{
+                                    tr('menu.newSystem')
+                                }}</MenubarItem
                                 ><MenubarItem @select="activate('Import / Export')">{{
                                     tr('menu.importExport')
                                 }}</MenubarItem
-                                ><MenubarItem @select="activate('Prescription report')">{{
-                                    tr('menu.exportReport')
-                                }}</MenubarItem
-                                ><MenubarSeparator /><MenubarItem @select="openSettings"
-                                    >{{ tr('menu.settings') }}<kbd>Ctrl+,</kbd></MenubarItem
+                                ><MenubarSeparator /><MenubarItem
+                                    @select="getCurrentWindow().close()"
+                                    >{{ tr('menu.quit') }}</MenubarItem
                                 ></MenubarContent
                             ></MenubarPortal
                         ></MenubarMenu
@@ -220,9 +262,19 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     :disabled="!wb.dirty.value || wb.busy.value"
                                     @select="wb.revert()"
                                     >{{ tr('menu.revertDraft') }}</MenubarItem
-                                ><MenubarItem @select="activate('Prescription')">{{
-                                    tr('tabs.Prescription')
-                                }}</MenubarItem></MenubarContent
+                                ><MenubarSeparator /><MenubarItem
+                                    :disabled="!canQuickAction || !wb.canUndo.value"
+                                    @select="wb.undo()"
+                                    >{{ tr('menu.undo') }}<kbd>Ctrl+Z</kbd></MenubarItem
+                                ><MenubarItem
+                                    :disabled="!canQuickAction || !wb.canRedo.value"
+                                    @select="wb.redo()"
+                                    >{{ tr('menu.redo') }}<kbd>Ctrl+Shift+Z</kbd></MenubarItem
+                                ><MenubarSeparator /><MenubarItem
+                                    :disabled="!canQuickAction"
+                                    @select="wb.autofocus()"
+                                    >{{ tr('menu.paraxialFocus') }}</MenubarItem
+                                ></MenubarContent
                             ></MenubarPortal
                         ></MenubarMenu
                     >
@@ -261,39 +313,15 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                         ></MenubarMenu
                     >
                     <MenubarMenu
-                        ><MenubarTrigger>{{ tr('menu.analysis') }}</MenubarTrigger
-                        ><MenubarPortal
-                            ><MenubarContent class="menu-popup"
-                                ><MenubarItem
-                                    v-for="view in [
-                                        'Layout',
-                                        'Laser bench',
-                                        'Spot diagram',
-                                        'MTF',
-                                        'Analysis',
-                                        'Ray inspection',
-                                        'Prescription report',
-                                    ] as const"
-                                    :key="view"
-                                    @select="activate(view)"
-                                    >{{ tr(`tabs.${view}`) }}</MenubarItem
-                                ></MenubarContent
-                            ></MenubarPortal
-                        ></MenubarMenu
-                    >
-                    <MenubarMenu
                         ><MenubarTrigger>{{ tr('menu.tools') }}</MenubarTrigger
                         ><MenubarPortal
                             ><MenubarContent class="menu-popup"
-                                ><MenubarItem @select="activate('Materials')">{{
-                                    tr('menu.materials')
-                                }}</MenubarItem
                                 ><MenubarItem @select="openSettings('agents')">{{
                                     tr('menu.agentConnections')
                                 }}</MenubarItem
-                                ><MenubarItem @select="openSettings">{{
-                                    tr('menu.settings')
-                                }}</MenubarItem></MenubarContent
+                                ><MenubarItem @select="openSettings"
+                                    >{{ tr('menu.settings') }}<kbd>Ctrl+,</kbd></MenubarItem
+                                ></MenubarContent
                             ></MenubarPortal
                         ></MenubarMenu
                     >
@@ -308,23 +336,6 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                 /></ToolbarButton>
                 <ToolbarSeparator />
                 <ToolbarButton
-                    class="secondary-tool"
-                    :aria-label="tr('menu.newSystem')"
-                    :title="tr('menu.newSystem')"
-                    :disabled="
-                        !wb.system.value || !!wb.recovery.value || wb.busy.value || wb.dirty.value
-                    "
-                    @click="newSystem"
-                    ><FilePlus2 :size="16"
-                /></ToolbarButton>
-                <ToolbarButton
-                    class="secondary-tool"
-                    :aria-label="tr('menu.importExport')"
-                    :title="tr('menu.importExport')"
-                    @click="activate('Import / Export')"
-                    ><FileInput :size="16"
-                /></ToolbarButton>
-                <ToolbarButton
                     :disabled="!canSave"
                     :title="tr('app.applyChanges')"
                     :aria-label="tr('app.applyChanges')"
@@ -338,28 +349,37 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                     :title="tr('app.revert')"
                     :aria-label="tr('app.revert')"
                     @click="wb.revert()"
-                    ><Undo2 :size="16"
+                    ><RotateCcw :size="16"
                 /></ToolbarButton>
                 <ToolbarSeparator />
                 <ToolbarButton
-                    :disabled="
-                        !wb.online.value ||
-                        !wb.system.value ||
-                        !!wb.recovery.value ||
-                        wb.dirty.value ||
-                        wb.busy.value ||
-                        wb.stale.value ||
-                        wb.refreshPending.value ||
-                        imageSolved
-                    "
+                    class="secondary-tool"
+                    :disabled="!canQuickAction || !wb.canUndo.value"
+                    :title="tr('menu.undo') + ' (Ctrl+Z)'"
+                    :aria-label="tr('menu.undo')"
+                    @click="wb.undo()"
+                    ><Undo2 :size="16"
+                /></ToolbarButton>
+                <ToolbarButton
+                    class="secondary-tool"
+                    :disabled="!canQuickAction || !wb.canRedo.value"
+                    :title="tr('menu.redo') + ' (Ctrl+Shift+Z)'"
+                    :aria-label="tr('menu.redo')"
+                    @click="wb.redo()"
+                    ><Redo2 :size="16"
+                /></ToolbarButton>
+                <ToolbarButton
+                    class="secondary-tool"
+                    :disabled="!canQuickAction"
+                    :title="tr('app.paraxialFocus')"
                     :aria-label="tr('app.paraxialFocus')"
-                    :title="tr(imageSolved ? 'app.paraxialFocusBlocked' : 'app.paraxialFocus')"
                     @click="wb.autofocus()"
-                    ><Focus :size="16" /><span class="tool-label">{{
+                    ><Crosshair :size="16" /><span class="tool-label">{{
                         tr('app.paraxialFocus')
                     }}</span></ToolbarButton
                 >
                 <select
+                    v-if="narrow || !p.workspace.showNavigator"
                     :aria-label="tr('app.workbenchViews')"
                     :value="tab"
                     @change="activate(($event.target as HTMLSelectElement).value as Tab)"
@@ -368,6 +388,21 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                         {{ tr(`tabs.${view}`) }}
                     </option>
                 </select>
+                <div class="doc-inline">
+                    <strong>{{
+                        wb.system.value
+                            ? wb.system.value.name || tr('app.unnamedSystem')
+                            : tr('app.noSystem')
+                    }}</strong>
+                    <span
+                        v-if="activeFileName"
+                        class="file-pill"
+                        :title="wb.activeProjectPath.value ?? ''"
+                        >{{ activeFileName }}</span
+                    >
+                    <span v-if="wb.dirty.value" class="unsaved">● {{ tr('statusbar.draft') }}</span>
+                    <span class="doc-rev">{{ tr('app.revision', { n: wb.revision.value }) }}</span>
+                </div>
                 <div class="spacer"></div>
                 <ToolbarButton
                     :aria-label="tr('menu.prescriptionDock')"
@@ -375,6 +410,14 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                     @click="toggleDock"
                     ><PanelBottom :size="16"
                 /></ToolbarButton>
+                <ToolbarButton
+                    :aria-label="tr('chat.title')"
+                    :title="tr('chat.title')"
+                    :aria-pressed="chatOpen"
+                    @click="chatOpen = !chatOpen"
+                >
+                    <MessageSquare :size="16" />
+                </ToolbarButton>
                 <TooltipRoot
                     ><TooltipTrigger as-child
                         ><ToolbarButton :aria-label="tr('settings.title')" @click="openSettings"
@@ -386,16 +429,6 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                     ></TooltipRoot
                 >
             </ToolbarRoot>
-            <div class="document-strip">
-                <strong>{{
-                    wb.draft.value
-                        ? wb.draft.value.name || tr('app.unnamedSystem')
-                        : tr('app.noSystem')
-                }}</strong
-                ><span v-if="wb.dirty.value" class="unsaved">● {{ tr('statusbar.draft') }}</span
-                ><span class="spacer"></span
-                ><span>{{ tr('app.revision', { n: wb.revision.value }) }}</span>
-            </div>
             <div
                 v-if="
                     !preferences.loaded ||
@@ -418,6 +451,12 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                     })
                 }}<button @click="preferences.retry()">{{ tr('app.prefsRetry') }}</button>
             </div>
+            <button
+                v-if="chatOpen && narrow"
+                class="assistant-backdrop"
+                :aria-label="tr('chat.close')"
+                @click="chatOpen = false"
+            ></button>
             <Splitpanes class="workbench-split" @resized="resizeNav">
                 <Pane
                     v-if="p.workspace.showNavigator && !narrow"
@@ -440,42 +479,34 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                             aria-orientation="vertical"
                             class="view-list"
                         >
-                            <button
-                                v-for="view in views"
-                                :id="`view-${TABS.indexOf(view)}`"
-                                :key="view"
-                                type="button"
-                                role="tab"
-                                :aria-selected="tab === view"
-                                aria-controls="workspace-panel"
-                                :tabindex="tab === view ? 0 : -1"
-                                @click="activate(view)"
-                                @keydown="onTabKey($event, TABS.indexOf(view))"
-                            >
-                                {{ tr(`tabs.${view}`) }}
-                            </button>
+                            <template v-for="group in navGroups" :key="group.key">
+                                <div class="nav-group-label">{{ tr(`nav.${group.key}`) }}</div>
+                                <button
+                                    v-for="view in group.items"
+                                    :id="`view-${TABS.indexOf(view)}`"
+                                    :key="view"
+                                    type="button"
+                                    role="tab"
+                                    :aria-selected="tab === view"
+                                    aria-controls="workspace-panel"
+                                    :tabindex="tab === view ? 0 : -1"
+                                    @click="activate(view)"
+                                    @keydown="onTabKey($event, views.indexOf(view))"
+                                >
+                                    {{ tr(`tabs.${view}`) }}
+                                </button>
+                            </template>
                         </div>
                         <div class="navigator-meta">CPU · f64<br />mm / nm</div>
                     </aside></Pane
                 >
-                <Pane
-                    :size="
-                        p.workspace.showNavigator && !narrow ? 100 - p.workspace.navigatorSize : 100
-                    "
-                    :min-size="60"
-                >
+                <Pane :min-size="30">
                     <Splitpanes
                         horizontal
                         @resized="resizeDock"
                         @splitter-dblclick="preferences.patchWorkspace({ dockSize: 35 })"
                     >
-                        <Pane
-                            :size="
-                                showTable && p.workspace.showPrescriptionDock && !wb.recovery.value
-                                    ? 100 - p.workspace.dockSize
-                                    : 100
-                            "
-                            :min-size="40"
+                        <Pane :min-size="40"
                             ><main id="main" class="analysis-workspace" tabindex="-1">
                                 <div
                                     id="workspace-panel"
@@ -599,16 +630,8 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     <RecoveryPanel
                                         v-if="wb.recovery.value"
                                         :recovery="wb.recovery.value"
-                                        :online="wb.online.value"
-                                        :busy="wb.recoveryBusy.value || wb.recoveryPending.value"
-                                        :error="wb.recoveryError.value"
-                                        :text="wb.recoveryText.value"
-                                        :format="wb.recoveryFormat.value"
-                                        @update:text="wb.recoveryText.value = $event"
-                                        @update:format="wb.recoveryFormat.value = $event"
-                                        @retry="wb.retryFromDisk()"
-                                        @restore="wb.restoreFromText()"
-                                        @create="wb.createNewSystem()"
+                                        :chat-open="chatOpen"
+                                        @chat="chatOpen = true"
                                     />
 
                                     <template
@@ -626,25 +649,21 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             :spot="wb.spot.value"
                                         />
 
-                                        <LayoutView
-                                            v-if="tab === 'Layout'"
+                                        <OpticalLayoutView
+                                            v-show="tab === 'Layout'"
                                             :system="wb.system.value"
                                             :layout="wb.layout.value"
                                             :wavelength="wb.layoutWavelength.value"
-                                        />
-                                        <BenchView
-                                            v-if="tab === 'Laser bench'"
-                                            :model-value="wb.draft.value.bench"
                                             :revision="wb.revision.value"
                                             :online="wb.online.value"
-                                            :locked="
-                                                wb.busy.value ||
-                                                wb.stale.value ||
-                                                wb.refreshPending.value
-                                            "
-                                            :can-save="canSave"
-                                            @update:model-value="wb.draft.value.bench = $event"
-                                            @save="wb.save()"
+                                            :dirty="wb.dirty.value"
+                                            :busy="wb.busy.value"
+                                            :stale="wb.stale.value"
+                                            :refresh-pending="wb.refreshPending.value"
+                                            :mutate="wb.mutate"
+                                            :chat-open="chatOpen"
+                                            @chat="chatOpen = true"
+                                            @scope="layoutSection = $event"
                                         />
                                         <SpotView
                                             v-if="tab === 'Spot diagram'"
@@ -694,11 +713,8 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         />
                                         <MaterialsPanel
                                             v-if="tab === 'Materials'"
-                                            v-model="wb.draft.value"
+                                            :model-value="wb.system.value"
                                             :online="wb.online.value"
-                                            :dirty="wb.dirty.value"
-                                            :busy="wb.busy.value"
-                                            :mutate="wb.mutate"
                                         />
                                         <ImportExportPanel
                                             ref="exchange"
@@ -712,32 +728,70 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             :busy="wb.busy.value"
                                             :mutate="wb.mutate"
                                         />
-                                        <SystemEditor
-                                            v-if="tab === 'Prescription'"
-                                            v-model="wb.draft.value"
-                                        />
-                                        <GapSolveEditor
-                                            v-if="tab === 'Prescription'"
+                                        <template v-if="tab === 'Edit'">
+                                            <SystemEditor v-model="wb.draft.value" />
+                                            <SurfaceTable
+                                                v-model="wb.draft.value"
+                                                :materials="wb.materials.value"
+                                                :dirty="wb.dirty.value"
+                                                :online="wb.online.value"
+                                            />
+                                            <GapSolveEditor
+                                                :system="wb.system.value"
+                                                :online="wb.online.value"
+                                                :dirty="wb.dirty.value"
+                                                :stale="wb.stale.value || wb.refreshPending.value"
+                                                :busy="wb.busy.value"
+                                                :mutate="wb.mutate"
+                                            />
+                                            <ApertureTools
+                                                :system="wb.system.value"
+                                                :revision="wb.revision.value"
+                                                :online="wb.online.value"
+                                                :dirty="wb.dirty.value"
+                                                :stale="wb.stale.value || wb.refreshPending.value"
+                                                :busy="wb.busy.value"
+                                                :mutate="wb.mutate"
+                                            />
+                                        </template>
+                                        <OptimizePanel
+                                            v-if="tab === 'Optimize'"
                                             :system="wb.system.value"
-                                            :online="wb.online.value"
-                                            :dirty="wb.dirty.value"
-                                            :stale="wb.stale.value || wb.refreshPending.value"
-                                            :busy="wb.busy.value"
-                                            :mutate="wb.mutate"
-                                        />
-                                        <ApertureTools
-                                            v-if="tab === 'Prescription' && wb.system.value"
-                                            :system="wb.system.value"
+                                            :paraxial="wb.paraxial.value"
                                             :revision="wb.revision.value"
                                             :online="wb.online.value"
                                             :dirty="wb.dirty.value"
-                                            :stale="wb.stale.value || wb.refreshPending.value"
                                             :busy="wb.busy.value"
+                                            :stale="wb.stale.value"
+                                            :refresh-pending="wb.refreshPending.value"
                                             :mutate="wb.mutate"
                                         />
-                                        <JsonEditor
-                                            v-if="tab === 'Prescription JSON'"
+                                        <TolerancePanel
+                                            v-if="tab === 'Tolerance'"
+                                            :system="wb.system.value"
+                                            :revision="wb.revision.value"
+                                            :online="wb.online.value"
+                                        />
+                                        <HistoryPanel
+                                            v-if="tab === 'History'"
+                                            :revision="wb.revision.value"
+                                            :online="wb.online.value"
+                                            :dirty="wb.dirty.value"
+                                            :busy="wb.busy.value"
+                                            :stale="wb.stale.value"
+                                            :refresh-pending="wb.refreshPending.value"
+                                            :mutate="wb.mutate"
+                                        />
+                                        <ConfigurationPanel
+                                            v-if="tab === 'Configurations'"
                                             v-model="wb.draft.value"
+                                            :materials="wb.materials.value"
+                                            :online="wb.online.value"
+                                        />
+                                        <PrescriptionView
+                                            v-if="tab === 'Prescription'"
+                                            :system="wb.system.value"
+                                            :chat-open="chatOpen"
                                         />
                                     </template>
                                 </div></main
@@ -747,7 +801,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                 showTable &&
                                 p.workspace.showPrescriptionDock &&
                                 !wb.recovery.value &&
-                                wb.draft.value
+                                wb.system.value
                             "
                             :size="p.workspace.dockSize"
                             :min-size="15"
@@ -759,14 +813,26 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         <X :size="14" />
                                     </button>
                                 </div>
-                                <SurfaceTable
-                                    v-model="wb.draft.value"
-                                    :materials="wb.materials.value"
-                                    :dirty="wb.dirty.value"
-                                    :online="wb.online.value"
-                                /></section
+                                <PrescriptionView :system="wb.system.value!" compact /></section
                         ></Pane>
                     </Splitpanes>
+                </Pane>
+                <Pane
+                    v-if="chatOpen"
+                    :size="narrow ? 0 : chatSize"
+                    :min-size="narrow ? 0 : 24"
+                    :max-size="55"
+                    class="assistant-pane"
+                    :class="{ 'assistant-overlay': narrow }"
+                >
+                    <ChatPanel
+                        :visible="chatOpen"
+                        :online="wb.online.value"
+                        :dirty="wb.dirty.value"
+                        :locked="wb.busy.value || wb.stale.value || wb.refreshPending.value"
+                        @settings="openSettings('agents')"
+                        @close="chatOpen = false"
+                    />
                 </Pane>
             </Splitpanes>
             <footer v-if="p.workspace.showStatusBar" class="statusbar">
@@ -804,20 +870,23 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                             aria-orientation="vertical"
                             class="view-list"
                         >
-                            <button
-                                v-for="view in views"
-                                :id="`view-${TABS.indexOf(view)}`"
-                                :key="view"
-                                type="button"
-                                role="tab"
-                                :aria-selected="tab === view"
-                                aria-controls="workspace-panel"
-                                :tabindex="tab === view ? 0 : -1"
-                                @click="activate(view)"
-                                @keydown="onTabKey($event, TABS.indexOf(view))"
-                            >
-                                {{ tr(`tabs.${view}`) }}
-                            </button>
+                            <template v-for="group in navGroups" :key="group.key">
+                                <div class="nav-group-label">{{ tr(`nav.${group.key}`) }}</div>
+                                <button
+                                    v-for="view in group.items"
+                                    :id="`view-${TABS.indexOf(view)}`"
+                                    :key="view"
+                                    type="button"
+                                    role="tab"
+                                    :aria-selected="tab === view"
+                                    aria-controls="workspace-panel"
+                                    :tabindex="tab === view ? 0 : -1"
+                                    @click="activate(view)"
+                                    @keydown="onTabKey($event, views.indexOf(view))"
+                                >
+                                    {{ tr(`tabs.${view}`) }}
+                                </button>
+                            </template>
                         </div></DialogContent
                     ></DialogPortal
                 ></DialogRoot

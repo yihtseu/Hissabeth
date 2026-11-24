@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { tr } from './i18n';
 import { benchProblems, type Bench } from './bench';
 import { paletteColor } from './color';
@@ -12,16 +13,11 @@ import type {
     PupilKind,
     PupilMapping,
     Surface,
-    Vignetting,
-    RGBA,
     Wavelength,
 } from './types';
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
     typeof v === 'object' && v !== null && !Array.isArray(v);
-const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-const isNumArray = (v: unknown): v is number[] => Array.isArray(v) && v.every(isNum);
-const isTuple = (v: unknown, n: number): v is number[] => isNumArray(v) && v.length === n;
 
 export const FIELD_TYPES: readonly FieldType[] = ['angle', 'object_height', 'image_height'];
 export const PUPIL_KINDS: readonly PupilKind[] = [
@@ -42,7 +38,7 @@ export function canonicalJson(value: unknown): string {
     if (typeof value === 'object' && value !== null) {
         const o = value as Record<string, unknown>;
         const parts = Object.keys(o)
-            .sort()
+            .toSorted()
             .filter((k) => o[k] !== undefined)
             .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`);
         return `{${parts.join(',')}}`;
@@ -81,8 +77,6 @@ export const newWavelength = (n = 0): Wavelength => ({
     color: paletteColor(n),
 });
 
-const isRgba = (v: unknown): v is RGBA => isTuple(v, 4) && v.every((c) => c >= 0 && c <= 1);
-
 /** Plane endpoint with a unit clear radius, clipping off and a zero derived envelope. */
 export const newEndpoint = (): EndpointSurface => ({
     radius: 0,
@@ -107,19 +101,7 @@ export function infiniteObjectProblem(s: OpticalSystem): string {
 /** Custom glasses are addressed as NAME_CATALOG, matching the backend's Glass::key. */
 export const glassKey = (g: Glass): string => `${g.name}_${g.catalog}`;
 
-/** Reject missing and unknown keys: the backend deserializes with deny_unknown_fields. */
-function exactKeys(
-    o: Record<string, unknown>,
-    keys: readonly string[],
-    where: string,
-    optional: readonly string[] = [],
-): string | null {
-    for (const k of keys) if (!(k in o)) return tr('validation.m3', { p0: where, p1: k });
-    for (const k of Object.keys(o))
-        if (!keys.includes(k) && !optional.includes(k))
-            return tr('validation.m4', { p0: where, p1: k });
-    return null;
-}
+// ---- zod schema validation ----------------------------------------------------
 
 const SURFACE_KEYS = [
     'label',
@@ -180,157 +162,290 @@ const SYSTEM_KEYS = [
     'custom_glasses',
 ];
 
-const isIndex = (v: unknown): v is number => isNum(v) && Number.isInteger(v) && v >= 0;
+/**
+ * Missing keys first (in declared order), then unknown keys, matching the backend's
+ * deny_unknown_fields diagnostics. Field-level messages come from the schemas themselves.
+ */
+function keyProblem(
+    issues: z.core.$ZodIssue[],
+    keys: readonly string[],
+    where: string,
+    value: unknown,
+): string | null {
+    // Property issues carry no input in zod v4, so missing keys are detected on the raw record.
+    if (isRecord(value))
+        for (const k of keys)
+            if (!(k in value) && issues.some((i) => i.path.length === 1 && i.path[0] === k))
+                return tr('validation.m3', { p0: where, p1: k });
+    const extra = issues.find((i) => i.code === 'unrecognized_keys' && i.path.length === 0);
+    if (extra && extra.code === 'unrecognized_keys')
+        return tr('validation.m4', { p0: where, p1: extra.keys[0]! });
+    return null;
+}
+
+// The `error` parameter of a base schema covers every check chained onto it (zod v4),
+// so one localized message per field is enough.
+const num = (msg: string) => z.number({ error: () => msg });
+const nums = (msg: string) => z.array(num(msg), { error: () => msg });
+const index = (msg: string) => num(msg).int().nonnegative();
+const tuple2 = (msg: string) => z.tuple([num(msg), num(msg)], { error: () => msg });
+const tuple3 = (msg: string) => z.tuple([num(msg), num(msg), num(msg)], { error: () => msg });
+const tuple4 = (msg: string) =>
+    z.tuple([num(msg), num(msg), num(msg), num(msg)], { error: () => msg });
+const tuple7 = (msg: string) =>
+    z.tuple([num(msg), num(msg), num(msg), num(msg), num(msg), num(msg), num(msg)], {
+        error: () => msg,
+    });
+const rgba = (msg: string) => {
+    const channel = num(msg).min(0).max(1);
+    return z.tuple([channel, channel, channel, channel], { error: () => msg });
+};
 
 /** Strict GapSolve union: exact keys per kind. Solvability is the engine's job. */
 export function parseGapSolve(value: unknown, where: string): GapSolve | string {
     const w = `${where} gap_solve`;
     if (!isRecord(value)) return tr('validation.m5', { p0: w });
-    switch (value.kind) {
-        case 'fixed': {
-            const bad = exactKeys(value, ['kind'], w);
-            return bad ?? { kind: 'fixed' };
-        }
-        case 'pickup': {
-            const bad = exactKeys(value, ['kind', 'source', 'scale', 'offset'], w);
-            if (bad) return bad;
-            if (!isIndex(value.source)) return tr('validation.m6', { p0: w });
-            if (!isNum(value.scale) || !isNum(value.offset)) return tr('validation.m7', { p0: w });
-            return {
-                kind: 'pickup',
-                source: value.source,
-                scale: value.scale,
-                offset: value.offset,
-            };
-        }
-        case 'edge_thickness': {
-            const bad = exactKeys(value, ['kind', 'height', 'value'], w);
-            if (bad) return bad;
-            if (!isNum(value.height) || !isNum(value.value)) return tr('validation.m8', { p0: w });
-            return { kind: 'edge_thickness', height: value.height, value: value.value };
-        }
-        case 'overall_length': {
-            const bad = exactKeys(value, ['kind', 'first', 'last', 'value'], w);
-            if (bad) return bad;
-            if (!isIndex(value.first) || !isIndex(value.last))
-                return tr('validation.m9', { p0: w });
-            if (!isNum(value.value)) return tr('validation.m10', { p0: w });
-            return {
-                kind: 'overall_length',
-                first: value.first,
-                last: value.last,
-                value: value.value,
-            };
-        }
-        case 'marginal_height': {
-            const bad = exactKeys(value, ['kind', 'value', 'zone'], w);
-            if (bad) return bad;
-            if (!isNum(value.value) || !isNum(value.zone)) return tr('validation.m11', { p0: w });
-            return { kind: 'marginal_height', value: value.value, zone: value.zone };
-        }
-        default:
-            return tr('validation.m12', { p0: w });
-    }
+    const parsed = z
+        .discriminatedUnion(
+            'kind',
+            [
+                z.strictObject({ kind: z.literal('fixed') }),
+                z.strictObject({
+                    kind: z.literal('pickup'),
+                    source: index(tr('validation.m6', { p0: w })),
+                    scale: num(tr('validation.m7', { p0: w })),
+                    offset: num(tr('validation.m7', { p0: w })),
+                }),
+                z.strictObject({
+                    kind: z.literal('edge_thickness'),
+                    height: num(tr('validation.m8', { p0: w })),
+                    value: num(tr('validation.m8', { p0: w })),
+                }),
+                z.strictObject({
+                    kind: z.literal('overall_length'),
+                    first: index(tr('validation.m9', { p0: w })),
+                    last: index(tr('validation.m9', { p0: w })),
+                    value: num(tr('validation.m10', { p0: w })),
+                }),
+                z.strictObject({
+                    kind: z.literal('marginal_height'),
+                    value: num(tr('validation.m11', { p0: w })),
+                    zone: num(tr('validation.m11', { p0: w })),
+                }),
+            ],
+            { error: () => tr('validation.m12', { p0: w }) },
+        )
+        .safeParse(value);
+    if (parsed.success) return parsed.data;
+    const variantKeys: Record<string, string[]> = {
+        fixed: ['kind'],
+        pickup: ['kind', 'source', 'scale', 'offset'],
+        edge_thickness: ['kind', 'height', 'value'],
+        overall_length: ['kind', 'first', 'last', 'value'],
+        marginal_height: ['kind', 'value', 'zone'],
+    };
+    const keys = variantKeys[value.kind as string];
+    if (!keys) return tr('validation.m12', { p0: w });
+    return (
+        keyProblem(parsed.error.issues, keys, w, value) ??
+        parsed.error.issues[0]?.message ??
+        tr('validation.m12', { p0: w })
+    );
 }
 
-function parseGlass(value: unknown, i: number): Glass | string {
-    const where = `Custom glass ${i + 1}`;
-    if (!isRecord(value)) return tr('validation.m13', { p0: where });
-    const bad = exactKeys(value, GLASS_KEYS, where);
-    if (bad) return bad;
-    const g = value;
-    if (
-        typeof g.name !== 'string' ||
-        typeof g.catalog !== 'string' ||
-        typeof g.comment !== 'string'
-    )
-        return tr('validation.m14', { p0: where });
-    if (!isNum(g.formula) || !Number.isInteger(g.formula) || g.formula < 1 || g.formula > 13)
-        return tr('validation.m15', { p0: where });
-    if (!isNumArray(g.coefficients)) return tr('validation.m16', { p0: where });
-    if (!isNum(g.nd) || !isNum(g.vd)) return tr('validation.m17', { p0: where });
-    if (g.wavelength_range !== null && !isTuple(g.wavelength_range, 2))
-        return tr('validation.m18', { p0: where });
-    if (g.thermal !== null && !isTuple(g.thermal, 7)) return tr('validation.m19', { p0: where });
-    if (!Array.isArray(g.transmission) || !g.transmission.every((t) => isTuple(t, 3)))
-        return tr('validation.m20', { p0: where });
-    return {
-        name: g.name,
-        catalog: g.catalog,
-        formula: g.formula,
-        coefficients: g.coefficients,
-        nd: g.nd,
-        vd: g.vd,
-        wavelength_range: g.wavelength_range as Glass['wavelength_range'],
-        thermal: g.thermal as Glass['thermal'],
-        transmission: g.transmission as Glass['transmission'],
-        comment: g.comment,
-    };
+function glassSchema(where: string) {
+    return z.strictObject(
+        {
+            name: z.string({ error: () => tr('validation.m14', { p0: where }) }),
+            catalog: z.string({ error: () => tr('validation.m14', { p0: where }) }),
+            comment: z.string({ error: () => tr('validation.m14', { p0: where }) }),
+            formula: num(tr('validation.m15', { p0: where }))
+                .int()
+                .min(1)
+                .max(13),
+            coefficients: nums(tr('validation.m16', { p0: where })),
+            nd: num(tr('validation.m17', { p0: where })),
+            vd: num(tr('validation.m17', { p0: where })),
+            wavelength_range: tuple2(tr('validation.m18', { p0: where })).nullable(),
+            thermal: tuple7(tr('validation.m19', { p0: where })).nullable(),
+            transmission: z.array(tuple3(tr('validation.m20', { p0: where })), {
+                error: () => tr('validation.m20', { p0: where }),
+            }),
+        },
+        {
+            error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m13', { p0: where })),
+        },
+    );
 }
 
 /** Strict endpoint profile: exact keys, finite numbers, nonnegative derived radius. */
+const endpointSchema = (where: string) =>
+    z.strictObject(
+        {
+            radius: num(tr('validation.m22', { p0: where })),
+            aperture: num(tr('validation.m22', { p0: where })),
+            conic: num(tr('validation.m22', { p0: where })),
+            semi_diameter: num(tr('validation.m23', { p0: where })).nonnegative(),
+            clear_aperture: z.boolean({ error: () => tr('validation.m24', { p0: where }) }),
+            even: nums(tr('validation.m25', { p0: where })),
+            odd: nums(tr('validation.m25', { p0: where })),
+        },
+        {
+            error: (iss) =>
+                isRecord(iss.input)
+                    ? undefined
+                    : tr('validation.m21', { p0: where.toLowerCase().replace(' ', '_') }),
+        },
+    );
+
 function parseEndpoint(value: unknown, where: string): EndpointSurface | string {
-    if (!isRecord(value))
-        return tr('validation.m21', { p0: where.toLowerCase().replace(' ', '_') });
-    const bad = exactKeys(value, ENDPOINT_KEYS, where);
-    if (bad) return bad;
-    if (!isNum(value.radius) || !isNum(value.aperture) || !isNum(value.conic))
-        return tr('validation.m22', { p0: where });
-    if (!isNum(value.semi_diameter) || value.semi_diameter < 0)
-        return tr('validation.m23', { p0: where });
-    if (typeof value.clear_aperture !== 'boolean') return tr('validation.m24', { p0: where });
-    if (!isNumArray(value.even) || !isNumArray(value.odd))
-        return tr('validation.m25', { p0: where });
-    return {
-        radius: value.radius,
-        conic: value.conic,
-        even: value.even,
-        odd: value.odd,
-        aperture: value.aperture,
-        clear_aperture: value.clear_aperture,
-        semi_diameter: value.semi_diameter,
-    };
+    const parsed = endpointSchema(where).safeParse(value);
+    if (parsed.success) return parsed.data;
+    return (
+        keyProblem(parsed.error.issues, ENDPOINT_KEYS, where, value) ??
+        parsed.error.issues[0]!.message
+    );
 }
+
+const surfaceSchema = (where: string) =>
+    z.strictObject(
+        {
+            radius: num(tr('validation.m46', { p0: where })),
+            thickness: num(tr('validation.m46', { p0: where })),
+            aperture: num(tr('validation.m46', { p0: where })),
+            conic: num(tr('validation.m46', { p0: where })),
+            label: z.string({ error: () => tr('validation.m47', { p0: where }) }),
+            material: z.string({ error: () => tr('validation.m47', { p0: where }) }),
+            semi_diameter: num(tr('validation.m48', { p0: where })).nonnegative(),
+            clear_aperture: z.boolean({ error: () => tr('validation.m49', { p0: where }) }),
+            even: nums(tr('validation.m50', { p0: where })),
+            odd: nums(tr('validation.m50', { p0: where })),
+            toroid: z
+                .strictObject({
+                    revolution: num(tr('validation.m46', { p0: where })),
+                    even_y: nums(tr('validation.m50', { p0: where })),
+                })
+                .nullable()
+                .optional(),
+            zernike: z
+                .strictObject({
+                    normalize: num(tr('validation.m46', { p0: where })),
+                    coefficients: nums(tr('validation.m50', { p0: where })),
+                })
+                .nullable()
+                .optional(),
+            transform: z
+                .strictObject({
+                    decenter: tuple2(tr('validation.m46', { p0: where })),
+                    tilt: tuple3(tr('validation.m46', { p0: where })),
+                    tilt_first: z.boolean(),
+                    return_after: z.boolean(),
+                })
+                .nullable()
+                .optional(),
+            interaction: z.enum(INTERACTIONS as [Interaction, ...Interaction[]], {
+                error: () => tr('validation.m51', { p0: where, p1: INTERACTIONS.join(', ') }),
+            }),
+            gap_solve: z.unknown(),
+        },
+        {
+            error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m45', { p0: where })),
+        },
+    );
+
+const wavelengthSchema = (i: number) =>
+    z.strictObject(
+        {
+            value: num(tr('validation.m53', { p0: i + 1 })),
+            weight: num(tr('validation.m53', { p0: i + 1 })),
+            color: rgba(tr('validation.m54', { p0: i + 1 })),
+        },
+        {
+            error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m52', { p0: i + 1 })),
+        },
+    );
+
+const fieldSchema = (i: number) =>
+    z.strictObject(
+        {
+            x: num(tr('validation.m56', { p0: i + 1 })),
+            y: num(tr('validation.m56', { p0: i + 1 })),
+            weight: num(tr('validation.m56', { p0: i + 1 })),
+            vignetting: tuple4(tr('validation.m57', { p0: i + 1 })),
+            color: rgba(tr('validation.m58', { p0: i + 1 })),
+        },
+        {
+            error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m55', { p0: i + 1 })),
+        },
+    );
+
+// Field order matches the historical check order so the first reported problem stays the same.
+const systemSchema = z.strictObject(
+    {
+        name: z.string({ error: () => tr('validation.m27') }),
+        note: z.string({ error: () => tr('validation.m28') }),
+        surfaces: z.array(z.unknown(), { error: () => tr('validation.m29') }),
+        wavelengths: z.array(z.unknown(), { error: () => tr('validation.m30') }),
+        fields: z.array(z.unknown(), { error: () => tr('validation.m31') }),
+        custom_glasses: z.array(z.unknown(), { error: () => tr('validation.m32') }),
+        reference_wavelength: index(tr('validation.m33')),
+        stop_index: index(tr('validation.m34')),
+        field_type: z.enum(FIELD_TYPES as [FieldType, ...FieldType[]], {
+            error: () => tr('validation.m35', { p0: FIELD_TYPES.join(', ') }),
+        }),
+        object_distance: num(tr('validation.m36')).nullable(),
+        object_material: z.string({ error: () => tr('validation.m37') }),
+        object_label: z.string({ error: () => tr('validation.m38') }).max(256),
+        image_label: z.string({ error: () => tr('validation.m39') }).max(256),
+        temperature: num(tr('validation.m40')),
+        pressure: num(tr('validation.m40')),
+        pupil: z.strictObject(
+            {
+                kind: z.enum(PUPIL_KINDS as [PupilKind, ...PupilKind[]], {
+                    error: () => tr('validation.m42', { p0: PUPIL_KINDS.join(', ') }),
+                }),
+                value: num(tr('validation.m43')),
+            },
+            {
+                error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m41')),
+            },
+        ),
+        pupil_mapping: z.enum(PUPIL_MAPPINGS as [PupilMapping, ...PupilMapping[]], {
+            error: () => tr('validation.m44', { p0: PUPIL_MAPPINGS.join(', ') }),
+        }),
+        object_surface: z.unknown(),
+        image_surface: z.unknown(),
+        bench: z.unknown().optional(),
+        configurations: z.unknown().optional(),
+        active_configuration: z.unknown().optional(),
+    },
+    { error: (iss) => (isRecord(iss.input) ? undefined : tr('validation.m26')) },
+);
 
 /** Parse untrusted JSON into an OpticalSystem; returns an error string on failure. */
 export function parseSystem(value: unknown): OpticalSystem | string {
     if (!isRecord(value)) return tr('validation.m26');
-    const top = exactKeys(value, SYSTEM_KEYS, 'System', ['bench']);
-    if (top) return top;
+    const parsed = systemSchema.safeParse(value);
+    if (!parsed.success) {
+        const top = keyProblem(parsed.error.issues, SYSTEM_KEYS, 'System', value);
+        if (top) return top;
+        const benchErrors = benchProblems(value.bench);
+        if (benchErrors.length) return benchErrors[0]!;
+        const first = parsed.error.issues[0]!;
+        if (first.path[0] === 'pupil') {
+            // Report pupil key errors with the Pupil context, like a standalone strict check.
+            const sub = parsed.error.issues
+                .filter((i) => i.path[0] === 'pupil')
+                .map((i) => Object.assign({}, i, { path: i.path.slice(1) }));
+            const bad = keyProblem(sub, ['kind', 'value'], 'Pupil', value.pupil);
+            if (bad) return bad;
+        }
+        return first.message;
+    }
     const benchErrors = benchProblems(value.bench);
     if (benchErrors.length) return benchErrors[0]!;
-    const v = value;
-    if (typeof v.name !== 'string') return tr('validation.m27');
-    if (typeof v.note !== 'string') return tr('validation.m28');
-    if (!Array.isArray(v.surfaces)) return tr('validation.m29');
-    if (!Array.isArray(v.wavelengths)) return tr('validation.m30');
-    if (!Array.isArray(v.fields)) return tr('validation.m31');
-    if (!Array.isArray(v.custom_glasses)) return tr('validation.m32');
-    if (
-        !isNum(v.reference_wavelength) ||
-        !Number.isInteger(v.reference_wavelength) ||
-        v.reference_wavelength < 0
-    )
-        return tr('validation.m33');
-    if (!isNum(v.stop_index) || !Number.isInteger(v.stop_index) || v.stop_index < 0)
-        return tr('validation.m34');
-    if (!FIELD_TYPES.includes(v.field_type as FieldType))
-        return tr('validation.m35', { p0: FIELD_TYPES.join(', ') });
-    if (v.object_distance !== null && !isNum(v.object_distance)) return tr('validation.m36');
-    if (typeof v.object_material !== 'string') return tr('validation.m37');
-    if (typeof v.object_label !== 'string' || v.object_label.length > 256)
-        return tr('validation.m38');
-    if (typeof v.image_label !== 'string' || v.image_label.length > 256)
-        return tr('validation.m39');
-    if (!isNum(v.temperature) || !isNum(v.pressure)) return tr('validation.m40');
-    if (!isRecord(v.pupil)) return tr('validation.m41');
-    const pupilBad = exactKeys(v.pupil, ['kind', 'value'], 'Pupil');
-    if (pupilBad) return pupilBad;
-    if (!PUPIL_KINDS.includes(v.pupil.kind as PupilKind))
-        return tr('validation.m42', { p0: PUPIL_KINDS.join(', ') });
-    if (!isNum(v.pupil.value)) return tr('validation.m43');
-    if (!PUPIL_MAPPINGS.includes(v.pupil_mapping as PupilMapping))
-        return tr('validation.m44', { p0: PUPIL_MAPPINGS.join(', ') });
+    const v = parsed.data;
+
     const objectSurface = parseEndpoint(v.object_surface, 'Object surface');
     if (typeof objectSurface === 'string') return objectSurface;
     const imageSurface = parseEndpoint(v.image_surface, 'Image surface');
@@ -339,67 +454,50 @@ export function parseSystem(value: unknown): OpticalSystem | string {
     const surfaces: Surface[] = [];
     for (const [i, s] of v.surfaces.entries()) {
         const where = `Surface ${i + 1}`;
-        if (!isRecord(s)) return tr('validation.m45', { p0: where });
-        const bad = exactKeys(s, SURFACE_KEYS, where);
-        if (bad) return bad;
-        if (!isNum(s.radius) || !isNum(s.thickness) || !isNum(s.aperture) || !isNum(s.conic))
-            return tr('validation.m46', { p0: where });
-        if (typeof s.material !== 'string' || typeof s.label !== 'string')
-            return tr('validation.m47', { p0: where });
-        if (!isNum(s.semi_diameter) || s.semi_diameter < 0)
-            return tr('validation.m48', { p0: where });
-        if (typeof s.clear_aperture !== 'boolean') return tr('validation.m49', { p0: where });
-        if (!isNumArray(s.even) || !isNumArray(s.odd)) return tr('validation.m50', { p0: where });
-        if (!INTERACTIONS.includes(s.interaction as Interaction))
-            return tr('validation.m51', { p0: where, p1: INTERACTIONS.join(', ') });
-        const gapSolve = parseGapSolve(s.gap_solve, where);
+        const parsedSurface = surfaceSchema(where).safeParse(s);
+        if (!parsedSurface.success)
+            return (
+                keyProblem(parsedSurface.error.issues, SURFACE_KEYS, where, s) ??
+                parsedSurface.error.issues[0]!.message
+            );
+        const gapSolve = parseGapSolve(parsedSurface.data.gap_solve, where);
         if (typeof gapSolve === 'string') return gapSolve;
-        surfaces.push({
-            label: s.label,
-            radius: s.radius,
-            thickness: s.thickness,
-            gap_solve: gapSolve,
-            material: s.material,
-            aperture: s.aperture,
-            clear_aperture: s.clear_aperture,
-            semi_diameter: s.semi_diameter,
-            conic: s.conic,
-            even: s.even,
-            odd: s.odd,
-            interaction: s.interaction as Interaction,
-        });
+        surfaces.push({ ...parsedSurface.data, gap_solve: gapSolve });
     }
     const wavelengths: Wavelength[] = [];
     for (const [i, w] of v.wavelengths.entries()) {
-        if (!isRecord(w)) return tr('validation.m52', { p0: i + 1 });
-        const bad = exactKeys(w, WAVELENGTH_KEYS, `Wavelength ${i + 1}`);
-        if (bad) return bad;
-        if (!isNum(w.value) || !isNum(w.weight)) return tr('validation.m53', { p0: i + 1 });
-        if (!isRgba(w.color)) return tr('validation.m54', { p0: i + 1 });
-        wavelengths.push({ value: w.value, weight: w.weight, color: w.color });
+        const parsedWavelength = wavelengthSchema(i).safeParse(w);
+        if (!parsedWavelength.success)
+            return (
+                keyProblem(
+                    parsedWavelength.error.issues,
+                    WAVELENGTH_KEYS,
+                    `Wavelength ${i + 1}`,
+                    w,
+                ) ?? parsedWavelength.error.issues[0]!.message
+            );
+        wavelengths.push(parsedWavelength.data);
     }
     const fields: Field[] = [];
     for (const [i, f] of v.fields.entries()) {
-        if (!isRecord(f)) return tr('validation.m55', { p0: i + 1 });
-        const bad = exactKeys(f, FIELD_KEYS, `Field ${i + 1}`);
-        if (bad) return bad;
-        if (!isNum(f.x) || !isNum(f.y) || !isNum(f.weight))
-            return tr('validation.m56', { p0: i + 1 });
-        if (!isTuple(f.vignetting, 4)) return tr('validation.m57', { p0: i + 1 });
-        if (!isRgba(f.color)) return tr('validation.m58', { p0: i + 1 });
-        fields.push({
-            x: f.x,
-            y: f.y,
-            weight: f.weight,
-            vignetting: f.vignetting as Vignetting,
-            color: f.color,
-        });
+        const parsedField = fieldSchema(i).safeParse(f);
+        if (!parsedField.success)
+            return (
+                keyProblem(parsedField.error.issues, FIELD_KEYS, `Field ${i + 1}`, f) ??
+                parsedField.error.issues[0]!.message
+            );
+        fields.push(parsedField.data);
     }
     const glasses: Glass[] = [];
     for (const [i, g] of v.custom_glasses.entries()) {
-        const parsed = parseGlass(g, i);
-        if (typeof parsed === 'string') return parsed;
-        glasses.push(parsed);
+        const where = `Custom glass ${i + 1}`;
+        const parsedGlass = glassSchema(where).safeParse(g);
+        if (!parsedGlass.success)
+            return (
+                keyProblem(parsedGlass.error.issues, GLASS_KEYS, where, g) ??
+                parsedGlass.error.issues[0]!.message
+            );
+        glasses.push(parsedGlass.data);
     }
     return {
         name: v.name,
@@ -409,9 +507,9 @@ export function parseSystem(value: unknown): OpticalSystem | string {
         wavelengths,
         reference_wavelength: v.reference_wavelength,
         fields,
-        field_type: v.field_type as FieldType,
-        pupil: { kind: v.pupil.kind as PupilKind, value: v.pupil.value },
-        pupil_mapping: v.pupil_mapping as PupilMapping,
+        field_type: v.field_type,
+        pupil: v.pupil,
+        pupil_mapping: v.pupil_mapping,
         object_distance: v.object_distance,
         object_material: v.object_material,
         object_label: v.object_label,
@@ -497,8 +595,8 @@ export function validateSystem(s: OpticalSystem): string[] {
 /** Parse a comma/space separated list; null when any entry is not a finite number. */
 export function parseNumberList(text: string): number[] | null {
     const parts = text.split(/[\s,;]+/).filter((t) => t !== '');
-    const nums = parts.map(Number);
-    return nums.every(Number.isFinite) ? nums : null;
+    const values = parts.map(Number);
+    return values.every(Number.isFinite) ? values : null;
 }
 
 export function fieldUnit(t: FieldType): string {

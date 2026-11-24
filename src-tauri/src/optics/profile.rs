@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Vertex-referenced radial profiles and signed line intersections.
-use super::{Surface, math::*};
+// Vertex-referenced profiles and signed line intersections.
+use super::zernike::{fringe, fringe_derivatives};
+use super::{SagZernike, Surface, Toroid, math::*};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +33,8 @@ impl EndpointSurface {
             conic: self.conic,
             even: &self.even,
             odd: &self.odd,
+            toroid: None,
+            zernike: None,
         }
     }
     pub fn sag(&self, r: f64) -> Result<(f64, f64), String> {
@@ -59,6 +62,8 @@ impl Surface {
             conic: self.conic,
             even: &self.even,
             odd: &self.odd,
+            toroid: self.toroid.as_ref(),
+            zernike: self.zernike.as_ref(),
         }
     }
 }
@@ -68,6 +73,8 @@ pub struct Profile<'a> {
     pub conic: f64,
     pub even: &'a [f64],
     pub odd: &'a [f64],
+    pub toroid: Option<&'a Toroid>,
+    pub zernike: Option<&'a SagZernike>,
 }
 pub struct Intersection {
     pub point: V3,
@@ -76,7 +83,25 @@ pub struct Intersection {
 }
 impl Profile<'_> {
     pub fn is_plane(self) -> bool {
-        self.radius == 0. && self.even.iter().chain(self.odd).all(|a| *a == 0.)
+        self.radius == 0.
+            && self.even.iter().chain(self.odd).all(|a| *a == 0.)
+            && self.toroid.map_or(true, |t| {
+                t.revolution == 0. && t.even_y.iter().all(|a| *a == 0.)
+            })
+            && self
+                .zernike
+                .map_or(true, |z| z.coefficients.iter().all(|a| *a == 0.))
+    }
+    /// Rotationally symmetric profiles keep the fast radial path. A toroid or
+    /// any Fringe term with m != 0 breaks the symmetry.
+    pub fn is_radial(self) -> bool {
+        self.toroid.is_none()
+            && self.zernike.map_or(true, |z| {
+                z.coefficients
+                    .iter()
+                    .enumerate()
+                    .all(|(i, a)| *a == 0. || fringe(i + 1).is_ok_and(|(_, m, _)| m == 0))
+            })
     }
     pub fn validate(self) -> Result<(), String> {
         if !self.radius.is_finite()
@@ -87,14 +112,33 @@ impl Profile<'_> {
         {
             return Err("Invalid radial profile parameters".into());
         }
+        if let Some(t) = self.toroid {
+            if !t.revolution.is_finite()
+                || t.even_y.len() > 8
+                || !t.even_y.iter().all(|a| a.is_finite())
+            {
+                return Err("Invalid toroidal parameters".into());
+            }
+            if !self.even.is_empty() || !self.odd.is_empty() {
+                return Err("Toroidal profiles take no radial asphere coefficients".into());
+            }
+        }
+        if let Some(z) = self.zernike {
+            if !z.normalize.is_finite()
+                || z.normalize <= 0.
+                || z.coefficients.len() > 37
+                || !z.coefficients.iter().all(|a| a.is_finite())
+            {
+                return Err("Invalid Zernike sag parameters".into());
+            }
+        }
         Ok(())
     }
-    pub fn sag(self, r: f64) -> Result<(f64, f64), String> {
+    /// Sag, first, and second radial derivative of the rotationally symmetric
+    /// base (conic + radial polynomials).
+    fn radial_sag2(self, r: f64) -> Result<(f64, f64, f64), String> {
         if !r.is_finite() || r < 0. {
             return Err("Invalid radial height".into());
-        }
-        if self.is_plane() {
-            return Ok((0., 0.));
         }
         let c = if self.radius == 0. {
             0.
@@ -105,25 +149,241 @@ impl Profile<'_> {
         if q < 0. {
             return Err("Surface sag outside real domain".into());
         }
-        let (mut z, mut dz) = (c * r * r / (1. + q.sqrt()), c * r / q.sqrt());
+        let sq = q.sqrt();
+        let (mut z, mut dz, mut d2z) = (c * r * r / (1. + sq), c * r / sq, c / (sq * q));
         for (i, a) in self.even.iter().enumerate() {
             let power = 4 + 2 * i as i32;
             z += a * r.powi(power);
             dz += a * power as f64 * r.powi(power - 1);
+            d2z += a * (power * (power - 1)) as f64 * r.powi(power - 2);
         }
         // Geopter's odd profile includes every radial power beginning with r^3.
         for (i, a) in self.odd.iter().enumerate() {
             let power = 3 + i as i32;
             z += a * r.powi(power);
             dz += a * power as f64 * r.powi(power - 1);
+            d2z += a * (power * (power - 1)) as f64 * r.powi(power - 2);
         }
         if z.is_finite() && (dz.is_finite() || (q == 0. && !dz.is_nan())) {
+            Ok((z, dz, d2z))
+        } else {
+            Err("Nonfinite surface sag".into())
+        }
+    }
+    /// Toroidal sag and gradient: the YZ conic profile swept about an axis
+    /// parallel to Y at distance `revolution`; the X section is a circle of
+    /// radius revolution + z_y(y). revolution == 0 gives a flat X section.
+    fn toroid_sag(self, t: &Toroid, x: f64, y: f64) -> Result<(f64, f64, f64), String> {
+        let c = if self.radius == 0. {
+            0.
+        } else {
+            1. / self.radius
+        };
+        let q = 1. - (1. + self.conic) * c * c * y * y;
+        if q < 0. {
+            return Err("Surface sag outside real domain".into());
+        }
+        let sq = q.sqrt();
+        let (mut zy, mut dy) = (c * y * y / (1. + sq), c * y / sq);
+        for (i, a) in t.even_y.iter().enumerate() {
+            let power = 4 + 2 * i as i32;
+            zy += a * y.powi(power);
+            dy += a * power as f64 * y.powi(power - 1);
+        }
+        if t.revolution == 0. {
+            return Ok((zy, 0., dy));
+        }
+        let ring = t.revolution + zy;
+        if ring == 0. {
+            return Err("Degenerate toroidal revolution radius".into());
+        }
+        let a = 1. / ring;
+        let s = 1. - a * a * x * x;
+        if s < 0. {
+            return Err("Surface sag outside real domain".into());
+        }
+        let sqx = s.sqrt();
+        let z = zy + a * x * x / (1. + sqx);
+        let gx = a * x / sqx;
+        // dA/dy = -A^2·z_y', and dh/dA = x²/(s(1+s)).
+        let gy = dy - a * a * dy * x * x / (sqx * (1. + sqx));
+        Ok((z, gx, gy))
+    }
+    /// Sag and gradient (dz/dx, dz/dy) at an arbitrary aperture point.
+    pub fn sag2(self, x: f64, y: f64) -> Result<(f64, f64, f64), String> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err("Invalid aperture coordinates".into());
+        }
+        let (mut z, mut gx, mut gy) = match self.toroid {
+            Some(t) => self.toroid_sag(t, x, y)?,
+            None => {
+                let r = x.hypot(y);
+                let (z, dz, _) = self.radial_sag2(r)?;
+                let (gx, gy) = if r > 1e-15 {
+                    (dz * x / r, dz * y / r)
+                } else {
+                    (0., 0.)
+                };
+                (z, gx, gy)
+            }
+        };
+        if let Some(zn) = self.zernike {
+            let inv = 1. / zn.normalize;
+            for (i, c) in zn.coefficients.iter().enumerate() {
+                if *c == 0. {
+                    continue;
+                }
+                let (n, m, cos) = fringe(i + 1)?;
+                let (zz, du, dv, _, _, _) = fringe_derivatives(n, m, cos, x * inv, y * inv);
+                z += c * zz;
+                gx += c * du * inv;
+                gy += c * dv * inv;
+            }
+        }
+        if z.is_finite() && gx.is_finite() && gy.is_finite() {
+            Ok((z, gx, gy))
+        } else {
+            Err("Nonfinite surface sag".into())
+        }
+    }
+    /// Hessian (d²z/dx², d²z/dxdy, d²z/dy²) at an arbitrary aperture point.
+    pub fn hessian2(self, x: f64, y: f64) -> Result<(f64, f64, f64), String> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err("Invalid aperture coordinates".into());
+        }
+        let (mut hxx, mut hxy, mut hyy) = match self.toroid {
+            Some(t) => {
+                let c = if self.radius == 0. {
+                    0.
+                } else {
+                    1. / self.radius
+                };
+                let q = 1. - (1. + self.conic) * c * c * y * y;
+                if q < 0. {
+                    return Err("Surface sag outside real domain".into());
+                }
+                let sq = q.sqrt();
+                let (mut zy, mut dy, mut d2y) = (c * y * y / (1. + sq), c * y / sq, c / (sq * q));
+                for (i, a) in t.even_y.iter().enumerate() {
+                    let power = 4 + 2 * i as i32;
+                    zy += a * y.powi(power);
+                    dy += a * power as f64 * y.powi(power - 1);
+                    d2y += a * (power * (power - 1)) as f64 * y.powi(power - 2);
+                }
+                if t.revolution == 0. {
+                    (0., 0., d2y)
+                } else {
+                    let ring = t.revolution + zy;
+                    if ring == 0. {
+                        return Err("Degenerate toroidal revolution radius".into());
+                    }
+                    let a = 1. / ring;
+                    let s = 1. - a * a * x * x;
+                    if s <= 0. {
+                        return Err("Surface sag outside real domain".into());
+                    }
+                    let sqx = s.sqrt();
+                    let ap = -a * a * dy;
+                    let app = 2. * a * a * a * dy * dy - a * a * d2y;
+                    let h_a = x * x / (sqx * (1. + sqx));
+                    let h_aa = a * x.powi(4) * (1. + 2. * sqx) / (sqx * s * (1. + sqx).powi(2));
+                    (
+                        a / (sqx * s),
+                        x * ap / (sqx * s),
+                        d2y + h_aa * ap * ap + h_a * app,
+                    )
+                }
+            }
+            None => {
+                let r = x.hypot(y);
+                let (_, dz, d2z) = self.radial_sag2(r)?;
+                if r > 1e-15 {
+                    let (ux, uy) = (x / r, y / r);
+                    let transverse = dz / r;
+                    (
+                        transverse + (d2z - transverse) * ux * ux,
+                        (d2z - transverse) * ux * uy,
+                        transverse + (d2z - transverse) * uy * uy,
+                    )
+                } else {
+                    let c = if self.radius == 0. {
+                        0.
+                    } else {
+                        1. / self.radius
+                    };
+                    (c, 0., c)
+                }
+            }
+        };
+        if let Some(zn) = self.zernike {
+            let inv = 1. / zn.normalize;
+            for (i, c) in zn.coefficients.iter().enumerate() {
+                if *c == 0. {
+                    continue;
+                }
+                let (n, m, cos) = fringe(i + 1)?;
+                let (_, _, _, duu, duv, dvv) = fringe_derivatives(n, m, cos, x * inv, y * inv);
+                hxx += c * duu * inv * inv;
+                hxy += c * duv * inv * inv;
+                hyy += c * dvv * inv * inv;
+            }
+        }
+        if hxx.is_finite() && hxy.is_finite() && hyy.is_finite() {
+            Ok((hxx, hxy, hyy))
+        } else {
+            Err("Nonfinite surface curvature".into())
+        }
+    }
+    pub fn sag(self, r: f64) -> Result<(f64, f64), String> {
+        if !self.is_radial() {
+            return Err("Profile is not rotationally symmetric".into());
+        }
+        if self.is_plane() {
+            return Ok((0., 0.));
+        }
+        let (mut z, mut dz, _) = self.radial_sag2(r)?;
+        if let Some(zn) = self.zernike {
+            let inv = 1. / zn.normalize;
+            for (i, c) in zn.coefficients.iter().enumerate() {
+                if *c == 0. {
+                    continue;
+                }
+                // is_radial guarantees only m = 0 terms are present.
+                let (n, m, cos) = fringe(i + 1)?;
+                let (zz, du, _, _, _, _) = fringe_derivatives(n, m, cos, r * inv, 0.);
+                z += c * zz;
+                dz += c * du * inv;
+            }
+        }
+        if z.is_finite() && !dz.is_nan() {
             Ok((z, dz))
         } else {
             Err("Nonfinite surface sag".into())
         }
     }
     pub(super) fn normal_variation(self, point: V3, variation: V3) -> Result<V3, String> {
+        // The closed radial Jacobian below ignores Zernike terms; any nonzero
+        // Zernike coefficient (even m = 0) takes the generic 2D path.
+        if !self.is_radial()
+            || self
+                .zernike
+                .is_some_and(|z| z.coefficients.iter().any(|a| *a != 0.))
+        {
+            let (_, fx, fy) = self.sag2(point[0], point[1])?;
+            let (hxx, hxy, hyy) = self.hessian2(point[0], point[1])?;
+            let g = [-fx, -fy, 1.];
+            let dg = [
+                -(hxx * variation[0] + hxy * variation[1]),
+                -(hxy * variation[0] + hyy * variation[1]),
+                0.,
+            ];
+            let normal = unit(g)?;
+            let dn = scale(sub(dg, scale(normal, dot(normal, dg))), 1. / norm(g));
+            if dn.iter().all(|v| v.is_finite()) {
+                return Ok(dn);
+            }
+            return Err("Nonfinite surface-normal derivative".into());
+        }
         let r = point[0].hypot(point[1]);
         let mut polynomial = 0.;
         let mut first = 0.;
@@ -207,6 +467,11 @@ impl Profile<'_> {
             return Err("Nonfinite intersection distance".into());
         }
         let hit = add(p, scale(v, t));
+        if !self.is_radial() {
+            let (z, fx, fy) = self.sag2(hit[0], hit[1])?;
+            let derivative = v[2] - (fx * v[0] + fy * v[1]);
+            return Ok((hit, hit[2] - z, derivative));
+        }
         let radius = hit[0].hypot(hit[1]);
         let (z, slope) = self.sag(radius)?;
         let derivative = v[2]
@@ -269,8 +534,17 @@ impl Profile<'_> {
         } else {
             0.
         };
-        let mut candidates = self.conic_roots(relative, v);
-        if self.even.iter().chain(self.odd).any(|a| *a != 0.) {
+        let mut candidates = if self.is_radial() {
+            self.conic_roots(relative, v)
+        } else {
+            vec![]
+        };
+        let polished = !self.is_radial()
+            || self.even.iter().chain(self.odd).any(|a| *a != 0.)
+            || self
+                .zernike
+                .is_some_and(|z| z.coefficients.iter().any(|a| *a != 0.));
+        if polished {
             candidates.push(plane);
             candidates.push(0.);
             candidates = candidates
@@ -289,17 +563,11 @@ impl Profile<'_> {
             .min_by(|a, b| (a - plane).abs().total_cmp(&(b - plane).abs()))
             .ok_or("Ray misses surface profile")?;
         let local = add(relative, scale(v, distance));
-        let radial = local[0].hypot(local[1]);
-        let (_, slope) = self.sag(radial)?;
-        let normal = if slope.is_infinite() {
-            let c = 1. / self.radius;
-            unit([-c * local[0], -c * local[1], 0.])?
+        let normal = if !self.is_radial() {
+            let (_, fx, fy) = self.sag2(local[0], local[1])?;
+            unit([-fx, -fy, 1.])?
         } else {
-            unit(if radial > 1e-15 {
-                [-slope * local[0] / radial, -slope * local[1] / radial, 1.]
-            } else {
-                [0., 0., 1.]
-            })?
+            self.radial_normal(local)?
         };
         let point = [local[0], local[1], local[2] + vertex];
         if !point.iter().all(|x| x.is_finite()) {
@@ -311,12 +579,176 @@ impl Profile<'_> {
             distance: origin_distance + distance,
         })
     }
+    fn radial_normal(self, local: V3) -> Result<V3, String> {
+        let radial = local[0].hypot(local[1]);
+        let (_, slope) = self.sag(radial)?;
+        if slope.is_infinite() {
+            let c = 1. / self.radius;
+            unit([-c * local[0], -c * local[1], 0.])
+        } else {
+            unit(if radial > 1e-15 {
+                [-slope * local[0] / radial, -slope * local[1] / radial, 1.]
+            } else {
+                [0., 0., 1.]
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::optics::{Field, FieldType, Interaction, PupilMapping, System, Wavelength};
+
+    fn toroidal_surface() -> Surface {
+        let mut s = Surface::sphere(40., 10., "AIR", 8.);
+        s.conic = -0.5;
+        s.toroid = Some(Toroid {
+            revolution: 30.,
+            even_y: vec![1e-4],
+        });
+        s
+    }
+    fn closed_form_toroid_z(x: f64, y: f64) -> f64 {
+        let c = 1. / 40.;
+        let zy = c * y * y / (1. + (1. - 0.5 * c * c * y * y).sqrt()) + 1e-4 * y.powi(4);
+        let ring = 30. + zy;
+        zy + x * x / ring / (1. + (1. - x * x / (ring * ring)).sqrt())
+    }
+    #[test]
+    fn toroidal_sag_gradient_and_hessian_match_closed_form() {
+        let s = toroidal_surface();
+        let p = s.profile();
+        assert!(!p.is_radial());
+        assert!(p.sag(1.).unwrap_err().contains("rotationally symmetric"));
+        for (x, y) in [(1.3, -2.1), (0., 3.2), (-2.5, 0.4)] {
+            let (z, gx, gy) = p.sag2(x, y).unwrap();
+            assert!((z - closed_form_toroid_z(x, y)).abs() < 1e-14, "{x} {y}");
+            let h = 1e-6;
+            let at = |x, y| p.sag2(x, y).unwrap().0;
+            assert!(((at(x + h, y) - at(x - h, y)) / (2. * h) - gx).abs() < 1e-8);
+            assert!(((at(x, y + h) - at(x, y - h)) / (2. * h) - gy).abs() < 1e-8);
+            let (hxx, hxy, hyy) = p.hessian2(x, y).unwrap();
+            let g = |x, y| p.sag2(x, y).unwrap();
+            assert!(((g(x + h, y).1 - g(x - h, y).1) / (2. * h) - hxx).abs() < 1e-6);
+            assert!(((g(x, y + h).1 - g(x, y - h).1) / (2. * h) - hxy).abs() < 1e-6);
+            assert!(((g(x, y + h).2 - g(x, y - h).2) / (2. * h) - hyy).abs() < 1e-6);
+        }
+    }
+    #[test]
+    fn toroidal_intersection_recovers_surface_point_and_normal_from_both_sides() {
+        let s = toroidal_surface();
+        let p = s.profile();
+        let (x, y) = (1.3, -2.1);
+        let (z, gx, gy) = p.sag2(x, y).unwrap();
+        let expected = [x, y, 7. + z];
+        let normal = unit([-gx, -gy, 1.]).unwrap();
+        let direction = unit([0.17, -0.09, 1.]).unwrap();
+        for distance in [-8., 8.] {
+            let origin = sub(expected, scale(direction, distance));
+            let hit = p.intersect(origin, direction, 7.).unwrap();
+            assert!((hit.distance - distance).abs() < 2e-9);
+            assert!(norm(sub(hit.point, expected)) < 2e-9);
+            assert!(norm(sub(hit.normal, normal)) < 2e-9);
+        }
+    }
+    #[test]
+    fn cylinder_toroid_focuses_only_the_powered_section() {
+        let mut s = System::default();
+        let mut cyl = Surface::sphere(40., 1., "N-BK7_SCHOTT", 5.);
+        cyl.toroid = Some(Toroid {
+            revolution: 0.,
+            even_y: vec![],
+        });
+        let n = crate::optics::index("N-BK7_SCHOTT", 587.5618).unwrap();
+        cyl.thickness = n * 40. / (n - 1.);
+        s.surfaces = vec![cyl];
+        s.stop_index = 0;
+        s.fields = vec![Field::meridional(0.)];
+        s.update().unwrap();
+        // Flat X section: an X fan ray stays at its height.
+        let x_ray = s.trace_field(1., 0., &s.fields[0], s.reference()).unwrap();
+        assert!((x_ray.image()[0] - 1.).abs() < 1e-12);
+        assert!(x_ray.image()[1].abs() < 1e-12);
+        // Powered Y section: a paraxial Y ray crosses the axis at nR/(n-1).
+        let y_ray = s
+            .trace_field(0., 1e-3, &s.fields[0], s.reference())
+            .unwrap();
+        assert!(y_ray.image()[1].abs() < 1e-9);
+        assert!(y_ray.image()[0].abs() < 1e-12);
+    }
+    #[test]
+    fn radial_zernike_surface_traces_onto_the_deformed_profile() {
+        // m = 0 Zernike terms keep the radial path; the conic seed alone would
+        // miss the Z4 deformation, so the intersection must be refined.
+        let mut s = System::default();
+        s.surfaces[1].zernike = Some(SagZernike {
+            normalize: 12.5,
+            coefficients: vec![0., 0., 0., 5e-4],
+        });
+        s.update().unwrap();
+        let ray = s.trace_field(1., -2., &s.fields[0], s.reference()).unwrap();
+        let hit = ray.segments[1].point;
+        let r = hit[0].hypot(hit[1]);
+        let base = -50. + (2500. - r * r).sqrt();
+        let u = r / 12.5;
+        let expected = 5. + base + 5e-4 * (2. * u * u - 1.);
+        assert!((hit[2] - expected).abs() < 1e-9, "{} vs {expected}", hit[2]);
+    }
+    #[test]
+    fn zernike_sag_adds_fringe_terms_and_guards_the_radial_api() {
+        let mut s = Surface::sphere(0., 1., "AIR", 8.);
+        s.zernike = Some(SagZernike {
+            normalize: 10.,
+            coefficients: vec![0.2, 0.5],
+        });
+        let p = s.profile();
+        assert!(!p.is_radial());
+        assert!(p.sag(1.).unwrap_err().contains("rotationally symmetric"));
+        // Z1 = 1 (piston), Z2 = u (x tilt): z = 0.2 + 0.05·x.
+        let (z, gx, gy) = p.sag2(3., -2.).unwrap();
+        assert!((z - (0.2 + 0.05 * 3.)).abs() < 1e-15);
+        assert!((gx - 0.05).abs() < 1e-15);
+        assert!(gy.abs() < 1e-15);
+        // Only m = 0 terms keep the profile radial and the radial API working.
+        s.zernike = Some(SagZernike {
+            normalize: 10.,
+            coefficients: vec![0., 0., 0., 1e-3],
+        });
+        let p = s.profile();
+        assert!(p.is_radial());
+        let (z, dz) = p.sag(5.).unwrap();
+        let u = 0.5_f64;
+        assert!((z - 1e-3 * (2. * u * u - 1.)).abs() < 1e-15);
+        assert!((dz - 1e-3 * 4. * u / 10.).abs() < 1e-15);
+        let (z2, _, _) = p.sag2(3., 4.).unwrap();
+        assert!((z - z2).abs() < 1e-15);
+    }
+    #[test]
+    fn non_radial_normal_variation_matches_perturbed_normal() {
+        let mut s = Surface::sphere(50., 1., "AIR", 8.);
+        s.zernike = Some(SagZernike {
+            normalize: 6.,
+            coefficients: vec![0., 0., 0., 0., 1e-3, -2e-3, 0., 0., 0., 0., 5e-4],
+        });
+        let p = s.profile();
+        let (x, y) = (1.7, -1.1);
+        let (z, gx, gy) = p.sag2(x, y).unwrap();
+        let step = 1e-5;
+        for v in [[step, 0., 0.], [0., step, 0.]] {
+            let (zn, fx, fy) = p.sag2(x + v[0], y + v[1]).unwrap();
+            let actual = unit([-fx, -fy, 1.]).unwrap();
+            let dn = p.normal_variation([x, y, z], [v[0], v[1], zn - z]).unwrap();
+            let predicted = add(unit([-gx, -gy, 1.]).unwrap(), dn);
+            assert!(norm(sub(actual, predicted)) < 1e-6);
+        }
+    }
+    #[test]
+    fn toroid_rejects_radial_asphere_coefficients_on_validate() {
+        let mut s = toroidal_surface();
+        s.even = vec![1e-5];
+        assert!(s.profile().validate().unwrap_err().contains("Toroidal"));
+    }
 
     #[test]
     fn signed_sphere_conic_even_and_odd_intersections_match_closed_form_points() {

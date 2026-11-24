@@ -1,0 +1,51 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ci-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+    rust:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
+            - name: Test Rust library
+              run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+            - uses: oven-sh/setup-bun@v2
+            - name: Build desktop assets
+              run: |
+                  bun install --frozen-lockfile
+                  bun run build
+            - name: Install Tauri Linux system libraries
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev libgtk-3-dev
+            - name: Check desktop application
+              run: cargo check --manifest-path src-tauri/Cargo.toml --features tauri/custom-protocol
+
+    frontend:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: oven-sh/setup-bun@v2
+            - run: bun install --frozen-lockfile
+            - run: bun run typecheck
+            - run: bun run lint
+            - run: bun run format:check
+            - run: bun run build

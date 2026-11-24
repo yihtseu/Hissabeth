@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { tr } from '../i18n';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { FolderOpen, SaveAll } from 'lucide-vue-next';
 import { callTool, errorMessage } from '../api';
-import type { ImportFormat, OpticalSystem } from '../types';
+import type { ImportFormat, OpticalSystem, ProjectListResult } from '../types';
 
 const props = defineProps<{
     system: OpticalSystem;
@@ -23,6 +24,7 @@ const FORMATS: { id: ImportFormat; label: string }[] = [
         },
     },
     { id: 'geopter', label: 'Geopter' },
+    { id: 'zmx', label: 'ZMX (Zemax)' },
 ];
 
 /** Format requested for the next export and declared for the next import. */
@@ -55,13 +57,13 @@ let openedRevision = 0;
 const locked = computed(() => props.busy || importing.value || creating.value);
 
 /** Stored conditions the Geopter format cannot hold; the engine still reports anything else it cannot represent. */
+const builtIn = (where: string): string =>
+    `${where} is FUSED_SILICA, a built-in material that cannot be stored in a Geopter project. Use the Hissabeth project format.`;
 const geopterBlock = computed(() => {
     const sys = props.system;
     if (sys.pupil_mapping === 'real_stop') return tr('remaining.m1');
     if (sys.object_distance === null) return tr('remaining.m2');
     if (sys.custom_glasses.length > 0) return tr('remaining.m3');
-    const builtIn = (where: string): string =>
-        `${where} is FUSED_SILICA, a built-in material that cannot be stored in a Geopter project. Use the Hissabeth project format.`;
     if (sys.object_material === 'FUSED_SILICA') return builtIn(tr('sys.objectMaterial'));
     const silica = sys.surfaces.findIndex((x) => x.material === 'FUSED_SILICA');
     if (silica >= 0) return builtIn(tr('ie.geopter.builtInSurface', { n: silica + 1 }));
@@ -105,8 +107,41 @@ const geopterBlock = computed(() => {
     if (sys.surfaces.some((x) => x.gap_solve.kind !== 'fixed')) return tr('remaining.m5');
     return '';
 });
+const zmxBlock = computed(() => {
+    const sys = props.system;
+    if (sys.bench)
+        return 'ZMX cannot store the free-space bench. Use the Hissabeth project format.';
+    if (sys.pupil.kind === 'image_na')
+        return 'ZMX has no image-space NA aperture: switch the pupil to f-number, or use the Hissabeth project format.';
+    if (sys.custom_glasses.length > 0)
+        return 'ZMX export cannot embed custom glass catalogs. Use the Hissabeth project format.';
+    if (sys.object_material === 'FUSED_SILICA')
+        return 'ZMX catalogs have no FUSED_SILICA entry for the object material. Use the Hissabeth project format.';
+    const dummy = sys.surfaces.findIndex(
+        (x) => x.interaction === 'dummy' && (!x.transform || x.transform.return_after),
+    );
+    if (dummy >= 0)
+        return `ZMX has no plain dummy surfaces: remove surface ${dummy + 1}, attach a persistent COORDBRK transform, or use the Hissabeth project format.`;
+    const silica = sys.surfaces.findIndex((x) => x.material === 'FUSED_SILICA');
+    if (silica >= 0)
+        return `ZMX catalogs have no FUSED_SILICA entry for surface ${silica + 1}. Use the Hissabeth project format.`;
+    const asymmetric = sys.fields.findIndex(
+        (f) => f.vignetting[0] !== f.vignetting[1] || f.vignetting[2] !== f.vignetting[3],
+    );
+    if (asymmetric >= 0)
+        return `ZMX stores only symmetric VCX/VCY vignetting: field ${asymmetric + 1} has directional factors. Use the Hissabeth project format.`;
+    if (sys.surfaces.some((x) => x.gap_solve.kind !== 'fixed'))
+        return 'ZMX does not store gap solve relationships. Use the Hissabeth project format.';
+    return '';
+});
 const exportBlock = computed(() =>
-    !props.online ? tr('common.offline') : format.value === 'geopter' ? geopterBlock.value : '',
+    !props.online
+        ? tr('common.offline')
+        : format.value === 'geopter'
+          ? geopterBlock.value
+          : format.value === 'zmx'
+            ? zmxBlock.value
+            : '',
 );
 const stateBlock = computed(() =>
     !props.online
@@ -137,8 +172,9 @@ const downloadName = computed(() => {
     const f = textFormat.value;
     if (!f) return '';
     const base = safeName(
-        textFileBase.value ? textFileBase.value.replace(/\.json$/i, '') : textName.value,
+        textFileBase.value ? textFileBase.value.replace(/\.(json|zmx)$/i, '') : textName.value,
     );
+    if (f === 'zmx') return base.endsWith('.zmx') ? base : `${base}.zmx`;
     return base.endsWith(`.${f}`) ? `${base}.json` : `${base}.${f}.json`;
 });
 const downloadNote = computed(() =>
@@ -356,6 +392,75 @@ async function createBlank(): Promise<void> {
         creating.value = false;
     }
 }
+// ---- workspace project files (multi-project open / save-as / recent) -------
+const projects = ref<ProjectListResult | null>(null);
+const projectPath = ref('');
+const projectStatus = ref('');
+const projectError = ref('');
+const projectBusy = ref(false);
+
+async function refreshProjects(): Promise<void> {
+    if (!props.online) return;
+    try {
+        projects.value = await callTool('project_list', {});
+        if (!projectPath.value && projects.value.active_file) {
+            projectPath.value = projects.value.active_file;
+        }
+    } catch {
+        // non-fatal
+    }
+}
+
+async function openProjectPath(path: string): Promise<void> {
+    const trimmed = path.trim();
+    if (!trimmed || stateBlock.value || locked.value || projectBusy.value) return;
+    projectBusy.value = true;
+    projectError.value = '';
+    projectStatus.value = '';
+    try {
+        const ok = await props.mutate((rev) =>
+            callTool('project_open', { path: trimmed, revision: rev }),
+        );
+        if (ok) {
+            projectStatus.value = tr('proj.opened', { path: trimmed });
+            await refreshProjects();
+        }
+    } catch (e) {
+        projectError.value = errorMessage(e);
+    } finally {
+        projectBusy.value = false;
+    }
+}
+
+async function saveProjectAs(): Promise<void> {
+    const trimmed = projectPath.value.trim();
+    if (!trimmed || stateBlock.value || locked.value || projectBusy.value) return;
+    projectBusy.value = true;
+    projectError.value = '';
+    projectStatus.value = '';
+    try {
+        const ok = await props.mutate((rev) =>
+            callTool('project_save_as', { path: trimmed, revision: rev }),
+        );
+        if (ok) {
+            projectStatus.value = tr('proj.saved', { path: trimmed });
+            await refreshProjects();
+        }
+    } catch (e) {
+        projectError.value = errorMessage(e);
+    } finally {
+        projectBusy.value = false;
+    }
+}
+
+watch(
+    () => [props.online, props.revision],
+    () => {
+        void refreshProjects();
+    },
+    { immediate: true },
+);
+
 defineExpose({ openNew });
 </script>
 
@@ -368,6 +473,66 @@ defineExpose({ openNew });
         <div class="panel-head">
             <h3 id="ie-title">{{ tr('ie.title') }}</h3>
             <span>{{ tr('ie.subtitle') }}</span>
+        </div>
+        <div class="subpanel">
+            <h4>{{ tr('proj.title') }}</h4>
+            <p class="note">
+                {{ tr('proj.active') }}:
+                <code>{{ projects?.active_file || projects?.workspace_file || '—' }}</code>
+            </p>
+            <div class="controls">
+                <input
+                    v-model="projectPath"
+                    type="text"
+                    class="project-path-input"
+                    :placeholder="tr('proj.placeholder')"
+                    :disabled="locked || projectBusy"
+                />
+                <button
+                    type="button"
+                    :disabled="!!stateBlock || locked || projectBusy || !projectPath.trim()"
+                    @click="openProjectPath(projectPath)"
+                >
+                    <FolderOpen :size="14" /> {{ tr('proj.open') }}
+                </button>
+                <button
+                    type="button"
+                    class="primary"
+                    :disabled="!!stateBlock || locked || projectBusy || !projectPath.trim()"
+                    @click="saveProjectAs"
+                >
+                    <SaveAll :size="14" /> {{ tr('proj.saveAs') }}
+                </button>
+            </div>
+            <div v-if="projects?.saved_projects.length" class="recent-list">
+                <span class="note">{{ tr('proj.savedDir') }}:</span>
+                <button
+                    v-for="p in projects.saved_projects"
+                    :key="p"
+                    type="button"
+                    class="small"
+                    :disabled="!!stateBlock || locked || projectBusy"
+                    @click="openProjectPath(p)"
+                >
+                    {{ p.split('/').pop() }}
+                </button>
+            </div>
+            <div v-if="projects?.recent.length" class="recent-list">
+                <span class="note">{{ tr('proj.recent') }}:</span>
+                <button
+                    v-for="p in projects.recent"
+                    :key="p"
+                    type="button"
+                    class="small"
+                    :title="p"
+                    :disabled="!!stateBlock || locked || projectBusy"
+                    @click="openProjectPath(p)"
+                >
+                    {{ p.split('/').pop() }}
+                </button>
+            </div>
+            <p v-if="projectStatus" role="status" class="note">{{ projectStatus }}</p>
+            <p v-if="projectError" role="alert" class="json-error">{{ projectError }}</p>
         </div>
         <div class="analysis-controls">
             <div class="controls">
@@ -383,7 +548,7 @@ defineExpose({ openNew });
                     >{{ tr('ie.openFile') }}
                     <input
                         type="file"
-                        accept=".json,.txt,application/json,text/plain"
+                        accept=".json,.txt,.zmx,application/json,text/plain"
                         :disabled="locked"
                         @change="onFile"
                 /></label>
@@ -458,7 +623,13 @@ defineExpose({ openNew });
                     )
                 }}
             </p>
-            <p v-if="format === 'geopter' && online && exportBlock" class="note">
+            <p v-if="format === 'zmx'" class="note">
+                {{ tr('ie.zmxNote') }}
+            </p>
+            <p
+                v-if="(format === 'geopter' || format === 'zmx') && online && exportBlock"
+                class="note"
+            >
                 {{ exportBlock }}
             </p>
             <p v-if="importBlock" class="note">{{ importBlock }}</p>

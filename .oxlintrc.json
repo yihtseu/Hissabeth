@@ -1,0 +1,32 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    "plugins": ["typescript", "vue", "unicorn", "oxc"],
+    "categories": {
+        "correctness": "error",
+        "suspicious": "warn",
+        "perf": "warn"
+    },
+    "env": {
+        "browser": true
+    },
+    "ignorePatterns": ["dist/**", "src-tauri/**", "reference/**", "**/*.d.ts"],
+    "rules": {
+        "no-unused-vars": [
+            "error",
+            {
+                "argsIgnorePattern": "^_",
+                "varsIgnorePattern": "^_",
+                "caughtErrorsIgnorePattern": "^_"
+            }
+        ],
+        "typescript/no-explicit-any": "warn"
+    },
+    "overrides": [
+        {
+            "files": ["**/*.vue"],
+            "rules": {
+                "no-undef": "off"
+            }
+        }
+    ]
+}

@@ -3,11 +3,17 @@
 pub mod analysis;
 pub mod aperture;
 pub mod bench;
+pub mod bench_lab;
+pub mod coating;
+pub mod coord;
 pub mod editing;
 pub mod focus;
+pub mod gaussian;
 pub mod inspection;
 pub mod material;
 pub mod math;
+pub mod optimize;
+pub mod parallel;
 pub mod profile;
 pub mod project;
 #[cfg(test)]
@@ -16,7 +22,11 @@ pub mod report;
 pub mod sampling;
 pub mod solve;
 pub mod spec;
+pub mod tolerance;
 mod trace;
+pub mod zernike;
+pub mod zmx;
+pub use coord::CoordinateTransform;
 use math::*;
 pub use profile::{EndpointSurface, Profile};
 pub use sampling::{PupilSampling, SpectralComponent, Spectrum};
@@ -24,6 +34,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub use spec::*;
 
+/// Toroidal surface (ZEMAX TOROIDAL): a YZ conic profile swept about an axis
+/// parallel to Y at sagittal distance `revolution`. `even_y` holds even
+/// polynomial coefficients on y: y^4, y^6, ... (y^2 folds into `radius`).
+/// revolution = 0 makes the X section flat (a cylinder about Y).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Toroid {
+    pub revolution: f64,
+    #[serde(default)]
+    pub even_y: Vec<f64>,
+}
+/// Zernike Fringe sag (ZEMAX ZERNFRIN): additional sag
+/// Σ c_j·Z_j(x/normalize, y/normalize) in mm, Z_j in Fringe order (max 37).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SagZernike {
+    pub normalize: f64,
+    #[serde(default)]
+    pub coefficients: Vec<f64>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Surface {
@@ -37,6 +67,12 @@ pub struct Surface {
     pub conic: f64,
     pub even: Vec<f64>,
     pub odd: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toroid: Option<Toroid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zernike: Option<SagZernike>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CoordinateTransform>,
     pub interaction: Interaction,
     pub gap_solve: solve::GapSolve,
 }
@@ -53,10 +89,34 @@ impl Surface {
             conic: 0.,
             even: vec![],
             odd: vec![],
+            toroid: None,
+            zernike: None,
+            transform: None,
             interaction: Interaction::Refract,
             gap_solve: solve::GapSolve::Fixed {},
         }
     }
+}
+/// One multi-configuration operand: a per-configuration override of a shared
+/// prescription value. `surface` indexes the internal surfaces; object
+/// distance is a separate kind (ZEMAX THIC on the object surface).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Override {
+    Thickness { surface: usize, value: f64 },
+    Radius { surface: usize, value: f64 },
+    Conic { surface: usize, value: f64 },
+    Aperture { surface: usize, value: f64 },
+    Material { surface: usize, material: String },
+    ObjectDistance { value: Option<f64> },
+}
+/// A named configuration: the base prescription plus these overrides.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Configuration {
+    pub name: String,
+    #[serde(default)]
+    pub overrides: Vec<Override>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +141,13 @@ pub struct System {
     pub temperature: f64,
     pub pressure: f64,
     pub custom_glasses: Vec<material::Glass>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configurations: Vec<Configuration>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub active_configuration: usize,
+}
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 impl Default for System {
     fn default() -> Self {
@@ -128,6 +195,8 @@ impl Default for System {
             temperature: 20.,
             pressure: 101325.,
             custom_glasses: vec![],
+            configurations: vec![],
+            active_configuration: 0,
         }
     }
 }
@@ -136,6 +205,70 @@ pub fn index(name: &str, nm: f64) -> Result<f64, String> {
 }
 pub fn sag(s: &Surface, r: f64) -> Result<(f64, f64), String> {
     s.profile().sag(r)
+}
+impl System {
+    /// The prescription with one configuration's overrides applied. The
+    /// returned copy is not updated: callers resolve solves and derived
+    /// quantities with `update`. With no stored configurations only index 0
+    /// (the unmodified document) is valid.
+    pub fn configured(&self, index: usize) -> Result<System, String> {
+        if self.configurations.is_empty() {
+            if index != 0 {
+                return Err("Configuration index outside the configuration table".into());
+            }
+            return Ok(self.clone());
+        }
+        let configuration = self
+            .configurations
+            .get(index)
+            .ok_or("Configuration index outside the configuration table")?;
+        let mut s = self.clone();
+        for operand in &configuration.overrides {
+            match *operand {
+                Override::Thickness { surface, value } => {
+                    s.surfaces
+                        .get_mut(surface)
+                        .ok_or("Override surface outside prescription")?
+                        .thickness = value;
+                }
+                Override::Radius { surface, value } => {
+                    s.surfaces
+                        .get_mut(surface)
+                        .ok_or("Override surface outside prescription")?
+                        .radius = value;
+                }
+                Override::Conic { surface, value } => {
+                    s.surfaces
+                        .get_mut(surface)
+                        .ok_or("Override surface outside prescription")?
+                        .conic = value;
+                }
+                Override::Aperture { surface, value } => {
+                    s.surfaces
+                        .get_mut(surface)
+                        .ok_or("Override surface outside prescription")?
+                        .aperture = value;
+                }
+                Override::Material {
+                    surface,
+                    ref material,
+                } => {
+                    s.surfaces
+                        .get_mut(surface)
+                        .ok_or("Override surface outside prescription")?
+                        .material = material.clone();
+                }
+                Override::ObjectDistance { value } => s.object_distance = value,
+            }
+        }
+        Ok(s)
+    }
+    /// The active configuration's prescription, solved and validated.
+    pub fn resolved(&self) -> Result<System, String> {
+        let mut s = self.configured(self.active_configuration)?;
+        s.update()?;
+        Ok(s)
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Segment {
@@ -229,6 +362,28 @@ impl System {
     pub fn reference(&self) -> f64 {
         self.wavelengths[self.reference_wavelength].value
     }
+    pub fn has_transforms(&self) -> bool {
+        self.surfaces
+            .iter()
+            .any(|s| s.transform.as_ref().is_some_and(|t| !t.is_identity()))
+    }
+    /// Computes the active 3D local coordinate frame for every internal surface and the image surface.
+    pub fn surface_frames(&self) -> (Vec<coord::Frame>, coord::Frame) {
+        let mut frame = coord::Frame::identity();
+        let mut frames = Vec::with_capacity(self.surfaces.len());
+        for s in &self.surfaces {
+            let saved = frame;
+            if let Some(t) = &s.transform {
+                frame = frame.apply(t);
+            }
+            frames.push(frame);
+            if s.transform.as_ref().is_some_and(|t| t.return_after) {
+                frame = saved;
+            }
+            frame.translate_z(s.thickness);
+        }
+        (frames, frame)
+    }
     pub fn material_index(&self, name: &str, w: f64) -> Result<f64, String> {
         let matches: Vec<_> = self
             .custom_glasses
@@ -290,6 +445,9 @@ impl System {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_parameters()?;
         self.pupil_radius(self.reference())?;
+        if let Some(bench) = &self.bench {
+            bench.validate_groups(self)?;
+        }
         Ok(())
     }
     fn validate_parameters(&self) -> Result<(), String> {
@@ -385,11 +543,77 @@ impl System {
                 return Err("Invalid surface parameters".into());
             }
             s.profile().validate()?;
+            if let Some(t) = &s.transform {
+                t.validate()?;
+            }
             if s.clear_aperture {
-                sag(s, s.aperture)?;
+                let p = s.profile();
+                if p.is_radial() {
+                    sag(s, s.aperture)?;
+                } else {
+                    p.sag2(0., s.aperture)?;
+                }
             }
             for w in &self.wavelengths {
                 self.material_index(&s.material, w.value)?;
+            }
+        }
+        if self.configurations.len() > 64
+            || (self.configurations.is_empty() && self.active_configuration != 0)
+            || (!self.configurations.is_empty()
+                && self.active_configuration >= self.configurations.len())
+        {
+            return Err("Invalid configuration table".into());
+        }
+        for configuration in &self.configurations {
+            if configuration.name.len() > 256 || configuration.overrides.len() > 256 {
+                return Err("Invalid configuration".into());
+            }
+            let mut seen = std::collections::HashSet::new();
+            for operand in &configuration.overrides {
+                let (kind, surface, value) = match operand {
+                    Override::Thickness { surface, value } => ("thickness", *surface, *value),
+                    Override::Radius { surface, value } => ("radius", *surface, *value),
+                    Override::Conic { surface, value } => ("conic", *surface, *value),
+                    Override::Aperture { surface, value } => ("aperture", *surface, *value),
+                    Override::Material { surface, material } => {
+                        if material.is_empty() || material.len() > 256 {
+                            return Err("Invalid configuration material override".into());
+                        }
+                        for w in &self.wavelengths {
+                            self.material_index(material, w.value)
+                                .map_err(|e| format!("Configuration material {material}: {e}"))?;
+                        }
+                        ("material", *surface, 0.)
+                    }
+                    Override::ObjectDistance { value } => {
+                        if value.is_some_and(|d| !d.is_finite() || d <= 0.) {
+                            return Err(
+                                "Configuration object distance must be positive or null".into()
+                            );
+                        }
+                        ("object_distance", usize::MAX, 0.)
+                    }
+                };
+                if !seen.insert((kind, surface)) {
+                    return Err(format!(
+                        "Duplicate {kind} configuration operand on one surface"
+                    ));
+                }
+                if surface != usize::MAX && surface >= self.surfaces.len() {
+                    return Err("Override surface outside prescription".into());
+                }
+                if !value.is_finite() {
+                    return Err("Nonfinite configuration operand".into());
+                }
+                if kind == "aperture" && (value <= 0. || value > 1e9) {
+                    return Err("Configuration aperture outside range".into());
+                }
+                if kind == "thickness"
+                    && !matches!(self.surfaces[surface].gap_solve, solve::GapSolve::Fixed {})
+                {
+                    return Err("A solved gap cannot take a configuration thickness operand".into());
+                }
             }
         }
         Ok(())
@@ -516,11 +740,11 @@ impl System {
             if den.abs() < 1e-15 {
                 return Err("Image conjugate lies at infinity".into());
             }
-            -n * (m.a * t / n0 + m.b) / den
+            Some(-n * (m.a * t / n0 + m.b) / den)
         } else {
-            bfl.ok_or("Afocal system: infinite object has no finite image conjugate")?
+            bfl
         };
-        if !image_distance.is_finite() {
+        if image_distance.is_some_and(|distance| !distance.is_finite()) {
             return Err("Nonfinite paraxial image distance".into());
         }
         let magnification = self.object_distance.map(|t| 1. / (m.c * t / n0 + m.d));
@@ -534,6 +758,7 @@ impl System {
             .object_distance
             .map(|t| (n0 * (r / (t + entrance_distance)).atan().sin()).abs());
         let image_na = (n * (q_gain * r / n).atan().sin()).abs();
+        let f_number = (q_gain != 0.).then(|| 1. / (2. * (q_gain * r).abs()));
         // Image of the aperture stop in image space, measured from the last vertex.
         let (post, ni) = self.matrix(w, self.stop_index, self.surfaces.len())?;
         let exit_distance = if post.d.abs() > 1e-15 {
@@ -548,7 +773,7 @@ impl System {
             None
         };
         Ok(
-            json!({"efl":efl,"bfl":bfl,"f_number":1./(2.*(q_gain*r).abs()),"matrix":[m.a,m.b,m.c,m.d],"matrix_basis":"height, direction_sign * physical_index * dy/dz","image_direction":n.signum(),"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n.abs(),"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":powered.then(||n0*m.d/m.c)}),
+            json!({"efl":efl,"bfl":bfl,"f_number":f_number,"matrix":[m.a,m.b,m.c,m.d],"matrix_basis":"height, direction_sign * physical_index * dy/dz","image_direction":n.signum(),"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n.abs(),"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":powered.then(||n0*m.d/m.c)}),
         )
     }
     fn object_point(&self, field: &Field, _w: f64) -> Result<V3, String> {
@@ -586,7 +811,12 @@ impl System {
     }
     fn launch(&self, first: [f64; 2], field: &Field, w: f64) -> Result<trace::Launch, String> {
         let radial = first[0].hypot(first[1]);
-        let sag_at_vertex = sag(&self.surfaces[0], radial)?.0;
+        let first_profile = self.surfaces[0].profile();
+        let sag_at_vertex = if first_profile.is_radial() {
+            sag(&self.surfaces[0], radial)?.0
+        } else {
+            first_profile.sag2(first[0], first[1])?.0
+        };
         let plane = sag_at_vertex.min(0.) - radial.clamp(1., 100.) * 2.;
         if self.object_distance.is_some() {
             let obj = self.object_point(field, w)?;
@@ -661,6 +891,129 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configuration_overrides_apply_only_to_the_resolved_copy() {
+        let mut s = System::default();
+        s.configurations = vec![
+            Configuration {
+                name: "Base".into(),
+                overrides: vec![],
+            },
+            Configuration {
+                name: "Zoom".into(),
+                overrides: vec![
+                    Override::Thickness {
+                        surface: 1,
+                        value: 20.,
+                    },
+                    Override::ObjectDistance { value: Some(250.) },
+                ],
+            },
+        ];
+        s.active_configuration = 1;
+        s.update().unwrap();
+        let zoom = s.resolved().unwrap();
+        assert_eq!(zoom.surfaces[1].thickness, 20.);
+        assert_eq!(zoom.object_distance, Some(250.));
+        // The stored document keeps its base values.
+        assert_eq!(s.surfaces[1].thickness, 46.64);
+        assert_eq!(s.object_distance, None);
+        let base = s.configured(0).unwrap();
+        assert_eq!(base.surfaces[1].thickness, 46.64);
+        assert!(s.configured(2).is_err());
+        // An empty table resolves only index 0.
+        let plain = System::default();
+        assert!(plain.configured(1).is_err());
+    }
+    #[test]
+    fn invalid_configuration_tables_are_rejected() {
+        let with = |overrides: Vec<Override>| {
+            let mut s = System::default();
+            s.configurations = vec![
+                Configuration {
+                    name: "Base".into(),
+                    overrides: vec![],
+                },
+                Configuration {
+                    name: "Bad".into(),
+                    overrides,
+                },
+            ];
+            s.update()
+        };
+        assert!(
+            with(vec![Override::Thickness {
+                surface: 9,
+                value: 1.
+            }])
+            .unwrap_err()
+            .contains("outside prescription")
+        );
+        assert!(
+            with(vec![
+                Override::Conic {
+                    surface: 0,
+                    value: 1.
+                },
+                Override::Conic {
+                    surface: 0,
+                    value: 2.
+                }
+            ])
+            .unwrap_err()
+            .contains("Duplicate")
+        );
+        assert!(
+            with(vec![Override::Aperture {
+                surface: 0,
+                value: -1.
+            }])
+            .unwrap_err()
+            .contains("aperture")
+        );
+        assert!(
+            with(vec![Override::ObjectDistance { value: Some(-5.) }])
+                .unwrap_err()
+                .contains("object distance")
+        );
+        assert!(
+            with(vec![Override::Material {
+                surface: 0,
+                material: "NO_SUCH_GLASS".into()
+            }])
+            .unwrap_err()
+            .contains("NO_SUCH_GLASS")
+        );
+        // A solved gap cannot be overridden.
+        let mut s = System::default();
+        s.surfaces[1].gap_solve = solve::GapSolve::Pickup {
+            source: 0,
+            scale: 1.,
+            offset: 0.,
+        };
+        s.configurations = vec![
+            Configuration {
+                name: "Base".into(),
+                overrides: vec![],
+            },
+            Configuration {
+                name: "Bad".into(),
+                overrides: vec![Override::Thickness {
+                    surface: 1,
+                    value: 10.,
+                }],
+            },
+        ];
+        assert!(s.update().unwrap_err().contains("solved gap"));
+        // The active index must be inside the table.
+        let mut s = System::default();
+        s.configurations = vec![Configuration {
+            name: "Only".into(),
+            overrides: vec![],
+        }];
+        s.active_configuration = 1;
+        assert!(s.update().unwrap_err().contains("configuration table"));
+    }
     fn immersed_interface() -> System {
         let mut s = System::default();
         s.object_material = "1.500000:60.000000".into();

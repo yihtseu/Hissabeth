@@ -144,10 +144,19 @@ def project_lifecycle():
     assert json.loads(native)==s
     ray=tool("trace_ray",dict(x=3,y=4,field_index=0))
     assert ray["points"][-1]==[3,4,0]
+    first_order=tool("paraxial")
+    assert first_order["revision"]==new["revision"]
+    assert first_order["matrix"]==[1,0,0,1] and first_order["image_na"]==0
+    assert first_order["entrance_pupil_radius"]==first_order["exit_pupil_radius"]==5
+    for key in ["efl","bfl","front_focal_distance","image_distance","f_number","magnification"]:
+        assert first_order[key] is None, (key,first_order[key])
+    for name in ["longitudinal_aberration","chromatic_focus","spherochromatism"]:
+        tool(name,error=True)
     tool("autofocus",dict(revision=new["revision"]),error=True)
     assert tool("system_get")==new
     engine.terminate();engine.wait(timeout=5);(DATA/"endpoint.json").unlink(missing_ok=True);engine=start_engine()
     assert tool("system_get")["system"]==s
+    assert tool("paraxial")["image_distance"] is None
     print("PASS: real MCP new-project schemas/stale revisions, failed-write atomicity, clean blank specification, native export, unpowered tracing, rejected focus and same-relay restart")
 
 
