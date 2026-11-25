@@ -194,6 +194,8 @@ mod desktop {
         tauri::Builder::default()
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_store::Builder::default().build())
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_fs::init())
             .manage(engine.clone())
             .manage(Arc::new(Mutex::new(chat::Chat::load())))
             .setup(move |app| {
