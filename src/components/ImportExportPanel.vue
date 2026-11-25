@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { FolderOpen, SaveAll } from 'lucide-vue-next';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile } from '@tauri-apps/plugin-fs';
-import { callTool, errorMessage, inDesktop } from '../api';
+import { callTool, errorMessage, inDesktop, type ToolResult } from '../api';
 import type { ImportFormat, OpticalSystem, ProjectListResult } from '../types';
 
 const props = defineProps<{
@@ -199,11 +199,15 @@ function cancelFile(note = ''): void {
 }
 
 // A pending export is only valid for the format, system name and revision it was requested with.
-watch(format, () => {
-    cancelExport(tr('ie.cancelExportFormat'));
-    cancelFile(tr('ie.cancelFileFormat'));
-    textFormat.value = null;
-});
+watch(
+    format,
+    () => {
+        cancelExport(tr('ie.cancelExportFormat'));
+        cancelFile(tr('ie.cancelFileFormat'));
+        textFormat.value = null;
+    },
+    { flush: 'sync' },
+);
 watch([() => props.revision, () => props.system.name], () =>
     cancelExport(tr('ie.cancelExportSystem')),
 );
@@ -401,119 +405,135 @@ const projectPath = ref('');
 const projectStatus = ref('');
 const projectError = ref('');
 const projectBusy = ref(false);
+const projectPicking = ref(false);
+const projectBlocked = computed(
+    () => !!stateBlock.value || locked.value || projectBusy.value || projectPicking.value,
+);
 
-/** Native dialogs drive the desktop; browsers keep the path input and its Open / Save as buttons. */
 const desktop = inDesktop();
-const PROJECT_FILTERS = [{ name: 'Project', extensions: ['json', 'zmx'] }];
-/** Bumped on every dialog request; an older pick that resolves late is dropped. */
 let dialogToken = 0;
+let projectListToken = 0;
+
+function isZmxPath(path: string): boolean {
+    return /\.zmx$/i.test(path);
+}
+
+function fileName(path: string): string {
+    return path.split(/[\\/]/).pop() ?? path;
+}
 
 async function refreshProjects(): Promise<void> {
     if (!props.online) return;
+    const token = ++projectListToken;
     try {
-        projects.value = await callTool('project_list', {});
-        if (!projectPath.value && projects.value.active_file) {
-            projectPath.value = projects.value.active_file;
-        }
+        const list = await callTool('project_list', {});
+        if (disposed || token !== projectListToken) return;
+        projects.value = list;
+        if (!projectPath.value && list.active_file) projectPath.value = list.active_file;
     } catch {
         // non-fatal
     }
 }
 
-async function openProjectPath(path: string): Promise<boolean> {
+async function runProjectPath<N extends 'project_open' | 'project_save_as'>(
+    name: N,
+    path: string,
+    expected = props.revision,
+): Promise<ToolResult<N> | null> {
     const trimmed = path.trim();
-    if (!trimmed || stateBlock.value || locked.value || projectBusy.value) return false;
-    projectBusy.value = true;
+    if (!trimmed || disposed || projectBlocked.value) return null;
     projectError.value = '';
     projectStatus.value = '';
+    if (name === 'project_save_as' && isZmxPath(trimmed)) {
+        projectError.value = tr('proj.saveZmx');
+        return null;
+    }
+    projectBusy.value = true;
+    const result: { value: ToolResult<N> | null } = { value: null };
     try {
-        const ok = await props.mutate((rev) =>
-            callTool('project_open', { path: trimmed, revision: rev }),
-        );
-        if (ok) {
-            projectStatus.value = tr('proj.opened', { path: trimmed });
-            await refreshProjects();
-        }
-        return ok;
+        const ok = await props.mutate(async (revision) => {
+            if (disposed || revision !== expected) throw new Error(tr('proj.pickerStale'));
+            result.value = await callTool(name, { path: trimmed, revision: expected });
+        });
+        if (!ok || disposed || !result.value) return null;
+        projectPath.value = result.value.path;
+        projectStatus.value = tr(name === 'project_open' ? 'proj.opened' : 'proj.saved', {
+            path: result.value.path,
+        });
+        void refreshProjects();
+        return result.value;
     } catch (e) {
         projectError.value = errorMessage(e);
-        return false;
+        return null;
     } finally {
         projectBusy.value = false;
     }
 }
 
-async function saveProjectAs(): Promise<void> {
-    const trimmed = projectPath.value.trim();
-    if (!trimmed || stateBlock.value || locked.value || projectBusy.value) return;
-    projectBusy.value = true;
-    projectError.value = '';
-    projectStatus.value = '';
-    try {
-        const ok = await props.mutate((rev) =>
-            callTool('project_save_as', { path: trimmed, revision: rev }),
-        );
-        if (ok) {
-            projectStatus.value = tr('proj.saved', { path: trimmed });
-            await refreshProjects();
-        }
-    } catch (e) {
-        projectError.value = errorMessage(e);
-    } finally {
-        projectBusy.value = false;
-    }
-}
-
-/** Opens the native picker; resolves null on cancel and drops stale or superseded replies. */
-async function pickProjectPath(toSave: boolean): Promise<string | null> {
+async function browseProject(toSave: boolean): Promise<void> {
+    if (!desktop || projectBlocked.value) return;
     const token = ++dialogToken;
-    let path: string | null = null;
+    const revision = props.revision;
+    const fileRequest = fileToken;
+    const gen = textGen;
+    const selectedFormat = format.value;
+    const current = () => !disposed && token === dialogToken;
+    const previewCurrent = () =>
+        current() &&
+        !reading.value &&
+        !working.value &&
+        fileRequest === fileToken &&
+        gen === textGen &&
+        selectedFormat === format.value;
+
+    const typedPath = projectPath.value.trim();
+    projectPicking.value = true;
+    projectError.value = '';
+    let path: string | null;
     try {
         path = toSave
             ? await saveDialog({
                   defaultPath:
-                      projectPath.value.trim() || `${safeName(props.system.name)}.hissabeth.json`,
-                  filters: PROJECT_FILTERS,
+                      typedPath && !isZmxPath(typedPath)
+                          ? typedPath
+                          : `${safeName(props.system.name)}.hissabeth.json`,
+                  filters: [{ name: tr('proj.saveFilter'), extensions: ['json'] }],
               })
-            : await openDialog({ filters: PROJECT_FILTERS });
+            : await openDialog({
+                  filters: [{ name: tr('proj.openFilter'), extensions: ['json', 'zmx'] }],
+              });
     } catch (e) {
-        if (!disposed && token === dialogToken)
-            projectError.value = `Native file dialog is unavailable; type a path instead. (${errorMessage(e)})`;
-        return null;
+        if (current()) projectError.value = tr('proj.pickerFailed', { error: errorMessage(e) });
+        return;
+    } finally {
+        if (current()) projectPicking.value = false;
     }
-    if (disposed || token !== dialogToken) return null; // cancelled or superseded by a newer pick
-    return path;
-}
-
-async function browseOpenProject(): Promise<void> {
-    if (!desktop || !!stateBlock.value || locked.value || projectBusy.value) return;
-    projectError.value = '';
-    const path = await pickProjectPath(false);
-    if (!path) return; // cancel is not an error
-    projectPath.value = path;
-    const opened = await openProjectPath(path);
-    if (!opened) return;
-    // Mirror the browser file pick: show the opened project's text when it can be read.
+    if (!current() || !path) return;
+    if (revision !== props.revision || projectBlocked.value) {
+        projectError.value = tr('proj.pickerStale');
+        return;
+    }
+    if (toSave) {
+        await runProjectPath('project_save_as', path, revision);
+        return;
+    }
+    const opened = await runProjectPath('project_open', path, revision);
+    if (!opened || !previewCurrent() || opened.revision !== props.revision) return;
     try {
         const content = await readTextFile(path);
-        if (disposed) return;
+        if (!previewCurrent() || opened.revision !== props.revision || stateBlock.value) return;
+        const projectFormat = opened.linked ? 'hissabeth' : 'zmx';
+        format.value = projectFormat;
         setText(content, {
-            format: path.toLowerCase().endsWith('.zmx') ? 'zmx' : format.value,
+            format: projectFormat,
             name: props.system.name,
-            file: path.split('/').pop() ?? '',
+            file: fileName(path),
         });
+        status.value = tr('ie.fileLoaded', { name: fileName(path) });
+        error.value = '';
     } catch {
         // the text preview is optional; the project itself is already open
     }
-}
-
-async function browseSaveProject(): Promise<void> {
-    if (!desktop || !!stateBlock.value || locked.value || projectBusy.value) return;
-    projectError.value = '';
-    const path = await pickProjectPath(true);
-    if (!path) return; // cancel is not an error
-    projectPath.value = path;
-    await saveProjectAs();
 }
 
 watch(
@@ -531,7 +551,7 @@ defineExpose({ openNew });
     <section
         class="panel"
         aria-labelledby="ie-title"
-        :aria-busy="working || reading || importing || creating"
+        :aria-busy="working || reading || importing || creating || projectBusy || projectPicking"
     >
         <div class="panel-head">
             <h3 id="ie-title">{{ tr('ie.title') }}</h3>
@@ -543,49 +563,44 @@ defineExpose({ openNew });
                 {{ tr('proj.active') }}:
                 <code>{{ projects?.active_file || projects?.workspace_file || '—' }}</code>
             </p>
+            <div v-if="desktop" class="controls">
+                <button type="button" :disabled="projectBlocked" @click="browseProject(false)">
+                    <FolderOpen :size="14" /> {{ tr('proj.open') }}…
+                </button>
+                <button
+                    type="button"
+                    class="primary"
+                    :disabled="projectBlocked"
+                    @click="browseProject(true)"
+                >
+                    <SaveAll :size="14" /> {{ tr('proj.saveAs') }}…
+                </button>
+            </div>
             <div class="controls">
                 <input
                     v-model="projectPath"
                     type="text"
                     class="project-path-input"
                     :placeholder="tr('proj.placeholder')"
-                    :disabled="locked || projectBusy"
-                    @keyup.enter="desktop && openProjectPath(projectPath)"
+                    :aria-label="tr('proj.placeholder')"
+                    :disabled="locked || projectBusy || projectPicking"
+                    @keyup.enter="runProjectPath('project_open', projectPath)"
                 />
-                <template v-if="desktop">
-                    <button
-                        type="button"
-                        :disabled="!!stateBlock || locked || projectBusy"
-                        @click="browseOpenProject"
-                    >
-                        <FolderOpen :size="14" /> {{ tr('proj.open') }}…
-                    </button>
-                    <button
-                        type="button"
-                        class="primary"
-                        :disabled="!!stateBlock || locked || projectBusy"
-                        @click="browseSaveProject"
-                    >
-                        <SaveAll :size="14" /> {{ tr('proj.saveAs') }}…
-                    </button>
-                </template>
-                <template v-else>
-                    <button
-                        type="button"
-                        :disabled="!!stateBlock || locked || projectBusy || !projectPath.trim()"
-                        @click="openProjectPath(projectPath)"
-                    >
-                        <FolderOpen :size="14" /> {{ tr('proj.open') }}
-                    </button>
-                    <button
-                        type="button"
-                        class="primary"
-                        :disabled="!!stateBlock || locked || projectBusy || !projectPath.trim()"
-                        @click="saveProjectAs"
-                    >
-                        <SaveAll :size="14" /> {{ tr('proj.saveAs') }}
-                    </button>
-                </template>
+                <button
+                    type="button"
+                    :disabled="projectBlocked || !projectPath.trim()"
+                    @click="runProjectPath('project_open', projectPath)"
+                >
+                    <FolderOpen :size="14" /> {{ tr('proj.open') }}
+                </button>
+                <button
+                    type="button"
+                    :class="{ primary: !desktop }"
+                    :disabled="projectBlocked || !projectPath.trim()"
+                    @click="runProjectPath('project_save_as', projectPath)"
+                >
+                    <SaveAll :size="14" /> {{ tr('proj.saveAs') }}
+                </button>
             </div>
             <div v-if="projects?.saved_projects.length" class="recent-list">
                 <span class="note">{{ tr('proj.savedDir') }}:</span>
@@ -594,10 +609,10 @@ defineExpose({ openNew });
                     :key="p"
                     type="button"
                     class="small"
-                    :disabled="!!stateBlock || locked || projectBusy"
-                    @click="openProjectPath(p)"
+                    :disabled="projectBlocked"
+                    @click="runProjectPath('project_open', p)"
                 >
-                    {{ p.split('/').pop() }}
+                    {{ fileName(p) }}
                 </button>
             </div>
             <div v-if="projects?.recent.length" class="recent-list">
@@ -608,10 +623,10 @@ defineExpose({ openNew });
                     type="button"
                     class="small"
                     :title="p"
-                    :disabled="!!stateBlock || locked || projectBusy"
-                    @click="openProjectPath(p)"
+                    :disabled="projectBlocked"
+                    @click="runProjectPath('project_open', p)"
                 >
-                    {{ p.split('/').pop() }}
+                    {{ fileName(p) }}
                 </button>
             </div>
             <p v-if="projectStatus" role="status" class="note">{{ projectStatus }}</p>

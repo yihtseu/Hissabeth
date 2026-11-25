@@ -713,7 +713,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         />
                                         <MaterialsPanel
                                             v-if="tab === 'Materials'"
-                                            :model-value="wb.system.value"
+                                            v-model="wb.draft.value"
                                             :online="wb.online.value"
                                         />
                                         <ImportExportPanel

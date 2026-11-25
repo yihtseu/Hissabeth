@@ -86,7 +86,7 @@ function incidentMedium(i: number): string {
 /** Why the chosen surface cannot take a glass right now; empty when a target is ready. */
 const targetBlock = computed(() => {
     const t = targetSurface.value;
-    if (!t) return 'Select a surface in the layout or prescription to apply a glass to it.';
+    if (!t) return tr('mats.selectSurface');
     if (t.surface.interaction === 'reflect')
         return tr('rx.mirrorKeeps', {
             medium: incidentMedium(t.index),
@@ -103,7 +103,7 @@ function assign(key: string): void {
     const t = applyTarget.value;
     if (!t) return;
     const next = surfaces.value.slice();
-    next[t.index] = { ...next[t.index]!, material: key };
+    next[t.index] = { ...t.surface, material: key };
     emit('update:modelValue', { ...props.modelValue, surfaces: next });
     assigned.value = tr('mats.assigned', { n: t.index + 1, key });
 }
