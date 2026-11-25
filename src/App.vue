@@ -44,6 +44,7 @@ import { useAppearance } from './composables/useAppearance';
 import { tr } from './i18n';
 import { errorMessage } from './api';
 import { useWorkbench } from './composables/useWorkbench';
+import { hoverSurface } from './composables/useSurfaceSelection';
 import AnalysisPanel from './components/AnalysisPanel.vue';
 import ApertureTools from './components/ApertureTools.vue';
 import ConfigurationPanel from './components/ConfigurationPanel.vue';
@@ -118,7 +119,10 @@ const navDrawer = ref(false);
 const settingsError = ref('');
 const chatOpen = useLocalStorage('hissabeth.assistantOpen', true);
 const chatSize = useLocalStorage('hissabeth.assistantSize', 32);
-watch(tab, (value) => (savedView.value = value));
+watch(tab, (value) => {
+    savedView.value = value;
+    hoverSurface(null);
+});
 async function openSettings(section: unknown = 'general'): Promise<void> {
     try {
         await invoke('open_settings', { section: section === 'agents' ? 'agents' : 'general' });
@@ -652,6 +656,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         <OpticalLayoutView
                                             v-show="tab === 'Layout'"
                                             :system="wb.system.value"
+                                            :saved-to-draft="wb.savedToDraftSurfaceIndexes.value"
                                             :layout="wb.layout.value"
                                             :wavelength="wb.layoutWavelength.value"
                                             :revision="wb.revision.value"
@@ -732,9 +737,16 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             <SystemEditor v-model="wb.draft.value" />
                                             <SurfaceTable
                                                 v-model="wb.draft.value"
+                                                v-model:expanded="wb.expandedSurfaceDetails.value"
+                                                :surface-keys="wb.draftSurfaceKeys.value"
                                                 :materials="wb.materials.value"
                                                 :dirty="wb.dirty.value"
                                                 :online="wb.online.value"
+                                                :variables="
+                                                    wb.optimizationVariables.value ?? undefined
+                                                "
+                                                @toggle-variable="wb.toggleOptimizationVariable"
+                                                @structure-edit="wb.applySurfaceEdit"
                                             />
                                             <GapSolveEditor
                                                 :system="wb.system.value"
@@ -756,7 +768,11 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         </template>
                                         <OptimizePanel
                                             v-if="tab === 'Optimize'"
-                                            :system="wb.system.value"
+                                            v-model:variables="wb.optimizationVariables.value"
+                                            :system="wb.draft.value"
+                                            :draft-structure-changed="
+                                                wb.draftStructureChanged.value
+                                            "
                                             :paraxial="wb.paraxial.value"
                                             :revision="wb.revision.value"
                                             :online="wb.online.value"

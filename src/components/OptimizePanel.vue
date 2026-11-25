@@ -15,6 +15,7 @@ import type {
 
 const props = defineProps<{
     system: OpticalSystem;
+    draftStructureChanged: boolean;
     paraxial: Paraxial | null;
     revision: number;
     online: boolean;
@@ -28,7 +29,7 @@ const props = defineProps<{
 }>();
 
 /** Shared variable list: the surface table toggles entries, this panel edits their bounds. */
-const variables = defineModel<OptimizeVariable[]>('variables', { default: () => [] });
+const variables = defineModel<OptimizeVariable[] | null>('variables', { required: true });
 
 interface VarRow {
     id: number;
@@ -74,6 +75,7 @@ const canApply = computed(
 const canPreview = computed(
     () =>
         props.online &&
+        !props.draftStructureChanged &&
         !running.value &&
         !applying.value &&
         vars.value.length > 0 &&
@@ -159,7 +161,7 @@ function toVariable(r: VarRow, system: OpticalSystem): OptimizeVariable {
 function buildVariables(system: OpticalSystem): OptimizeVariable[] {
     return [
         ...vars.value.map((r) => toVariable(r, system)),
-        ...variables.value.filter((v) => !ROW_KINDS.has(v.kind)),
+        ...(variables.value ?? []).filter((v) => !ROW_KINDS.has(v.kind)),
     ];
 }
 
@@ -249,7 +251,7 @@ watch(
     (list) => {
         const pool = [...vars.value];
         const rows: VarRow[] = [];
-        for (const v of list) {
+        for (const v of list ?? []) {
             if (!ROW_KINDS.has(v.kind)) continue;
             const i = pool.findIndex((r) => rowKey(r, props.system) === varKey(v));
             const existing = i >= 0 ? pool.splice(i, 1)[0]! : null;
@@ -281,7 +283,7 @@ watch(
     { deep: true, flush: 'post' },
 );
 
-function loadPreset(): void {
+function presetVariables(): VarRow[] {
     const surfs = props.system.surfaces;
     const nextVars: VarRow[] = [];
     for (let i = 0; i < surfs.length; i++) {
@@ -310,8 +312,10 @@ function loadPreset(): void {
             max: '',
         });
     }
-    vars.value = nextVars;
+    return nextVars;
+}
 
+function presetOperands(): OpRow[] {
     const nextOps: OpRow[] = [
         {
             id: nextId++,
@@ -334,8 +338,8 @@ function loadPreset(): void {
             mode: 'eq',
         });
     }
-    for (let i = 0; i < surfs.length; i++) {
-        const s = surfs[i]!;
+    for (let i = 0; i < props.system.surfaces.length; i++) {
+        const s = props.system.surfaces[i]!;
         if (s.material !== 'AIR' && s.interaction === 'refract') {
             nextOps.push({
                 id: nextId++,
@@ -348,7 +352,12 @@ function loadPreset(): void {
             });
         }
     }
-    ops.value = nextOps;
+    return nextOps;
+}
+
+function loadPreset(): void {
+    vars.value = presetVariables();
+    ops.value = presetOperands();
     error.value = '';
     status.value = tr('opt.presetLoaded');
 }
@@ -423,14 +432,15 @@ async function runOptimization(apply: boolean): Promise<void> {
     }
 }
 
-// Seed preset automatically on first open if empty.
+// A null list has never been initialized. An empty list reflects variables removed by the user.
+if (variables.value === null) loadPreset();
+else ops.value = presetOperands();
+
 watch(
     () => props.system.surfaces.length,
     () => {
         const maxS = Math.max(0, props.system.surfaces.length - 1);
-        for (const v of vars.value) if (v.surface > maxS) v.surface = maxS;
         for (const o of ops.value) if (o.surface > maxS) o.surface = maxS;
-        if (vars.value.length === 0 && ops.value.length === 0) loadPreset();
     },
     { immediate: true },
 );
@@ -510,6 +520,7 @@ const fmt = (n: number) => (Math.abs(n) >= 1e-3 || n === 0 ? n.toFixed(5) : n.to
                     {{ applying ? tr('opt.applying') : tr('opt.apply') }}
                 </button>
             </div>
+            <p v-if="draftStructureChanged" class="note">{{ tr('opt.previewStructureChanged') }}</p>
             <p v-if="status" role="status" class="note">{{ status }}</p>
             <p v-if="error" role="alert" class="json-error">{{ error }}</p>
         </div>

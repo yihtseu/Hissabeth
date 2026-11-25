@@ -1864,6 +1864,7 @@ export default {
         running: '优化中…',
         applying: '应用中…',
         previewDone: '试算预览已完成；点击“优化并应用”可将结果写入工作区。',
+        previewStructureChanged: '请先应用或撤销表面结构改动，再运行优化预览。',
         applied: '优化结果已应用并保存到工作区。',
         dirtyHint: '提交优化结果前请先应用或还原未保存草稿。',
         variables: '优化变量',
