@@ -639,7 +639,9 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         class="small"
                                         :disabled="!online || surfaces.length >= 128"
                                         :aria-label="tr('rx.insertBefore', { n: i + 1 })"
-                                        @click.stop="runEdit({ kind: 'insert', before: i, count: 1 })"
+                                        @click.stop="
+                                            runEdit({ kind: 'insert', before: i, count: 1 })
+                                        "
                                     >
                                         +
                                     </button>
@@ -648,7 +650,9 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         class="small"
                                         :disabled="!online || surfaces.length === 1"
                                         :aria-label="tr('rx.removeSurface', { n: i + 1 })"
-                                        @click.stop="runEdit({ kind: 'remove', first: i, count: 1 })"
+                                        @click.stop="
+                                            runEdit({ kind: 'remove', first: i, count: 1 })
+                                        "
                                     >
                                         ×
                                     </button>

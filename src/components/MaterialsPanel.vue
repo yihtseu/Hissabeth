@@ -3,12 +3,14 @@ import { tr } from '../i18n';
 import { computed, onMounted, ref } from 'vue';
 import { callTool, errorMessage } from '../api';
 import type { CatalogWarning, MaterialSearchResult, OpticalSystem } from '../types';
+import { selectedSurfaceIndex } from '../composables/useSurfaceSelection';
 import { fmt } from '../chart';
 
 const props = defineProps<{
     modelValue: OpticalSystem;
     online: boolean;
 }>();
+const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
 
 const LIMIT = 20;
 const query = ref('');
@@ -57,6 +59,53 @@ const pageText = computed(() => {
 
 function warningText(w: CatalogWarning): string {
     return `${w.catalog}${w.glass ? ` / ${w.glass}` : ''}, line ${w.line}: ${w.message}`;
+}
+
+// ---- apply to the selected surface (draft only; the saved system is never written here) ----
+const assigned = ref('');
+
+const surfaces = computed(() => props.modelValue.surfaces);
+const targetSurface = computed(() => {
+    const i = selectedSurfaceIndex.value;
+    if (i === null) return null;
+    const s = surfaces.value[i];
+    return s ? { index: i, surface: s } : null;
+});
+/** Only refracting rows take a material; mirrors and dummies keep the incident medium. */
+const applyTarget = computed(() =>
+    targetSurface.value && targetSurface.value.surface.interaction === 'refract'
+        ? targetSurface.value
+        : null,
+);
+/** Medium a reflect or dummy row retains: the material of the last refracting row above it, else the object medium. */
+function incidentMedium(i: number): string {
+    for (let k = i - 1; k >= 0; k--)
+        if (surfaces.value[k]!.interaction === 'refract') return surfaces.value[k]!.material;
+    return props.modelValue.object_material;
+}
+/** Why the chosen surface cannot take a glass right now; empty when a target is ready. */
+const targetBlock = computed(() => {
+    const t = targetSurface.value;
+    if (!t) return tr('mats.selectSurface');
+    if (t.surface.interaction === 'reflect')
+        return tr('rx.mirrorKeeps', {
+            medium: incidentMedium(t.index),
+            material: t.surface.material,
+        });
+    if (t.surface.interaction === 'dummy')
+        return tr('rx.dummyKeeps', {
+            medium: incidentMedium(t.index),
+            material: t.surface.material,
+        });
+    return '';
+});
+function assign(key: string): void {
+    const t = applyTarget.value;
+    if (!t) return;
+    const next = surfaces.value.slice();
+    next[t.index] = { ...t.surface, material: key };
+    emit('update:modelValue', { ...props.modelValue, surfaces: next });
+    assigned.value = tr('mats.assigned', { n: t.index + 1, key });
 }
 
 // ---- index evaluation ---------------------------------------------------------
@@ -126,6 +175,13 @@ async function evaluate(): Promise<void> {
             </div>
         </form>
         <div v-if="searchError" role="alert" class="banner error inset">{{ searchError }}</div>
+        <p class="note">
+            <template v-if="applyTarget"
+                >{{ tr('mats.useOnSurface') }}: S{{ applyTarget.index + 1 }}</template
+            >
+            <template v-else>{{ targetBlock }}</template>
+        </p>
+        <p v-if="assigned" role="status" class="note">{{ assigned }}</p>
 
         <details v-if="found && found.warnings.length" class="catalog-warnings">
             <summary>
@@ -181,6 +237,23 @@ async function evaluate(): Promise<void> {
                             }}
                         </td>
                         <td class="row-actions">
+                            <button
+                                type="button"
+                                class="small"
+                                :disabled="!applyTarget"
+                                :aria-label="
+                                    applyTarget
+                                        ? `${tr('common.apply')} S${applyTarget.index + 1}: ${g.key}`
+                                        : tr('mats.useAria', { key: g.key })
+                                "
+                                @click="assign(g.key)"
+                            >
+                                {{
+                                    applyTarget
+                                        ? `${tr('common.apply')} S${applyTarget.index + 1}`
+                                        : tr('mats.use')
+                                }}
+                            </button>
                             <button
                                 type="button"
                                 class="small"

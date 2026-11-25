@@ -90,12 +90,7 @@ import PrescriptionReport from './components/PrescriptionReport.vue';
 import RayInspection from './components/RayInspection.vue';
 import RecoveryPanel from './components/RecoveryPanel.vue';
 import SpotView from './components/SpotView.vue';
-import {
-    TABS,
-    type OpticalSystem,
-    type ProjectListResult,
-    type Tab,
-} from './types';
+import { TABS, type OpticalSystem, type ProjectListResult, type Tab } from './types';
 
 useAppearance();
 const preferences = usePreferencesStore();
@@ -283,62 +278,71 @@ watch(projectMenuOpen, async (open) => {
     }
     await refreshProjects();
 });
-async function openProjectPath(path: string): Promise<void> {
+type ProjectCommand = 'project_open' | 'project_save_as';
+const projectPicking = ref(false);
+const canUseProject = computed(
+    () => canQuickAction.value && !benchDirty.value && !projectBusy.value && !projectPicking.value,
+);
+function showProjectError(message: string): void {
+    projectMenuError.value = message;
+    projectMenuOpen.value = true;
+}
+async function runProjectPath(
+    command: ProjectCommand,
+    path: string,
+    revision = wb.revision.value,
+): Promise<void> {
     const trimmed = path.trim();
-    if (!trimmed || projectBusy.value) return;
+    if (!trimmed || !canUseProject.value) return;
     projectBusy.value = true;
     projectMenuError.value = '';
     try {
-        const ok = await wb.mutate((rev) =>
-            callTool('project_open', { path: trimmed, revision: rev }),
-        );
+        const ok = await wb.mutate((current) => {
+            if (current !== revision) throw new Error(tr('proj.pickerStale'));
+            return callTool(command, { path: trimmed, revision });
+        });
         if (ok) projectMenuOpen.value = false;
-        else projectMenuError.value = tr('proj.openFailed', { reason: wb.actionError.value });
-    } catch (error) {
-        projectMenuError.value = tr('proj.openFailed', { reason: errorMessage(error) });
+        else
+            showProjectError(
+                tr(command === 'project_open' ? 'proj.openFailed' : 'proj.saveFailed', {
+                    reason: wb.actionError.value,
+                }),
+            );
     } finally {
         projectBusy.value = false;
     }
 }
-async function saveProjectAsPath(path: string): Promise<void> {
-    const trimmed = path.trim();
-    if (!trimmed || projectBusy.value) return;
-    projectBusy.value = true;
-    projectMenuError.value = '';
+async function browseProject(command: ProjectCommand): Promise<void> {
+    if (!canUseProject.value) return;
+    const revision = wb.revision.value;
+    projectPicking.value = true;
+    let path: string | null;
     try {
-        const ok = await wb.mutate((rev) =>
-            callTool('project_save_as', { path: trimmed, revision: rev }),
-        );
-        if (ok) projectMenuOpen.value = false;
-        else projectMenuError.value = tr('proj.saveFailed', { reason: wb.actionError.value });
-    } catch (error) {
-        projectMenuError.value = tr('proj.saveFailed', { reason: errorMessage(error) });
+        path =
+            command === 'project_open'
+                ? await openFileDialog({
+                      title: tr('proj.openDialog'),
+                      filters: [{ name: tr('proj.openFilter'), extensions: ['json', 'zmx'] }],
+                  })
+                : await saveFileDialog({
+                      title: tr('proj.saveAsDialog'),
+                      defaultPath: /\.zmx$/i.test(activeFileName.value)
+                          ? undefined
+                          : activeFileName.value || undefined,
+                      filters: [{ name: tr('proj.saveFilter'), extensions: ['json'] }],
+                  });
+    } catch {
+        await showPathFallback();
+        return;
     } finally {
-        projectBusy.value = false;
+        projectPicking.value = false;
     }
-}
-async function openProjectDialog(): Promise<void> {
-    try {
-        const path = await openFileDialog({
-            title: tr('proj.openDialog'),
-            filters: [{ name: 'Hissabeth project', extensions: ['json'] }],
-        });
-        if (typeof path === 'string' && path) await openProjectPath(path);
-    } catch {
-        await showPathFallback();
+    if (!path) return;
+    if (revision !== wb.revision.value || !canUseProject.value) {
+        showProjectError(tr('proj.pickerStale'));
+        return;
     }
-}
-async function saveProjectDialog(): Promise<void> {
-    try {
-        const path = await saveFileDialog({
-            title: tr('proj.saveAsDialog'),
-            defaultPath: activeFileName.value || undefined,
-            filters: [{ name: 'Hissabeth project', extensions: ['json'] }],
-        });
-        if (typeof path === 'string' && path) await saveProjectAsPath(path);
-    } catch {
-        await showPathFallback();
-    }
+    await runProjectPath(command, path, revision);
 }
 /** The dialog plugin is unavailable (browser or unregistered): reopen the menu on the path fallback. */
 async function showPathFallback(): Promise<void> {
@@ -406,11 +410,11 @@ useEventListener('keydown', (event: KeyboardEvent) => {
             void openSettings();
         } else if (event.key.toLowerCase() === 's') {
             event.preventDefault();
-            if (event.shiftKey) void saveProjectDialog();
+            if (event.shiftKey) void browseProject('project_save_as');
             else void unifiedSave();
         } else if (event.key.toLowerCase() === 'o') {
             event.preventDefault();
-            void openProjectDialog();
+            void browseProject('project_open');
         } else if (!typing && event.key.toLowerCase() === 'z' && !event.shiftKey) {
             if (canQuickAction.value && wb.canUndo.value) {
                 event.preventDefault();
@@ -711,9 +715,15 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                 ><DropdownMenuLabel class="menu-label">{{
                                     tr('app.projectMenu')
                                 }}</DropdownMenuLabel
-                                ><DropdownMenuItem class="menu-item" @select="openProjectDialog()"
+                                ><DropdownMenuItem
+                                    class="menu-item"
+                                    :disabled="!canUseProject"
+                                    @select="browseProject('project_open')"
                                     >{{ tr('proj.openDialog') }}<kbd>Ctrl+O</kbd></DropdownMenuItem
-                                ><DropdownMenuItem class="menu-item" @select="saveProjectDialog()"
+                                ><DropdownMenuItem
+                                    class="menu-item"
+                                    :disabled="!canUseProject"
+                                    @select="browseProject('project_save_as')"
                                     >{{ tr('proj.saveAsDialog')
                                     }}<kbd>Ctrl+Shift+S</kbd></DropdownMenuItem
                                 ><DropdownMenuItem class="menu-item" @select="newSystem()">{{
@@ -728,8 +738,9 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         v-for="path in projects.recent"
                                         :key="path"
                                         class="menu-item recent-item"
+                                        :disabled="!canUseProject"
                                         :title="path"
-                                        @select="openProjectPath(path)"
+                                        @select="runProjectPath('project_open', path)"
                                         >{{ path.split(/[\\/]/).pop() ?? path }}</DropdownMenuItem
                                     >
                                 </template>
@@ -751,19 +762,21 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             v-model="projectPath"
                                             type="text"
                                             :placeholder="tr('proj.pathPlaceholder')"
-                                            @keydown.enter.prevent="openProjectPath(projectPath)"
+                                            @keydown.enter.prevent="
+                                                runProjectPath('project_open', projectPath)
+                                            "
                                         />
                                         <button
                                             type="button"
-                                            :disabled="!projectPath.trim() || projectBusy"
-                                            @click="openProjectPath(projectPath)"
+                                            :disabled="!projectPath.trim() || !canUseProject"
+                                            @click="runProjectPath('project_open', projectPath)"
                                         >
                                             {{ tr('proj.openPath') }}
                                         </button>
                                         <button
                                             type="button"
-                                            :disabled="!projectPath.trim() || projectBusy"
-                                            @click="saveProjectAsPath(projectPath)"
+                                            :disabled="!projectPath.trim() || !canUseProject"
+                                            @click="runProjectPath('project_save_as', projectPath)"
                                         >
                                             {{ tr('proj.savePath') }}
                                         </button>

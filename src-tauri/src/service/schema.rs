@@ -556,7 +556,7 @@ fn build_tools() -> Value {
     );
     add(
         "project_save_as",
-        "Atomically save the current prescription to a file path on disk (relative paths resolve inside the workspace projects directory) and link future saves to it. Requires the current revision.",
+        "Atomically save the current prescription as Hissabeth JSON and link future saves to it. Relative paths resolve inside the workspace projects directory. Use project_export for ZMX. Requires the current revision.",
         json!({"path": string(), "revision": revision}),
         &["path", "revision"],
     );
