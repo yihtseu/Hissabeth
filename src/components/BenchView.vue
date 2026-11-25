@@ -1314,7 +1314,7 @@ defineExpose({ saveBench, discardBench });
                             <template v-if="entity.kind === 'lens_group'">
                                 <p class="note">
                                     {{ tr('optical.currentPrescription') }} ·
-                                    {{ groupSummary?.surfaces }} · {{ tr('metrics.eql') }}
+                                    {{ groupSummary?.surfaces }} · {{ tr('metrics.efl') }}
                                     {{
                                         groupSummary?.efl == null
                                             ? tr('common.dash')
