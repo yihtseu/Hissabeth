@@ -1,27 +1,15 @@
-<script lang="ts">
-import type { InjectionKey, Ref } from 'vue';
-
-/**
- * Shared surface hover/selection state; same shape as the useSurfaceSelection() composable
- * contract, provided by the app shell and injected by every surface table/view.
- */
-export interface SurfaceSelectionState {
-    hoveredSurfaceIndex: Ref<number | null>;
-    selectedSurfaceIndex: Ref<number | null>;
-    hoverSurface: (index: number | null) => void;
-    selectSurface: (index: number | null) => void;
-    clearSurfaceSelection: () => void;
-}
-export const SURFACE_SELECTION: InjectionKey<SurfaceSelectionState> = Symbol(
-    'hissabeth.surface-selection',
-);
-</script>
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { PenLine } from 'lucide-vue-next';
 import { tr } from '../i18n';
 import type { OpticalSystem, OptimizeVariable, Surface } from '../types';
 import { glassKey } from '../validation';
+import {
+    hoverSurface,
+    hoveredSurfaceIndex,
+    selectSurface,
+    selectedSurfaceIndex,
+} from '../composables/useSurfaceSelection';
 
 const props = defineProps<{
     system: OpticalSystem;
@@ -77,20 +65,7 @@ const known = computed(() => {
     return [...set];
 });
 
-// ---- shared surface hover/selection (locate + highlight) ---------------------
-const selection = inject(SURFACE_SELECTION, null);
-const localHovered = ref<number | null>(null);
-const localSelected = ref<number | null>(null);
-const hoveredSurfaceIndex = selection?.hoveredSurfaceIndex ?? localHovered;
-const selectedSurfaceIndex = selection?.selectedSurfaceIndex ?? localSelected;
-function hoverSurface(index: number | null): void {
-    if (selection) selection.hoverSurface(index);
-    else localHovered.value = index;
-}
-function selectSurface(index: number | null): void {
-    if (selection) selection.selectSurface(index);
-    else localSelected.value = index;
-}
+// ---- shared surface hover/selection (module state shared with LayoutView and the other surface views) ----
 const scrollBox = ref<HTMLElement>();
 watch(selectedSurfaceIndex, (index) => {
     if (index === null) return;
