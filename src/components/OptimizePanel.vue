@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { Play, Check, Plus, Trash2, Sparkles } from 'lucide-vue-next';
 import { callTool, errorMessage } from '../api';
 import { tr } from '../i18n';
+import { canonicalJson } from '../validation';
 import type {
     ConstraintMode,
     OpticalSystem,
@@ -17,12 +18,17 @@ const props = defineProps<{
     paraxial: Paraxial | null;
     revision: number;
     online: boolean;
-    dirty: boolean;
+    /** Kept for template compatibility; pending drafts are chained in automatically. */
+    dirty?: boolean;
     busy: boolean;
     stale: boolean;
     refreshPending: boolean;
-    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
+    /** Chains a valid pending draft, runs the operation with the current revision, then reloads. */
+    mutate: (op: (revision: number, system: OpticalSystem) => Promise<unknown>) => Promise<boolean>;
 }>();
+
+/** Shared variable list: the surface table toggles entries, this panel edits their bounds. */
+const variables = defineModel<OptimizeVariable[]>('variables', { default: () => [] });
 
 interface VarRow {
     id: number;
@@ -58,10 +64,8 @@ const result = ref<OptimizeResult | null>(null);
 const canApply = computed(
     () =>
         props.online &&
-        !props.dirty &&
         !props.busy &&
         !props.stale &&
-        !props.refreshPending &&
         !running.value &&
         !applying.value &&
         vars.value.length > 0 &&
@@ -83,57 +87,84 @@ function parseBound(raw: string): number | null {
     return Number.isFinite(n) ? n : null;
 }
 
-function buildVariables(): OptimizeVariable[] {
-    return vars.value.map((r): OptimizeVariable => {
-        const min = parseBound(r.min);
-        const max = parseBound(r.max);
-        switch (r.kind) {
-            case 'even_asphere':
-                return { kind: 'even_asphere', surface: r.surface, index: r.index, min, max };
-            case 'odd_asphere':
-                return { kind: 'odd_asphere', surface: r.surface, index: r.index, min, max };
-            case 'decenter':
-                return {
-                    kind: 'decenter',
-                    surface: r.surface,
-                    axis: r.axis === 'x' ? 'x' : 'y',
-                    min,
-                    max,
-                };
-            case 'tilt':
-                return { kind: 'tilt', surface: r.surface, axis: r.axis, min, max };
-            case 'config_thickness':
-                return {
-                    kind: 'config_thickness',
-                    configuration: props.system.active_configuration ?? 0,
-                    surface: r.surface,
-                    min,
-                    max,
-                };
-            case 'config_radius':
-                return {
-                    kind: 'config_radius',
-                    configuration: props.system.active_configuration ?? 0,
-                    surface: r.surface,
-                    min,
-                    max,
-                };
-            case 'radius':
-                return { kind: 'radius', surface: r.surface, min, max };
-            case 'thickness':
-                return { kind: 'thickness', surface: r.surface, min, max };
-            case 'conic':
-                return { kind: 'conic', surface: r.surface, min, max };
-            case 'model_glass_nd':
-                return { kind: 'model_glass_nd', surface: r.surface, min, max };
-            case 'model_glass_vd':
-                return { kind: 'model_glass_vd', surface: r.surface, min, max };
-        }
-    });
+/** Kinds this panel represents as table rows; other shared-list kinds pass through untouched. */
+const ROW_KINDS = new Set<string>([
+    'radius',
+    'thickness',
+    'conic',
+    'even_asphere',
+    'odd_asphere',
+    'model_glass_nd',
+    'model_glass_vd',
+    'decenter',
+    'tilt',
+]);
+
+function varKey(v: OptimizeVariable): string {
+    const parts: (string | number)[] = [v.kind, v.surface];
+    if ('index' in v) parts.push(v.index);
+    if ('axis' in v) parts.push(v.axis);
+    if ('configuration' in v) parts.push(v.configuration);
+    return parts.join(':');
+}
+const rowKey = (r: VarRow, system: OpticalSystem): string => varKey(toVariable(r, system));
+
+function toVariable(r: VarRow, system: OpticalSystem): OptimizeVariable {
+    const min = parseBound(r.min);
+    const max = parseBound(r.max);
+    switch (r.kind) {
+        case 'even_asphere':
+            return { kind: 'even_asphere', surface: r.surface, index: r.index, min, max };
+        case 'odd_asphere':
+            return { kind: 'odd_asphere', surface: r.surface, index: r.index, min, max };
+        case 'decenter':
+            return {
+                kind: 'decenter',
+                surface: r.surface,
+                axis: r.axis === 'x' ? 'x' : 'y',
+                min,
+                max,
+            };
+        case 'tilt':
+            return { kind: 'tilt', surface: r.surface, axis: r.axis, min, max };
+        case 'config_thickness':
+            return {
+                kind: 'config_thickness',
+                configuration: system.active_configuration ?? 0,
+                surface: r.surface,
+                min,
+                max,
+            };
+        case 'config_radius':
+            return {
+                kind: 'config_radius',
+                configuration: system.active_configuration ?? 0,
+                surface: r.surface,
+                min,
+                max,
+            };
+        case 'radius':
+            return { kind: 'radius', surface: r.surface, min, max };
+        case 'thickness':
+            return { kind: 'thickness', surface: r.surface, min, max };
+        case 'conic':
+            return { kind: 'conic', surface: r.surface, min, max };
+        case 'model_glass_nd':
+            return { kind: 'model_glass_nd', surface: r.surface, min, max };
+        case 'model_glass_vd':
+            return { kind: 'model_glass_vd', surface: r.surface, min, max };
+    }
 }
 
-function buildOperands(): OptimizeOperand[] {
-    const waves = props.system.wavelengths.map((w) => w.value);
+function buildVariables(system: OpticalSystem): OptimizeVariable[] {
+    return [
+        ...vars.value.map((r) => toVariable(r, system)),
+        ...variables.value.filter((v) => !ROW_KINDS.has(v.kind)),
+    ];
+}
+
+function buildOperands(system: OpticalSystem): OptimizeOperand[] {
+    const waves = system.wavelengths.map((w) => w.value);
     const wMin = waves.length ? Math.min(...waves) : 486.1327;
     const wMax = waves.length ? Math.max(...waves) : 656.2725;
     return ops.value.map((r) => {
@@ -210,6 +241,45 @@ function buildOperands(): OptimizeOperand[] {
         }
     });
 }
+
+// The shared list owns which variables exist; rows are its editable projection. Rebuild only when
+// the identity set changes so external toggles appear/disappear without disturbing in-progress typing.
+watch(
+    variables,
+    (list) => {
+        const pool = [...vars.value];
+        const rows: VarRow[] = [];
+        for (const v of list) {
+            if (!ROW_KINDS.has(v.kind)) continue;
+            const i = pool.findIndex((r) => rowKey(r, props.system) === varKey(v));
+            const existing = i >= 0 ? pool.splice(i, 1)[0]! : null;
+            rows.push(
+                existing ?? {
+                    id: nextId++,
+                    kind: v.kind,
+                    surface: v.surface,
+                    index: 'index' in v ? v.index : 0,
+                    axis: 'axis' in v ? v.axis : 'y',
+                    min: v.min != null ? String(v.min) : '',
+                    max: v.max != null ? String(v.max) : '',
+                },
+            );
+        }
+        if (rows.length !== vars.value.length || rows.some((r, i) => r.id !== vars.value[i]!.id))
+            vars.value = rows;
+    },
+    { immediate: true, deep: true },
+);
+
+// Row edits write back to the shared list (identity set plus parsed bounds), skipping no-op updates.
+watch(
+    vars,
+    () => {
+        const built = buildVariables(props.system);
+        if (canonicalJson(built) !== canonicalJson(variables.value)) variables.value = built;
+    },
+    { deep: true, flush: 'post' },
+);
 
 function loadPreset(): void {
     const surfs = props.system.surfaces;
@@ -310,16 +380,14 @@ function addOp(): void {
 async function runOptimization(apply: boolean): Promise<void> {
     error.value = '';
     status.value = '';
-    const variables = buildVariables();
-    const operands = buildOperands();
     if (apply) {
         applying.value = true;
         try {
             let captured: OptimizeResult | null = null;
-            const ok = await props.mutate(async (rev) => {
+            const ok = await props.mutate(async (rev, system) => {
                 captured = await callTool('optimize', {
-                    variables,
-                    operands,
+                    variables: buildVariables(system),
+                    operands: buildOperands(system),
                     max_iterations: maxIterations.value,
                     initial_damping: initialDamping.value,
                     apply: true,
@@ -341,8 +409,8 @@ async function runOptimization(apply: boolean): Promise<void> {
     running.value = true;
     try {
         result.value = await callTool('optimize', {
-            variables,
-            operands,
+            variables: buildVariables(props.system),
+            operands: buildOperands(props.system),
             max_iterations: maxIterations.value,
             initial_damping: initialDamping.value,
             apply: false,
@@ -442,7 +510,6 @@ const fmt = (n: number) => (Math.abs(n) >= 1e-3 || n === 0 ? n.toFixed(5) : n.to
                     {{ applying ? tr('opt.applying') : tr('opt.apply') }}
                 </button>
             </div>
-            <p v-if="dirty" class="note warn-text">{{ tr('opt.dirtyHint') }}</p>
             <p v-if="status" role="status" class="note">{{ status }}</p>
             <p v-if="error" role="alert" class="json-error">{{ error }}</p>
         </div>
