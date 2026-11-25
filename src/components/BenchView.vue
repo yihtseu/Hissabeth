@@ -130,12 +130,7 @@ const TEMPLATES = [
 ] as const;
 
 const canCommit = computed(
-    () =>
-        props.online &&
-        !props.busy &&
-        !props.stale &&
-        !props.refreshPending &&
-        !saving.value,
+    () => props.online && !props.busy && !props.stale && !props.refreshPending && !saving.value,
 );
 
 async function run(): Promise<void> {
