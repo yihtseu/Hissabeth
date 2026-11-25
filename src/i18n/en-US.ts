@@ -1951,6 +1951,8 @@ export default {
         running: 'Optimizing…',
         applying: 'Applying…',
         previewDone: 'Dry-run preview complete; click Optimize & apply to commit.',
+        previewStructureChanged:
+            'Apply or revert the surface changes to run an optimization preview.',
         applied: 'Optimization applied and saved to workspace.',
         dirtyHint: 'Apply or revert draft edits before committing optimization results.',
         variables: 'Variables',

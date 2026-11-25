@@ -13,6 +13,7 @@ import {
 
 const props = defineProps<{
     system: OpticalSystem;
+    savedToDraft?: (number | null)[];
     /** Draft system to edit; when bound, inline edits emit update:modelValue instead of staying read-only. */
     modelValue?: OpticalSystem | null;
     compact?: boolean;
@@ -41,6 +42,7 @@ const rows = computed(() => {
         z += surface.thickness;
         if (surface.interaction === 'refract') material = surface.material;
         return {
+            draftIndex: props.savedToDraft ? props.savedToDraft[i] ?? null : i,
             label: surface.label,
             interaction: surface.interaction,
             radius: surface.radius,
@@ -141,14 +143,14 @@ function toggleVariable(kind: 'radius' | 'thickness', surface: number): void {
                     <tr
                         v-for="(s, i) in rows"
                         :key="i"
-                        :data-surface-row="i"
+                        :data-surface-row="s.draftIndex"
                         :class="{
-                            'row-hover': hoveredSurfaceIndex === i,
-                            'row-selected': selectedSurfaceIndex === i,
+                            'row-hover': s.draftIndex !== null && hoveredSurfaceIndex === s.draftIndex,
+                            'row-selected': s.draftIndex !== null && selectedSurfaceIndex === s.draftIndex,
                         }"
-                        @mouseenter="hoverSurface(i)"
+                        @mouseenter="hoverSurface(s.draftIndex)"
                         @mouseleave="hoverSurface(null)"
-                        @click="selectSurface(i)"
+                        @click="s.draftIndex !== null && selectSurface(s.draftIndex)"
                     >
                         <th scope="row">{{ i + 1 }}{{ s.stop ? ' ◉' : '' }}</th>
                         <td>{{ s.label || '—' }}</td>
