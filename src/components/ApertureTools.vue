@@ -10,12 +10,13 @@ const props = defineProps<{
     system: OpticalSystem;
     revision: number;
     online: boolean;
-    dirty: boolean;
+    /** Kept for template compatibility; pending drafts are chained in automatically. */
+    dirty?: boolean;
     /** The saved view is outdated (changed elsewhere, or a committed change has not refreshed yet). */
     stale: boolean;
     busy: boolean;
-    /** Rejects unsaved drafts, runs the operation with the current revision, then reloads. */
-    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
+    /** Chains a valid pending draft, runs the operation with the current revision, then reloads. */
+    mutate: (op: (revision: number, system: OpticalSystem) => Promise<unknown>) => Promise<boolean>;
 }>();
 
 const DIRECTIONS = {
@@ -45,7 +46,6 @@ let reportToken = 0;
 const block = computed(() => {
     if (!props.online) return tr('common.offline');
     if (props.stale) return tr('aperture.blockStale');
-    if (props.dirty) return tr('aperture.blockDirty');
     return '';
 });
 
@@ -145,9 +145,9 @@ async function auto(): Promise<void> {
 async function clear(): Promise<void> {
     status.value = '';
     vigResult.value = null;
-    const next = clone(props.system);
-    for (const f of next.fields) f.vignetting = [0, 0, 0, 0];
-    const ok = await props.mutate(async (revision) => {
+    const ok = await props.mutate(async (revision, system) => {
+        const next = clone(system);
+        for (const f of next.fields) f.vignetting = [0, 0, 0, 0];
         await callTool('system_set', { system: next, revision });
     });
     if (ok) status.value = tr('aperture.clearStatus');

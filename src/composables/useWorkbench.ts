@@ -8,6 +8,7 @@ import type {
     Layout,
     MtfAxis,
     OpticalSystem,
+    OptimizeVariable,
     Paraxial,
     PupilSampling,
     RecoveryWorkspace,
@@ -25,6 +26,15 @@ import { canonicalJson, clone, fieldLabel, validateSystem } from '../validation'
 
 const FALLBACK_MATERIALS = ['AIR'];
 const DEFAULT_WAVELENGTH = 587.5618;
+
+/** Stable identity for an optimization variable (kind + addressing fields). */
+function variableKey(v: OptimizeVariable): string {
+    const parts: (string | number)[] = [v.kind, v.surface];
+    if ('index' in v) parts.push(v.index);
+    if ('axis' in v) parts.push(v.axis);
+    if ('configuration' in v) parts.push(v.configuration);
+    return parts.join(':');
+}
 
 export function useWorkbench(wantMtf: Ref<boolean>) {
     const preferences = usePreferencesStore();
@@ -55,6 +65,10 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     const recoveryNotice = ref<{ path: string | null } | null>(null);
     /** True after a confirmed retry/replacement until a fresh snapshot is read and applied or flagged stale. */
     const recoveryPending = ref(false);
+    /** Live Sync: on = a valid draft commits automatically shortly after edits settle; off = manual Apply. */
+    const liveSync = ref(false);
+    /** Shared optimization variable list: the surface table toggles entries, the optimize panel edits bounds. */
+    const optimizationVariables = ref<OptimizeVariable[]>([]);
     /** Last server-observed source text; the repair text is re-seeded only while it still matches. */
     let recoverySeed: string | null = null;
     /** Draft text captured when the current recovery action started; null outside one. */
@@ -547,49 +561,102 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
      * adopts any revision change. After a confirmed commit a failed or superseded refresh leaves
      * `refreshPending` set instead of reporting failure. A draft edited since entry is never replaced.
      */
+    let commitInflight: Promise<boolean> | null = null;
     async function commit(op: () => Promise<unknown>): Promise<boolean> {
         const draftAtRequest = canonicalJson(draft.value);
         busy.value = true;
-        try {
-            await op();
-        } catch (e) {
-            actionError.value = errorMessage(e); // not confirmed: the write may or may not have been applied
-            busy.value = false;
-            return false;
-        }
-        try {
-            actionError.value = '';
-            const snapshot = await callTool('system_get', {});
-            if (canonicalJson(draft.value) === draftAtRequest) {
-                adopt(snapshot);
-                online.value = true;
-                offlineReason.value = '';
-            } else {
-                // The user edited while the write ran: keep that edit and let the poll flag it for explicit reload.
-                pendingDraftText = draftAtRequest;
+        const run = (async (): Promise<boolean> => {
+            try {
+                await op();
+            } catch (e) {
+                actionError.value = errorMessage(e); // not confirmed: the write may or may not have been applied
+                return false;
+            }
+            try {
+                actionError.value = '';
+                const snapshot = await callTool('system_get', {});
+                if (canonicalJson(draft.value) === draftAtRequest) {
+                    adopt(snapshot);
+                    online.value = true;
+                    offlineReason.value = '';
+                } else {
+                    // The user edited while the write ran: keep that edit and let the poll flag it for explicit reload.
+                    pendingDraftText = draftAtRequest;
+                    refreshPending.value = true;
+                }
+            } catch {
+                pendingDraftText = draftAtRequest; // the poll adopts the saved snapshot once the engine answers, if the draft is unchanged
                 refreshPending.value = true;
             }
-        } catch {
-            pendingDraftText = draftAtRequest; // the poll adopts the saved snapshot once the engine answers, if the draft is unchanged
-            refreshPending.value = true;
+            return true;
+        })();
+        commitInflight = run;
+        try {
+            return await run;
         } finally {
+            if (commitInflight === run) commitInflight = null;
             busy.value = false;
         }
-        return true;
     }
 
-    async function save(next: OpticalSystem | null = draft.value): Promise<void> {
-        if (!next || busy.value || refreshPending.value || stale.value || recovery.value) return;
-        await commit(() =>
+    async function save(next: OpticalSystem | null = draft.value): Promise<boolean> {
+        if (!next || !system.value || !online.value || busy.value || recovery.value) return false;
+        if (refreshPending.value) {
+            actionError.value = tr('workbench.m1');
+            return false;
+        }
+        if (stale.value) {
+            actionError.value = tr('workbench.m2');
+            return false;
+        }
+        return commit(() =>
             callTool('system_set', { system: clone(next), revision: revision.value }),
         );
     }
 
-    async function autofocus(): Promise<void> {
-        if (busy.value || dirty.value || stale.value || refreshPending.value || recovery.value)
-            return;
+    /**
+     * The shared auto-apply path: commit the pending draft only when it is valid. Live Sync calls
+     * this once edits settle; mutate and autofocus chain it before their target operation so the
+     * engine works from the freshest revision. Refused states (offline, stale, refresh pending,
+     * recovery, busy, invalid draft) leave the draft untouched and resolve false.
+     */
+    async function applyDraft(): Promise<boolean> {
+        if (!dirty.value) return true;
+        if (problems.value.length > 0) return false; // surfaced by the draft problems list
+        return save();
+    }
+
+    /** Live Sync debounce: one pending auto-commit at a time, re-armed on every relevant change. */
+    let liveSyncTimer: ReturnType<typeof setTimeout> | undefined;
+    watch(
+        [dirty, problems, liveSync, online, stale, refreshPending, recovery, busy],
+        () => {
+            if (liveSyncTimer !== undefined) {
+                clearTimeout(liveSyncTimer);
+                liveSyncTimer = undefined;
+            }
+            if (!liveSync.value || !dirty.value || problems.value.length > 0) return;
+            if (!online.value || stale.value || refreshPending.value || recovery.value || busy.value)
+                return;
+            liveSyncTimer = setTimeout(() => {
+                liveSyncTimer = undefined;
+                void applyDraft();
+            }, 350);
+        },
+    );
+
+    async function autofocus(): Promise<boolean> {
+        if (recovery.value) return false;
+        if (commitInflight) await commitInflight; // a Live Sync auto-commit may be finishing; run after it
+        if (busy.value || stale.value || refreshPending.value) return false;
+        // Chain a valid pending draft first so the focus acts on the freshest prescription.
+        if (dirty.value && !(await applyDraft())) {
+            if (!actionError.value) actionError.value = tr('workbench.m3');
+            return false;
+        }
+        if (!system.value) return false;
         // The engine rejects the call if this revision is no longer current, so a stale view cannot apply it.
-        await commit(() =>
+        return commit(() =>
             callTool('autofocus', { wavelength: wavelength.value, revision: revision.value }),
         );
     }
@@ -605,12 +672,17 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     }
 
     /**
-     * Run a backend operation that rewrites the saved system (import, catalog import),
-     * then adopt the result. Refused while a draft is pending so it cannot be lost silently.
+     * Run a backend operation that rewrites the saved system (import, catalog import, solves,
+     * vignetting, optimization, bench edits), then adopt the result. A valid pending draft is
+     * chained into a system_set first so it is never lost; an invalid draft refuses the write.
      * Resolves true once the operation is confirmed, even if the refresh afterwards failed.
      */
-    async function mutate(op: (revision: number) => Promise<unknown>): Promise<boolean> {
-        if (busy.value || recovery.value) return false;
+    async function mutate(
+        op: (revision: number, system: OpticalSystem) => Promise<unknown>,
+    ): Promise<boolean> {
+        if (recovery.value) return false;
+        if (commitInflight) await commitInflight; // a Live Sync auto-commit may be finishing; run after it
+        if (busy.value) return false;
         if (refreshPending.value) {
             actionError.value = tr('workbench.m1');
             return false;
@@ -619,11 +691,23 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
             actionError.value = tr('workbench.m2');
             return false;
         }
-        if (dirty.value) {
-            actionError.value = tr('workbench.m3');
+        if (dirty.value && !(await applyDraft())) {
+            if (!actionError.value) actionError.value = tr('workbench.m3');
             return false;
         }
-        return commit(() => op(revision.value));
+        return commit(() => {
+            const sys = system.value;
+            if (!sys) throw new Error('No system loaded');
+            return op(revision.value, sys);
+        });
+    }
+
+    /** Add the variable when absent, remove it when present; surface V-badges drive this. */
+    function toggleOptimizationVariable(variable: OptimizeVariable): void {
+        const key = variableKey(variable);
+        const i = optimizationVariables.value.findIndex((v) => variableKey(v) === key);
+        if (i >= 0) optimizationVariables.value.splice(i, 1);
+        else optimizationVariables.value.push({ ...variable });
     }
 
     function revert(): void {
@@ -691,6 +775,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     );
     onBeforeUnmount(() => {
         if (timer !== undefined) clearInterval(timer);
+        if (liveSyncTimer !== undefined) clearTimeout(liveSyncTimer);
         unlistenWorkspace?.();
     });
 
@@ -736,6 +821,10 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         recoveryError,
         recoveryNotice,
         save,
+        applyDraft,
+        liveSync,
+        optimizationVariables,
+        toggleOptimizationVariable,
         autofocus,
         undo,
         redo,

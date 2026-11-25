@@ -32,49 +32,74 @@ import { profileCurve } from '../profile';
 import { canonicalJson, clone } from '../validation';
 import HeatMap from './HeatMap.vue';
 import BenchLabPanel from './BenchLabPanel.vue';
-import type { OpticalSystem } from '../types';
+import type { OpticalSystem, Paraxial } from '../types';
 
 const props = defineProps<{
     system: OpticalSystem;
     revision: number;
     online: boolean;
-    dirty: boolean;
+    /** Kept for template compatibility; pending drafts are chained in automatically. */
+    dirty?: boolean;
     busy: boolean;
     stale: boolean;
     refreshPending: boolean;
-    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
+    /** Chains a valid pending draft, runs the operation with the current revision, then reloads. */
+    mutate: (op: (revision: number, system: OpticalSystem) => Promise<unknown>) => Promise<boolean>;
     mode: '2d' | '3d';
+    paraxial?: Paraxial | null;
     chatOpen?: boolean;
 }>();
-const emit = defineEmits<{ inspectGroup: []; chat: [] }>();
+const emit = defineEmits<{ inspectGroup: []; chat: []; 'update:benchDirty': [dirty: boolean] }>();
 const selected = defineModel<string>('selected', { default: '' });
 
 // Local bench draft enables smooth 2D dragging, catalog placement & Auto-Aim with live preview before committing.
 const draft = ref<Bench | null>(null);
+const saving = ref(false);
 const benchDirty = computed(() => {
     if (!draft.value && !props.system.bench) return false;
     return canonicalJson(draft.value) !== canonicalJson(props.system.bench ?? null);
 });
 const scene = computed(() => draft.value ?? props.system.bench ?? null);
 
+// Canonical of the saved bench the local draft was based on. A chained sequential system_set replays
+// that same base bench, which must not wipe a dirty local bench draft while a unified save runs.
+let savedBenchBase = '';
 watch(
     () => [props.revision, props.system.bench],
     () => {
+        const incoming = canonicalJson(props.system.bench ?? null);
+        if (saving.value) {
+            savedBenchBase = incoming;
+            return;
+        }
+        if (benchDirty.value && incoming === savedBenchBase) return;
         draft.value = props.system.bench ? clone(props.system.bench) : null;
+        savedBenchBase = incoming;
     },
     { immediate: true },
 );
+watch(benchDirty, (d) => emit('update:benchDirty', d), { flush: 'post' });
 
 const allEntities = computed(() => [
     ...(scene.value?.elements ?? []),
     ...(scene.value?.sources ?? []),
 ]);
 const entity = computed(() => allEntities.value.find((e) => e.id === selected.value));
+/** Referenced sequential prescription summary for the selected lens group. */
+const groupSummary = computed(() => {
+    const e = entity.value;
+    if (!e || !('kind' in e) || e.kind !== 'lens_group') return null;
+    const surfaces = props.system.surfaces;
+    return {
+        surfaces: surfaces.length,
+        efl: props.paraxial?.efl ?? null,
+        maxAperture: surfaces.reduce((m, s) => Math.max(m, s.aperture), 0),
+    };
+});
 const trace = ref<BenchTrace | null>(null);
 const labCheck = ref<BenchLabCheck | null>(null);
 const pending = ref(false);
 const labPending = ref(false);
-const saving = ref(false);
 const error = ref('');
 const statusMsg = ref('');
 const branch = ref('');
@@ -107,7 +132,6 @@ const TEMPLATES = [
 const canCommit = computed(
     () =>
         props.online &&
-        !props.dirty &&
         !props.busy &&
         !props.stale &&
         !props.refreshPending &&
@@ -768,6 +792,9 @@ async function exportDeliverable(): Promise<void> {
         error.value = errorMessage(e);
     }
 }
+
+// Exposed so the surrounding layout (and the app toolbar) can drive the unified bench draft.
+defineExpose({ saveBench, discardBench });
 </script>
 
 <template>
@@ -1284,13 +1311,22 @@ async function exportDeliverable(): Promise<void> {
                                 {{ tr('optical.mount') }}
                                 <span>{{ entity.mount.part }}</span>
                             </label>
-                            <button
-                                v-if="entity.kind === 'lens_group'"
-                                type="button"
-                                @click="emit('inspectGroup')"
-                            >
-                                {{ tr('optical.inspectGroup') }}
-                            </button>
+                            <template v-if="entity.kind === 'lens_group'">
+                                <p class="note">
+                                    {{ tr('optical.currentPrescription') }} ·
+                                    {{ groupSummary?.surfaces }} · {{ tr('metrics.eql') }}
+                                    {{
+                                        groupSummary?.efl == null
+                                            ? tr('common.dash')
+                                            : fixed(groupSummary.efl) + ' mm'
+                                    }}
+                                    · {{ tr('bench.aperture') }}
+                                    {{ fixed(groupSummary?.maxAperture ?? 0) }} mm
+                                </p>
+                                <button type="button" @click="emit('inspectGroup')">
+                                    {{ tr('optical.inspectGroup') }}
+                                </button>
+                            </template>
                         </template>
 
                         <template v-else>
