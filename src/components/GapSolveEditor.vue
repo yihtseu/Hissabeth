@@ -17,12 +17,13 @@ const props = defineProps<{
     /** The saved system: solves act on it, never on an unapplied draft. */
     system: OpticalSystem;
     online: boolean;
-    dirty: boolean;
+    /** Kept for template compatibility; pending drafts are chained in automatically. */
+    dirty?: boolean;
     /** The saved view is outdated (changed elsewhere, or a committed change has not refreshed yet). */
     stale: boolean;
     busy: boolean;
-    /** Rejects unsaved drafts, runs the operation with the current revision, then reloads. */
-    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
+    /** Chains a valid pending draft, runs the operation with the current revision, then reloads. */
+    mutate: (op: (revision: number, system: OpticalSystem) => Promise<unknown>) => Promise<boolean>;
 }>();
 
 type ActiveKind = Exclude<SolveKind, 'fixed'>;
@@ -146,7 +147,6 @@ watch(count, (n) => {
 const commonBlock = computed(() => {
     if (!props.online) return tr('common.offline');
     if (props.stale) return tr('solve.blockStale');
-    if (props.dirty) return tr('solve.blockDirty');
     return '';
 });
 
