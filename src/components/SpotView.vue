@@ -14,7 +14,7 @@ import type {
     SpotDiagram,
 } from '../types';
 import { fieldLabel } from '../validation';
-import RaySamplingControl from './RaySamplingControl.vue';
+import AnalysisToolbar from './AnalysisToolbar.vue';
 import SpotCanvas from './SpotCanvas.vue';
 import SpectralLedger, { type LedgerRow } from './SpectralLedger.vue';
 
@@ -103,54 +103,25 @@ const um = (v: number): string => (v * 1000).toFixed(2);
 
 <template>
     <section class="panel" aria-labelledby="spot-title">
-        <div class="panel-head">
-            <h3 id="spot-title">{{ tr('spot.title') }}</h3>
-            <div class="controls">
-                <label
-                    >{{ tr('spot.view') }}
-                    <select v-model="mode">
-                        <option value="single">{{ tr('spot.viewSingle') }}</option>
-                        <option value="all">{{ tr('spot.viewAll') }}</option>
-                    </select>
-                </label>
-                <label
-                    >{{ tr('spot.field') }}
-                    <select
-                        :value="fieldIndex"
-                        @change="
-                            emit(
-                                'update:fieldIndex',
-                                Number(($event.target as HTMLSelectElement).value),
-                            )
-                        "
-                    >
-                        <option v-for="(_, i) in system.fields" :key="i" :value="i">
-                            {{ fieldLabel(system, i) }}
-                        </option>
-                    </select>
-                </label>
-                <label v-if="mode === 'single'"
-                    >{{ tr('spot.wavelength') }}
-                    <select
-                        :value="wavelengthIndex"
-                        @change="
-                            emit(
-                                'update:wavelengthIndex',
-                                Number(($event.target as HTMLSelectElement).value),
-                            )
-                        "
-                    >
-                        <option v-for="(w, i) in system.wavelengths" :key="i" :value="i">
-                            {{ i + 1 }}: {{ w.value }} nm
-                        </option>
-                    </select>
-                </label>
-                <RaySamplingControl
-                    :model-value="sampling"
-                    @update:model-value="emit('update:sampling', $event)"
-                />
-            </div>
-        </div>
+        <AnalysisToolbar
+            title-id="spot-title"
+            :title="tr('spot.title')"
+            :system="system"
+            :field-index="fieldIndex"
+            :wavelength-index="mode === 'single' ? wavelengthIndex : undefined"
+            :sampling="sampling"
+            @update:field-index="emit('update:fieldIndex', $event)"
+            @update:wavelength-index="emit('update:wavelengthIndex', $event)"
+            @update:sampling="emit('update:sampling', $event)"
+        >
+            <label
+                >{{ tr('spot.view') }}
+                <select v-model="mode">
+                    <option value="single">{{ tr('spot.viewSingle') }}</option>
+                    <option value="all">{{ tr('spot.viewAll') }}</option>
+                </select>
+            </label>
+        </AnalysisToolbar>
         <div v-if="mode === 'all' && polyError" role="alert" class="banner error inset">
             {{ polyError }}
         </div>
