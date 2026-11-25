@@ -3,7 +3,14 @@ import { tr } from '../i18n';
 import { computed, onBeforeUnmount, reactive, ref, watch, watchEffect } from 'vue';
 import NumberField from './NumberField.vue';
 import NumberListField from './NumberListField.vue';
-import { useSurfaceSelection } from '../composables/useSurfaceSelection';
+import {
+    hoveredSurfaceIndex,
+    selectedSurfaceIndex,
+    hoverSurface,
+    selectSurface,
+    clearSurfaceSelection,
+    syncSurfaceSelection,
+} from '../composables/useSurfaceSelection';
 import type {
     Interaction,
     OpticalSystem,
@@ -55,14 +62,14 @@ function patch(i: number, p: Partial<Surface>): void {
 
 // ---- shared surface hover/selection (linked optical layout highlighting) --------
 
-const {
-    hoveredSurfaceIndex,
-    selectedSurfaceIndex,
-    hoverSurface,
-    selectSurface,
-    clearSurfaceSelection,
-} = useSurfaceSelection();
 const scrollRegion = ref<HTMLElement | null>(null);
+
+/** Report the surface count so the shared module drops stale indexes after structural edits. */
+watch(
+    () => surfaces.value.length,
+    (n) => syncSurfaceSelection(n),
+    { immediate: true },
+);
 
 watch(selectedSurfaceIndex, (v) => {
     if (v === null || v < 0 || v >= surfaces.value.length) return;
@@ -74,8 +81,8 @@ watch(selectedSurfaceIndex, (v) => {
 
 // ---- progressive disclosure: advanced profile cards in expandable detail rows ---
 
-/** Per-row view state; rows carrying advanced data start expanded so nothing already in the model is hidden. */
-const expanded = reactive<Record<number, boolean>>({});
+/** Per-row view state keyed by surface identity, so insert/remove never shifts it onto another row. */
+const expanded = reactive(new WeakMap<Surface, boolean>());
 function rowHasData(s: Surface | undefined): boolean {
     if (!s) return false;
     return (
@@ -88,18 +95,18 @@ function rowHasData(s: Surface | undefined): boolean {
     );
 }
 watchEffect(() => {
-    surfaces.value.forEach((s, i) => {
-        if (!(i in expanded) && rowHasData(s)) expanded[i] = true;
-    });
+    for (const s of surfaces.value) {
+        if (!expanded.has(s) && rowHasData(s)) expanded.set(s, true);
+    }
 });
-function isOpen(i: number): boolean {
-    return !!expanded[i];
+function isOpen(s: Surface): boolean {
+    return expanded.get(s) ?? rowHasData(s);
 }
-function toggleOpen(i: number): void {
-    expanded[i] = !isOpen(i);
+function toggleOpen(s: Surface): void {
+    expanded.set(s, !isOpen(s));
 }
-function openDetail(i: number): void {
-    expanded[i] = true;
+function openDetail(s: Surface): void {
+    expanded.set(s, true);
 }
 /** Highlight capsules for every advanced profile a row carries. */
 function profileChips(s: Surface): string[] {
@@ -375,12 +382,12 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         <button
                                             type="button"
                                             class="row-toggle"
-                                            :aria-expanded="isOpen(i)"
+                                            :aria-expanded="isOpen(s)"
                                             :aria-controls="`rx-detail-${i}`"
                                             :aria-label="`Surface ${i + 1} details`"
-                                            @click.stop="toggleOpen(i)"
+                                            @click.stop="toggleOpen(s)"
                                         >
-                                            {{ isOpen(i) ? '▾' : '▸' }}
+                                            {{ isOpen(s) ? '▾' : '▸' }}
                                         </button>
                                         <span class="surface-index">{{ i + 1 }}</span>
                                         <input
@@ -398,7 +405,7 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                             type="button"
                                             class="profile-chip"
                                             :aria-label="`Surface ${i + 1} ${chip} details`"
-                                            @click.stop="openDetail(i)"
+                                            @click.stop="openDetail(s)"
                                         >
                                             {{ chip }}
                                         </button>
@@ -650,7 +657,7 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                 </td>
                             </tr>
                             <tr
-                                v-if="isOpen(i)"
+                                v-if="isOpen(s)"
                                 :id="`rx-detail-${i}`"
                                 class="rx-detail-row"
                                 @mouseenter="hoverSurface(i)"
