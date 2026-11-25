@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { tr } from '../i18n';
-import { computed, onBeforeUnmount, reactive, ref, watch, watchEffect } from 'vue';
+import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue';
 import NumberField from './NumberField.vue';
 import NumberListField from './NumberListField.vue';
 import {
@@ -8,8 +8,6 @@ import {
     selectedSurfaceIndex,
     hoverSurface,
     selectSurface,
-    clearSurfaceSelection,
-    syncSurfaceSelection,
 } from '../composables/useSurfaceSelection';
 import type {
     Interaction,
@@ -28,6 +26,7 @@ const props = withDefaults(
         materials: string[];
         dirty: boolean;
         online: boolean;
+        surfaceKeys: number[];
         /** Active optimization variables; a `V` badge shows next to Radius/Thickness/Conic when present. */
         variables?: OptimizeVariable[];
     }>(),
@@ -36,7 +35,9 @@ const props = withDefaults(
 const emit = defineEmits<{
     'update:modelValue': [value: OpticalSystem];
     'toggle-variable': [variable: OptimizeVariable];
+    'structure-edit': [result: SurfaceEditResult];
 }>();
+const expanded = defineModel<ReadonlyMap<number, boolean>>('expanded', { required: true });
 
 const surfaces = computed(() => props.modelValue.surfaces);
 const known = computed(() => {
@@ -64,25 +65,19 @@ function patch(i: number, p: Partial<Surface>): void {
 
 const scrollRegion = ref<HTMLElement | null>(null);
 
-/** Report the surface count so the shared module drops stale indexes after structural edits. */
 watch(
-    () => surfaces.value.length,
-    (n) => syncSurfaceSelection(n),
-    { immediate: true },
+    [scrollRegion, selectedSurfaceIndex],
+    ([region, index]) => {
+        if (index === null) return;
+        region
+            ?.querySelector<HTMLElement>(`[data-surface-row="${index}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+    },
+    { flush: 'post' },
 );
-
-watch(selectedSurfaceIndex, (v) => {
-    if (v === null || v < 0 || v >= surfaces.value.length) return;
-    requestAnimationFrame(() => {
-        const row = scrollRegion.value?.querySelector<HTMLElement>(`[data-surface-row="${v}"]`);
-        row?.scrollIntoView({ block: 'nearest' });
-    });
-});
 
 // ---- progressive disclosure: advanced profile cards in expandable detail rows ---
 
-/** Per-row view state keyed by surface identity, so insert/remove never shifts it onto another row. */
-const expanded = reactive(new WeakMap<Surface, boolean>());
 function rowHasData(s: Surface | undefined): boolean {
     if (!s) return false;
     return (
@@ -95,18 +90,21 @@ function rowHasData(s: Surface | undefined): boolean {
     );
 }
 watchEffect(() => {
-    for (const s of surfaces.value) {
-        if (!expanded.has(s) && rowHasData(s)) expanded.set(s, true);
+    const advanced = props.surfaceKeys.filter(
+        (key, index) => !expanded.value.has(key) && rowHasData(surfaces.value[index]),
+    );
+    if (advanced.length) {
+        expanded.value = new Map([
+            ...expanded.value,
+            ...advanced.map((key) => [key, true] as const),
+        ]);
     }
 });
-function isOpen(s: Surface): boolean {
-    return expanded.get(s) ?? rowHasData(s);
+function isOpen(index: number): boolean {
+    return expanded.value.get(props.surfaceKeys[index]!) ?? rowHasData(surfaces.value[index]);
 }
-function toggleOpen(s: Surface): void {
-    expanded.set(s, !isOpen(s));
-}
-function openDetail(s: Surface): void {
-    expanded.set(s, true);
+function setDetailOpen(index: number, open: boolean): void {
+    expanded.value = new Map(expanded.value).set(props.surfaceKeys[index]!, open);
 }
 /** Highlight capsules for every advanced profile a row carries. */
 function profileChips(s: Surface): string[] {
@@ -257,7 +255,7 @@ async function runEdit(operation: SurfaceEditOperation): Promise<void> {
                 ? `Inserted ${n} plane dummy ${n === 1 ? 'surface' : 'surfaces'} (zero gap, unclipped, incident medium) before ${operation.before >= oldCount ? tr('rx.insertedImage') : tr('rx.insertedSurface', { n: operation.before + 1 })}.`
                 : `Removed ${n} ${n === 1 ? 'surface' : 'surfaces'} starting at surface ${operation.first + 1}.`;
         if (r.stop_reassigned) notice += tr('rx.stopMoved', { n: r.system.stop_index + 1 });
-        emit('update:modelValue', r.system);
+        emit('structure-edit', r);
         editStatus.value = notice; // set after the emit so the resulting draft update cannot clear it
     } catch (e) {
         if (token === editToken) editError.value = errorMessage(e); // engine rejections keep the draft and the form
@@ -267,7 +265,7 @@ async function runEdit(operation: SurfaceEditOperation): Promise<void> {
 }
 onBeforeUnmount(() => {
     editToken++;
-    clearSurfaceSelection();
+    hoverSurface(null);
 });
 
 function solveLabel(s: Surface): string {
@@ -364,7 +362,7 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                         </tr>
                     </thead>
                     <tbody>
-                        <template v-for="(s, i) in surfaces" :key="i">
+                        <template v-for="(s, i) in surfaces" :key="surfaceKeys[i]">
                             <tr
                                 class="rx-row"
                                 :class="{
@@ -382,12 +380,12 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         <button
                                             type="button"
                                             class="row-toggle"
-                                            :aria-expanded="isOpen(s)"
+                                            :aria-expanded="isOpen(i)"
                                             :aria-controls="`rx-detail-${i}`"
                                             :aria-label="`Surface ${i + 1} details`"
-                                            @click.stop="toggleOpen(s)"
+                                            @click.stop="setDetailOpen(i, !isOpen(i))"
                                         >
-                                            {{ isOpen(s) ? '▾' : '▸' }}
+                                            {{ isOpen(i) ? '▾' : '▸' }}
                                         </button>
                                         <span class="surface-index">{{ i + 1 }}</span>
                                         <input
@@ -405,7 +403,7 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                             type="button"
                                             class="profile-chip"
                                             :aria-label="`Surface ${i + 1} ${chip} details`"
-                                            @click.stop="openDetail(s)"
+                                            @click.stop="setDetailOpen(i, true)"
                                         >
                                             {{ chip }}
                                         </button>
@@ -641,7 +639,7 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         class="small"
                                         :disabled="!online || surfaces.length >= 128"
                                         :aria-label="tr('rx.insertBefore', { n: i + 1 })"
-                                        @click="runEdit({ kind: 'insert', before: i, count: 1 })"
+                                        @click.stop="runEdit({ kind: 'insert', before: i, count: 1 })"
                                     >
                                         +
                                     </button>
@@ -650,14 +648,14 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                         class="small"
                                         :disabled="!online || surfaces.length === 1"
                                         :aria-label="tr('rx.removeSurface', { n: i + 1 })"
-                                        @click="runEdit({ kind: 'remove', first: i, count: 1 })"
+                                        @click.stop="runEdit({ kind: 'remove', first: i, count: 1 })"
                                     >
                                         ×
                                     </button>
                                 </td>
                             </tr>
                             <tr
-                                v-if="isOpen(s)"
+                                v-if="isOpen(i)"
                                 :id="`rx-detail-${i}`"
                                 class="rx-detail-row"
                                 @mouseenter="hoverSurface(i)"

@@ -2,7 +2,7 @@
 import { tr } from '../i18n';
 import { usePreferencesStore } from '../stores/preferences';
 const preferences = usePreferencesStore();
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from 'd3-zoom';
 import { FALLBACK_COLOR, rgbCss } from '../color';
@@ -16,10 +16,14 @@ import {
     hoverSurface,
     selectSurface,
     selectedSurfaceIndex,
-    syncSurfaceSelection,
 } from '../composables/useSurfaceSelection';
 
-const props = defineProps<{ system: OpticalSystem; layout: Layout; wavelength: number }>();
+const props = defineProps<{
+    system: OpticalSystem;
+    layout: Layout;
+    wavelength: number;
+    savedToDraft: (number | null)[];
+}>();
 
 /** Saved field color by field number; rays use the returned field index, so duplicate fields keep their own color. */
 const fieldColor = (i: number | undefined): string =>
@@ -264,25 +268,15 @@ onBeforeUnmount(() => {
 
 // ---- shared surface selection (SurfaceTable / PrescriptionView / MaterialsPanel) ----
 
-/** Report the internal surface count so stale shared indexes are dropped on data updates. */
-watch(
-    () => props.system.surfaces.length,
-    (n) => syncSurfaceSelection(n),
-    { immediate: true },
-);
+function savedIndex(draftIndex: number | null): number | null {
+    if (draftIndex === null) return null;
+    const index = props.savedToDraft.indexOf(draftIndex);
+    return index < 0 ? null : index;
+}
+const hoveredSavedIndex = computed(() => savedIndex(hoveredSurfaceIndex.value));
+const selectedSavedIndex = computed(() => savedIndex(selectedSurfaceIndex.value));
 
-/**
- * The surface the HUD and ray markers follow: the hovered one wins, otherwise the pinned
- * selection. Every access is guarded against the shared state holding an index that no
- * longer exists after an edit, so no glow, marker or HUD can go stale.
- */
-const focusIndex = computed(() => {
-    const n = props.system.surfaces.length;
-    const h = hoveredSurfaceIndex.value;
-    if (h !== null && h < n) return h;
-    const s = selectedSurfaceIndex.value;
-    return s !== null && s < n ? s : null;
-});
+const focusIndex = computed(() => hoveredSavedIndex.value ?? selectedSavedIndex.value);
 
 /** Medium a reflect/dummy row retains: the material of the last refracting row above it, else the object medium. */
 function incidentMedium(i: number): string {
@@ -301,11 +295,16 @@ const surfaceAriaLabel = (i: number): string => {
 };
 
 function clearHover(i: number): void {
-    if (hoveredSurfaceIndex.value === i) hoverSurface(null);
+    if (hoveredSavedIndex.value === i) hoverSurface(null);
+}
+
+function hoverSavedSurface(i: number): void {
+    hoverSurface(props.savedToDraft[i] ?? null);
 }
 
 function pickSurface(i: number): void {
-    selectSurface(i);
+    const index = props.savedToDraft[i];
+    if (index != null) selectSurface(index);
 }
 
 /** Move keyboard focus (and hover) to another internal surface, wrapping around the ends. */
@@ -314,7 +313,7 @@ function focusSurface(i: number): void {
     if (!n || !svgEl.value) return;
     const next = ((i % n) + n) % n;
     svgEl.value.querySelector<SVGGElement>(`[data-surface-index="${next}"]`)?.focus();
-    hoverSurface(next);
+    hoverSavedSurface(next);
 }
 
 function onSurfaceKeydown(event: KeyboardEvent, i: number): void {
@@ -494,17 +493,18 @@ const hudStyle = computed(() => {
                         :key="`s${i}`"
                         class="surface"
                         :class="{
-                            'is-hovered': hoveredSurfaceIndex === i,
-                            'is-selected': selectedSurfaceIndex === i,
+                            'is-hovered': hoveredSavedIndex === i,
+                            'is-selected': selectedSavedIndex === i,
                         }"
                         :data-surface-index="i"
                         tabindex="0"
                         role="button"
-                        :aria-pressed="selectedSurfaceIndex === i"
+                        :aria-pressed="selectedSavedIndex === i"
+                        :aria-disabled="savedToDraft[i] == null"
                         :aria-label="surfaceAriaLabel(i)"
-                        @mouseenter="hoverSurface(i)"
+                        @mouseenter="hoverSavedSurface(i)"
                         @mouseleave="clearHover(i)"
-                        @focus="hoverSurface(i)"
+                        @focus="hoverSavedSurface(i)"
                         @blur="clearHover(i)"
                         @click="pickSurface(i)"
                         @keydown="onSurfaceKeydown($event, i)"

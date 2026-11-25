@@ -3,17 +3,15 @@ import { ref, type Ref } from 'vue';
 /**
  * Module-level shared surface-selection state.
  *
- * Internal surfaces are numbered 0..N-1 (zero-based indexes into `OpticalSystem.surfaces`);
- * endpoints (object/image) are never part of this state. Every view (SurfaceTable,
- * PrescriptionView, LayoutView, MaterialsPanel) imports this module directly, so all of them
- * observe the same hover/selection without prop drilling.
+ * Shared indexes identify internal surfaces in the active draft. Views of the saved system
+ * translate between saved and draft indexes while insertions or removals are pending.
+ * Object and image endpoints are outside this state.
  */
 const hovered = ref<number | null>(null);
 const selected = ref<number | null>(null);
 /**
- * Known internal surface count. Starts unbounded so early calls stay valid; views that know
- * the current system should report it through `syncSurfaceSelection` so out-of-range indexes
- * are dropped as soon as the underlying data changes.
+ * The workbench reports the current draft surface count through `syncSurfaceSelection`.
+ * It starts unbounded until the workbench loads a system.
  */
 let knownSurfaceCount = Number.POSITIVE_INFINITY;
 

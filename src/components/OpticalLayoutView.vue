@@ -6,6 +6,7 @@ import LayoutView from './LayoutView.vue';
 import BenchView from './BenchView.vue';
 const props = defineProps<{
     system: OpticalSystem;
+    savedToDraft: (number | null)[];
     layout: Layout;
     wavelength: number;
     revision: number;
@@ -67,6 +68,7 @@ defineExpose({
         <LayoutView
             v-show="mode === 'section'"
             :system="system"
+            :saved-to-draft="savedToDraft"
             :layout="layout"
             :wavelength="wavelength"
         />
