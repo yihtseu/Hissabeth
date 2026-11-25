@@ -1,11 +1,18 @@
 <script setup lang="ts">
 import { tr } from '../i18n';
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue';
 import NumberField from './NumberField.vue';
 import NumberListField from './NumberListField.vue';
+import {
+    hoveredSurfaceIndex,
+    selectedSurfaceIndex,
+    hoverSurface,
+    selectSurface,
+} from '../composables/useSurfaceSelection';
 import type {
     Interaction,
     OpticalSystem,
+    OptimizeVariable,
     Surface,
     SurfaceEditOperation,
     SurfaceEditResult,
@@ -13,13 +20,24 @@ import type {
 import { INTERACTIONS, canonicalJson, glassKey } from '../validation';
 import { callTool, errorMessage } from '../api';
 
-const props = defineProps<{
-    modelValue: OpticalSystem;
-    materials: string[];
-    dirty: boolean;
-    online: boolean;
+const props = withDefaults(
+    defineProps<{
+        modelValue: OpticalSystem;
+        materials: string[];
+        dirty: boolean;
+        online: boolean;
+        surfaceKeys: number[];
+        /** Active optimization variables; a `V` badge shows next to Radius/Thickness/Conic when present. */
+        variables?: OptimizeVariable[];
+    }>(),
+    { variables: () => [] },
+);
+const emit = defineEmits<{
+    'update:modelValue': [value: OpticalSystem];
+    'toggle-variable': [variable: OptimizeVariable];
+    'structure-edit': [result: SurfaceEditResult];
 }>();
-const emit = defineEmits<{ 'update:modelValue': [value: OpticalSystem] }>();
+const expanded = defineModel<ReadonlyMap<number, boolean>>('expanded', { required: true });
 
 const surfaces = computed(() => props.modelValue.surfaces);
 const known = computed(() => {
@@ -41,6 +59,99 @@ function setSurfaces(next: Surface[], stop = props.modelValue.stop_index): void 
 }
 function patch(i: number, p: Partial<Surface>): void {
     setSurfaces(surfaces.value.map((s, k) => (k === i ? { ...s, ...p } : s)));
+}
+
+// ---- shared surface hover/selection (linked optical layout highlighting) --------
+
+const scrollRegion = ref<HTMLElement | null>(null);
+
+watch(
+    [scrollRegion, selectedSurfaceIndex],
+    ([region, index]) => {
+        if (index === null) return;
+        region
+            ?.querySelector<HTMLElement>(`[data-surface-row="${index}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+    },
+    { flush: 'post' },
+);
+
+// ---- progressive disclosure: advanced profile cards in expandable detail rows ---
+
+function rowHasData(s: Surface | undefined): boolean {
+    if (!s) return false;
+    return (
+        s.conic !== 0 ||
+        s.even.length > 0 ||
+        s.odd.length > 0 ||
+        !!s.toroid ||
+        !!s.zernike ||
+        !!s.transform
+    );
+}
+watchEffect(() => {
+    const advanced = props.surfaceKeys.filter(
+        (key, index) => !expanded.value.has(key) && rowHasData(surfaces.value[index]),
+    );
+    if (advanced.length) {
+        expanded.value = new Map([
+            ...expanded.value,
+            ...advanced.map((key) => [key, true] as const),
+        ]);
+    }
+});
+function isOpen(index: number): boolean {
+    return expanded.value.get(props.surfaceKeys[index]!) ?? rowHasData(surfaces.value[index]);
+}
+function setDetailOpen(index: number, open: boolean): void {
+    expanded.value = new Map(expanded.value).set(props.surfaceKeys[index]!, open);
+}
+/** Highlight capsules for every advanced profile a row carries. */
+function profileChips(s: Surface): string[] {
+    const chips: string[] = [];
+    if (s.even.length > 0 || s.odd.length > 0) chips.push('Asphere');
+    if (s.toroid) chips.push('Toroid');
+    if (s.zernike) chips.push('Zernike');
+    if (s.transform) chips.push('Tilt/Decenter');
+    return chips;
+}
+
+// ---- optimization variable badges ------------------------------------------------
+
+type VarKind = 'radius' | 'thickness' | 'conic';
+function hasVar(i: number, kind: VarKind): boolean {
+    return props.variables.some((v) => v.kind === kind && v.surface === i);
+}
+function toggleVar(i: number, kind: VarKind): void {
+    emit('toggle-variable', { kind, surface: i } satisfies OptimizeVariable);
+}
+
+// ---- multi-configuration override markers (read straight from the model) ---------
+
+interface ConfigMark {
+    index: number;
+    active: boolean;
+    title: string;
+}
+function configMarks(
+    i: number,
+    kind: 'thickness' | 'radius' | 'conic' | 'aperture' | 'material',
+): ConfigMark[] {
+    const configs = props.modelValue.configurations ?? [];
+    if (!configs.length) return [];
+    const active = props.modelValue.active_configuration ?? 0;
+    const marks: ConfigMark[] = [];
+    configs.forEach((c, index) => {
+        const hit = c.overrides.some((o) => o.kind === kind && 'surface' in o && o.surface === i);
+        if (!hit) return;
+        const name = c.name || tr('cfg.defaultName', { n: index + 1 });
+        marks.push({
+            index,
+            active: index === active,
+            title: `${tr(`cfg.kinds.${kind}`)} — ${name}`,
+        });
+    });
+    return marks;
 }
 
 // ---- structural edits (engine-computed draft transformations) ------------------
@@ -144,7 +255,7 @@ async function runEdit(operation: SurfaceEditOperation): Promise<void> {
                 ? `Inserted ${n} plane dummy ${n === 1 ? 'surface' : 'surfaces'} (zero gap, unclipped, incident medium) before ${operation.before >= oldCount ? tr('rx.insertedImage') : tr('rx.insertedSurface', { n: operation.before + 1 })}.`
                 : `Removed ${n} ${n === 1 ? 'surface' : 'surfaces'} starting at surface ${operation.first + 1}.`;
         if (r.stop_reassigned) notice += tr('rx.stopMoved', { n: r.system.stop_index + 1 });
-        emit('update:modelValue', r.system);
+        emit('structure-edit', r);
         editStatus.value = notice; // set after the emit so the resulting draft update cannot clear it
     } catch (e) {
         if (token === editToken) editError.value = errorMessage(e); // engine rejections keep the draft and the form
@@ -154,6 +265,7 @@ async function runEdit(operation: SurfaceEditOperation): Promise<void> {
 }
 onBeforeUnmount(() => {
     editToken++;
+    hoverSurface(null);
 });
 
 function solveLabel(s: Surface): string {
@@ -217,7 +329,13 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
         </datalist>
         <fieldset class="plain-fieldset" :disabled="pending">
             <legend class="sr-only">{{ tr('rx.fieldsetLegend') }}</legend>
-            <div class="table-scroll" role="region" aria-labelledby="rx-title" tabindex="0">
+            <div
+                ref="scrollRegion"
+                class="table-scroll"
+                role="region"
+                aria-labelledby="rx-title"
+                tabindex="0"
+            >
                 <table>
                     <caption class="sr-only">
                         {{
@@ -238,441 +356,701 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
                                 {{ tr('rx.colDraw')
                                 }}<span class="solve-tag">{{ tr('rx.colDrawSub') }}</span>
                             </th>
-                            <th scope="col">{{ tr('rx.colConic') }}</th>
-                            <th scope="col">{{ tr('rx.colEven') }}</th>
-                            <th scope="col">{{ tr('rx.colOdd') }}</th>
-                            <th scope="col">{{ tr('rx.colToroid') }}</th>
-                            <th scope="col">{{ tr('rx.colZernike') }}</th>
-                            <th scope="col">{{ tr('rx.colTransform') }}</th>
-                            <th scope="col">{{ tr('rx.colStop') }}</th>
                             <th scope="col">
                                 <span class="sr-only">{{ tr('common.actions') }}</span>
                             </th>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr v-for="(s, i) in surfaces" :key="i">
-                            <th scope="row">
-                                <span class="surface-index">{{ i + 1 }}</span>
-                            </th>
-                            <td>
-                                <input
-                                    type="text"
-                                    maxlength="256"
-                                    :aria-label="tr('rx.surfaceLabel', { n: i + 1 })"
-                                    :value="s.label"
-                                    @input="
-                                        patch(i, {
-                                            label: ($event.target as HTMLInputElement).value,
-                                        })
-                                    "
-                                />
-                            </td>
-                            <td>
-                                <select
-                                    :aria-label="tr('rx.surfaceInteraction', { n: i + 1 })"
-                                    :value="s.interaction"
-                                    @change="
-                                        patch(i, {
-                                            interaction: ($event.target as HTMLSelectElement)
-                                                .value as Interaction,
-                                        })
-                                    "
-                                >
-                                    <option v-for="t in INTERACTIONS" :key="t" :value="t">
-                                        {{ tr(`reportData.${t}`) }}
-                                    </option>
-                                </select>
-                            </td>
-                            <td>
-                                <NumberField
-                                    :aria-label="tr('rx.surfaceRadius', { n: i + 1 })"
-                                    :model-value="s.radius"
-                                    @update:model-value="(v: number) => patch(i, { radius: v })"
-                                />
-                            </td>
-                            <td>
-                                <NumberField
-                                    v-if="s.gap_solve.kind === 'fixed'"
-                                    :aria-label="tr('rx.surfaceThickness', { n: i + 1 })"
-                                    :model-value="s.thickness"
-                                    @update:model-value="(v: number) => patch(i, { thickness: v })"
-                                />
-                                <template v-else>
-                                    <NumberField
-                                        readonly
-                                        :title="tr('rx.solvedTitle', { solve: solveLabel(s) })"
-                                        :aria-label="
-                                            tr('rx.solvedThickness', {
-                                                n: i + 1,
-                                                solve: solveLabel(s),
-                                            })
-                                        "
-                                        :model-value="s.thickness"
-                                    />
-                                    <span class="solve-tag">{{ solveLabel(s) }}</span>
-                                </template>
-                                <span
-                                    v-if="hasReflection"
-                                    class="solve-tag"
-                                    :title="
-                                        travel[i]! < 0
-                                            ? tr('rx.travelNegTip')
-                                            : tr('rx.travelPosTip')
-                                    "
-                                    >{{
-                                        travel[i]! < 0 ? tr('rx.travelNeg') : tr('rx.travelPos')
-                                    }}</span
-                                >
-                            </td>
-                            <td>
-                                <input
-                                    v-if="retainsMedium(s)"
-                                    type="text"
-                                    disabled
-                                    :title="materialTitle(s, i)"
-                                    :aria-label="
-                                        tr('rx.materialKept', {
-                                            n: i + 1,
-                                            medium: incidentMedium(i),
-                                            material: s.material,
-                                        })
-                                    "
-                                    :value="incidentMedium(i)"
-                                />
-                                <input
-                                    v-else
-                                    type="text"
-                                    list="material-options"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    :aria-label="tr('rx.surfaceMaterial', { n: i + 1 })"
-                                    :value="s.material"
-                                    @input="
-                                        patch(i, {
-                                            material: ($event.target as HTMLInputElement).value,
-                                        })
-                                    "
-                                />
-                            </td>
-                            <td>
-                                <NumberField
-                                    min="0"
-                                    :aria-label="tr('rx.surfaceClear', { n: i + 1 })"
-                                    :model-value="s.aperture"
-                                    @update:model-value="(v: number) => patch(i, { aperture: v })"
-                                />
-                            </td>
-                            <td class="center">
-                                <input
-                                    type="checkbox"
-                                    :title="CLEAR_HELP"
-                                    :aria-label="tr('rx.surfaceClip', { n: i + 1 })"
-                                    :checked="s.clear_aperture"
-                                    @change="
-                                        patch(i, {
-                                            clear_aperture: ($event.target as HTMLInputElement)
-                                                .checked,
-                                        })
-                                    "
-                                />
-                            </td>
-                            <td>
-                                <NumberField
-                                    readonly
-                                    :title="DRAW_HELP"
-                                    :aria-label="tr('rx.surfaceDraw', { n: i + 1 })"
-                                    :model-value="s.semi_diameter"
-                                />
-                            </td>
-                            <td>
-                                <NumberField
-                                    :aria-label="tr('rx.surfaceConic', { n: i + 1 })"
-                                    :model-value="s.conic"
-                                    @update:model-value="(v: number) => patch(i, { conic: v })"
-                                />
-                            </td>
-                            <td>
-                                <NumberListField
-                                    allow-empty
-                                    :aria-label="tr('rx.surfaceEven', { n: i + 1 })"
-                                    :model-value="s.even"
-                                    @update:model-value="(v: number[]) => patch(i, { even: v })"
-                                />
-                            </td>
-                            <td>
-                                <NumberListField
-                                    allow-empty
-                                    :aria-label="tr('rx.surfaceOdd', { n: i + 1 })"
-                                    :model-value="s.odd"
-                                    @update:model-value="(v: number[]) => patch(i, { odd: v })"
-                                />
-                            </td>
-                            <td>
-                                <template v-if="s.toroid">
-                                    <NumberField
-                                        :aria-label="tr('rx.toroidRevolution', { n: i + 1 })"
-                                        :model-value="s.toroid.revolution"
-                                        @update:model-value="
-                                            (v: number) =>
-                                                patch(i, {
-                                                    toroid: { ...s.toroid!, revolution: v },
-                                                })
-                                        "
-                                    />
-                                    <NumberListField
-                                        allow-empty
-                                        :aria-label="tr('rx.toroidEvenY', { n: i + 1 })"
-                                        :model-value="s.toroid.even_y"
-                                        @update:model-value="
-                                            (v: number[]) =>
-                                                patch(i, { toroid: { ...s.toroid!, even_y: v } })
-                                        "
-                                    />
-                                    <button
-                                        type="button"
-                                        class="small"
-                                        :aria-label="tr('rx.profileRemove', { n: i + 1 })"
-                                        @click="patch(i, { toroid: null })"
-                                    >
-                                        ×
-                                    </button>
-                                </template>
-                                <button
-                                    v-else
-                                    type="button"
-                                    class="small"
-                                    :aria-label="tr('rx.toroidAdd', { n: i + 1 })"
-                                    @click="patch(i, { toroid: { revolution: 0, even_y: [] } })"
-                                >
-                                    +
-                                </button>
-                            </td>
-                            <td>
-                                <template v-if="s.zernike">
-                                    <NumberField
-                                        min="0"
-                                        :aria-label="tr('rx.zernikeNormalize', { n: i + 1 })"
-                                        :model-value="s.zernike.normalize"
-                                        @update:model-value="
-                                            (v: number) =>
-                                                patch(i, {
-                                                    zernike: { ...s.zernike!, normalize: v },
-                                                })
-                                        "
-                                    />
-                                    <NumberListField
-                                        allow-empty
-                                        :aria-label="tr('rx.zernikeCoefficients', { n: i + 1 })"
-                                        :model-value="s.zernike.coefficients"
-                                        @update:model-value="
-                                            (v: number[]) =>
-                                                patch(i, {
-                                                    zernike: { ...s.zernike!, coefficients: v },
-                                                })
-                                        "
-                                    />
-                                    <button
-                                        type="button"
-                                        class="small"
-                                        :aria-label="tr('rx.profileRemove', { n: i + 1 })"
-                                        @click="patch(i, { zernike: null })"
-                                    >
-                                        ×
-                                    </button>
-                                </template>
-                                <button
-                                    v-else
-                                    type="button"
-                                    class="small"
-                                    :aria-label="tr('rx.zernikeAdd', { n: i + 1 })"
-                                    @click="
-                                        patch(i, { zernike: { normalize: 1, coefficients: [] } })
-                                    "
-                                >
-                                    +
-                                </button>
-                            </td>
-                            <td>
-                                <div v-if="s.transform" class="transform-cell">
-                                    <div class="transform-grid">
-                                        <NumberField
-                                            :aria-label="`S${i + 1} dx`"
-                                            :model-value="s.transform.decenter[0]"
-                                            title="dx (mm)"
-                                            @update:model-value="
-                                                (v: number) =>
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            decenter: [v, s.transform!.decenter[1]],
-                                                        },
-                                                    })
-                                            "
-                                        />
-                                        <NumberField
-                                            :aria-label="`S${i + 1} dy`"
-                                            :model-value="s.transform.decenter[1]"
-                                            title="dy (mm)"
-                                            @update:model-value="
-                                                (v: number) =>
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            decenter: [s.transform!.decenter[0], v],
-                                                        },
-                                                    })
-                                            "
-                                        />
-                                        <NumberField
-                                            :aria-label="`S${i + 1} rx`"
-                                            :model-value="s.transform.tilt[0]"
-                                            title="rx (deg)"
-                                            @update:model-value="
-                                                (v: number) =>
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            tilt: [
-                                                                v,
-                                                                s.transform!.tilt[1],
-                                                                s.transform!.tilt[2],
-                                                            ],
-                                                        },
-                                                    })
-                                            "
-                                        />
-                                        <NumberField
-                                            :aria-label="`S${i + 1} ry`"
-                                            :model-value="s.transform.tilt[1]"
-                                            title="ry (deg)"
-                                            @update:model-value="
-                                                (v: number) =>
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            tilt: [
-                                                                s.transform!.tilt[0],
-                                                                v,
-                                                                s.transform!.tilt[2],
-                                                            ],
-                                                        },
-                                                    })
-                                            "
-                                        />
-                                        <NumberField
-                                            :aria-label="`S${i + 1} rz`"
-                                            :model-value="s.transform.tilt[2]"
-                                            title="rz (deg)"
-                                            @update:model-value="
-                                                (v: number) =>
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            tilt: [
-                                                                s.transform!.tilt[0],
-                                                                s.transform!.tilt[1],
-                                                                v,
-                                                            ],
-                                                        },
-                                                    })
-                                            "
-                                        />
-                                    </div>
-                                    <div class="transform-flags">
-                                        <label class="inline">
-                                            <input
-                                                type="checkbox"
-                                                :checked="s.transform.tilt_first"
-                                                @change="
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            tilt_first: (
-                                                                $event.target as HTMLInputElement
-                                                            ).checked,
-                                                        },
-                                                    })
-                                                "
-                                            />
-                                            {{ tr('rx.tiltFirst') }}
-                                        </label>
-                                        <label class="inline">
-                                            <input
-                                                type="checkbox"
-                                                :checked="s.transform.return_after"
-                                                @change="
-                                                    patch(i, {
-                                                        transform: {
-                                                            ...s.transform!,
-                                                            return_after: (
-                                                                $event.target as HTMLInputElement
-                                                            ).checked,
-                                                        },
-                                                    })
-                                                "
-                                            />
-                                            {{ tr('rx.returnAfter') }}
-                                        </label>
+                        <template v-for="(s, i) in surfaces" :key="surfaceKeys[i]">
+                            <tr
+                                class="rx-row"
+                                :class="{
+                                    hovered: hoveredSurfaceIndex === i,
+                                    selected: selectedSurfaceIndex === i,
+                                }"
+                                :id="`rx-surface-row-${i}`"
+                                :data-surface-row="i"
+                                @mouseenter="hoverSurface(i)"
+                                @mouseleave="hoverSurface(null)"
+                                @click="selectSurface(i)"
+                            >
+                                <th scope="row" class="row-head">
+                                    <div class="row-idline">
                                         <button
                                             type="button"
-                                            class="small"
-                                            :aria-label="tr('rx.profileRemove', { n: i + 1 })"
-                                            @click="patch(i, { transform: null })"
+                                            class="row-toggle"
+                                            :aria-expanded="isOpen(i)"
+                                            :aria-controls="`rx-detail-${i}`"
+                                            :aria-label="`Surface ${i + 1} details`"
+                                            @click.stop="setDetailOpen(i, !isOpen(i))"
                                         >
-                                            ×
+                                            {{ isOpen(i) ? '▾' : '▸' }}
+                                        </button>
+                                        <span class="surface-index">{{ i + 1 }}</span>
+                                        <input
+                                            type="radio"
+                                            name="stop-surface"
+                                            :aria-label="tr('rx.surfaceStop', { n: i + 1 })"
+                                            :checked="modelValue.stop_index === i"
+                                            @change="setStop(i)"
+                                        />
+                                    </div>
+                                    <div v-if="profileChips(s).length" class="profile-chips">
+                                        <button
+                                            v-for="chip in profileChips(s)"
+                                            :key="chip"
+                                            type="button"
+                                            class="profile-chip"
+                                            :aria-label="`Surface ${i + 1} ${chip} details`"
+                                            @click.stop="setDetailOpen(i, true)"
+                                        >
+                                            {{ chip }}
                                         </button>
                                     </div>
-                                </div>
-                                <button
-                                    v-else
-                                    type="button"
-                                    class="small"
-                                    :aria-label="tr('rx.transformAdd', { n: i + 1 })"
-                                    @click="
-                                        patch(i, {
-                                            transform: {
-                                                decenter: [0, 0],
-                                                tilt: [0, 0, 0],
-                                                tilt_first: false,
-                                                return_after: false,
-                                            },
-                                        })
-                                    "
-                                >
-                                    +
-                                </button>
-                            </td>
-                            <td class="center">
-                                <input
-                                    type="radio"
-                                    name="stop-surface"
-                                    :aria-label="tr('rx.surfaceStop', { n: i + 1 })"
-                                    :checked="modelValue.stop_index === i"
-                                    @change="setStop(i)"
-                                />
-                            </td>
-                            <td class="row-actions">
-                                <button
-                                    type="button"
-                                    class="small"
-                                    :disabled="!online || surfaces.length >= 128"
-                                    :aria-label="tr('rx.insertBefore', { n: i + 1 })"
-                                    @click="runEdit({ kind: 'insert', before: i, count: 1 })"
-                                >
-                                    +
-                                </button>
-                                <button
-                                    type="button"
-                                    class="small"
-                                    :disabled="!online || surfaces.length === 1"
-                                    :aria-label="tr('rx.removeSurface', { n: i + 1 })"
-                                    @click="runEdit({ kind: 'remove', first: i, count: 1 })"
-                                >
-                                    ×
-                                </button>
-                            </td>
-                        </tr>
+                                </th>
+                                <td>
+                                    <input
+                                        type="text"
+                                        maxlength="256"
+                                        :aria-label="tr('rx.surfaceLabel', { n: i + 1 })"
+                                        :value="s.label"
+                                        @input="
+                                            patch(i, {
+                                                label: ($event.target as HTMLInputElement).value,
+                                            })
+                                        "
+                                    />
+                                </td>
+                                <td>
+                                    <select
+                                        :aria-label="tr('rx.surfaceInteraction', { n: i + 1 })"
+                                        :value="s.interaction"
+                                        @change="
+                                            patch(i, {
+                                                interaction: ($event.target as HTMLSelectElement)
+                                                    .value as Interaction,
+                                            })
+                                        "
+                                    >
+                                        <option v-for="t in INTERACTIONS" :key="t" :value="t">
+                                            {{ tr(`reportData.${t}`) }}
+                                        </option>
+                                    </select>
+                                </td>
+                                <td>
+                                    <div class="cell-line">
+                                        <div class="field-stack">
+                                            <NumberField
+                                                :aria-label="tr('rx.surfaceRadius', { n: i + 1 })"
+                                                :model-value="s.radius"
+                                                @update:model-value="
+                                                    (v: number) => patch(i, { radius: v })
+                                                "
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            class="var-badge"
+                                            :class="{ on: hasVar(i, 'radius') }"
+                                            :aria-pressed="hasVar(i, 'radius')"
+                                            :aria-label="`Surface ${i + 1} radius optimization variable`"
+                                            title="Toggle optimization variable"
+                                            @click.stop="toggleVar(i, 'radius')"
+                                        >
+                                            V
+                                        </button>
+                                        <span
+                                            v-for="m in configMarks(i, 'radius')"
+                                            :key="m.index"
+                                            class="cfg-tag"
+                                            :class="{ active: m.active }"
+                                            :title="m.title"
+                                            >C{{ m.index + 1 }}</span
+                                        >
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="cell-line">
+                                        <div class="field-stack">
+                                            <NumberField
+                                                v-if="s.gap_solve.kind === 'fixed'"
+                                                :aria-label="
+                                                    tr('rx.surfaceThickness', { n: i + 1 })
+                                                "
+                                                :model-value="s.thickness"
+                                                @update:model-value="
+                                                    (v: number) => patch(i, { thickness: v })
+                                                "
+                                            />
+                                            <template v-else>
+                                                <NumberField
+                                                    readonly
+                                                    :title="
+                                                        tr('rx.solvedTitle', {
+                                                            solve: solveLabel(s),
+                                                        })
+                                                    "
+                                                    :aria-label="
+                                                        tr('rx.solvedThickness', {
+                                                            n: i + 1,
+                                                            solve: solveLabel(s),
+                                                        })
+                                                    "
+                                                    :model-value="s.thickness"
+                                                />
+                                                <span
+                                                    class="solve-tag solve-mark"
+                                                    :title="
+                                                        tr('rx.solvedTitle', {
+                                                            solve: solveLabel(s),
+                                                        })
+                                                    "
+                                                    >{{ solveLabel(s) }}</span
+                                                >
+                                            </template>
+                                            <span
+                                                v-if="hasReflection"
+                                                class="solve-tag"
+                                                :title="
+                                                    travel[i]! < 0
+                                                        ? tr('rx.travelNegTip')
+                                                        : tr('rx.travelPosTip')
+                                                "
+                                                >{{
+                                                    travel[i]! < 0
+                                                        ? tr('rx.travelNeg')
+                                                        : tr('rx.travelPos')
+                                                }}</span
+                                            >
+                                        </div>
+                                        <button
+                                            type="button"
+                                            class="var-badge"
+                                            :class="{ on: hasVar(i, 'thickness') }"
+                                            :aria-pressed="hasVar(i, 'thickness')"
+                                            :aria-label="`Surface ${i + 1} thickness optimization variable`"
+                                            title="Toggle optimization variable"
+                                            @click.stop="toggleVar(i, 'thickness')"
+                                        >
+                                            V
+                                        </button>
+                                        <span
+                                            v-for="m in configMarks(i, 'thickness')"
+                                            :key="m.index"
+                                            class="cfg-tag"
+                                            :class="{ active: m.active }"
+                                            :title="m.title"
+                                            >C{{ m.index + 1 }}</span
+                                        >
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="cell-line">
+                                        <div class="field-stack">
+                                            <input
+                                                v-if="retainsMedium(s)"
+                                                type="text"
+                                                disabled
+                                                :title="materialTitle(s, i)"
+                                                :aria-label="
+                                                    tr('rx.materialKept', {
+                                                        n: i + 1,
+                                                        medium: incidentMedium(i),
+                                                        material: s.material,
+                                                    })
+                                                "
+                                                :value="incidentMedium(i)"
+                                            />
+                                            <input
+                                                v-else
+                                                type="text"
+                                                list="material-options"
+                                                autocomplete="off"
+                                                spellcheck="false"
+                                                :aria-label="tr('rx.surfaceMaterial', { n: i + 1 })"
+                                                :value="s.material"
+                                                @input="
+                                                    patch(i, {
+                                                        material: (
+                                                            $event.target as HTMLInputElement
+                                                        ).value,
+                                                    })
+                                                "
+                                            />
+                                        </div>
+                                        <span
+                                            v-for="m in configMarks(i, 'material')"
+                                            :key="m.index"
+                                            class="cfg-tag"
+                                            :class="{ active: m.active }"
+                                            :title="m.title"
+                                            >C{{ m.index + 1 }}</span
+                                        >
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="cell-line">
+                                        <div class="field-stack">
+                                            <NumberField
+                                                min="0"
+                                                :aria-label="tr('rx.surfaceClear', { n: i + 1 })"
+                                                :model-value="s.aperture"
+                                                @update:model-value="
+                                                    (v: number) => patch(i, { aperture: v })
+                                                "
+                                            />
+                                        </div>
+                                        <span
+                                            v-for="m in configMarks(i, 'aperture')"
+                                            :key="m.index"
+                                            class="cfg-tag"
+                                            :class="{ active: m.active }"
+                                            :title="m.title"
+                                            >C{{ m.index + 1 }}</span
+                                        >
+                                    </div>
+                                </td>
+                                <td class="center">
+                                    <input
+                                        type="checkbox"
+                                        :title="CLEAR_HELP"
+                                        :aria-label="tr('rx.surfaceClip', { n: i + 1 })"
+                                        :checked="s.clear_aperture"
+                                        @change="
+                                            patch(i, {
+                                                clear_aperture: ($event.target as HTMLInputElement)
+                                                    .checked,
+                                            })
+                                        "
+                                    />
+                                </td>
+                                <td>
+                                    <NumberField
+                                        readonly
+                                        :title="DRAW_HELP"
+                                        :aria-label="tr('rx.surfaceDraw', { n: i + 1 })"
+                                        :model-value="s.semi_diameter"
+                                    />
+                                </td>
+                                <td class="row-actions">
+                                    <button
+                                        type="button"
+                                        class="small"
+                                        :disabled="!online || surfaces.length >= 128"
+                                        :aria-label="tr('rx.insertBefore', { n: i + 1 })"
+                                        @click.stop="runEdit({ kind: 'insert', before: i, count: 1 })"
+                                    >
+                                        +
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="small"
+                                        :disabled="!online || surfaces.length === 1"
+                                        :aria-label="tr('rx.removeSurface', { n: i + 1 })"
+                                        @click.stop="runEdit({ kind: 'remove', first: i, count: 1 })"
+                                    >
+                                        ×
+                                    </button>
+                                </td>
+                            </tr>
+                            <tr
+                                v-if="isOpen(i)"
+                                :id="`rx-detail-${i}`"
+                                class="rx-detail-row"
+                                @mouseenter="hoverSurface(i)"
+                                @mouseleave="hoverSurface(null)"
+                                @click="selectSurface(i)"
+                            >
+                                <td colspan="10">
+                                    <div
+                                        class="detail-panel"
+                                        role="group"
+                                        :aria-label="`Surface ${i + 1} advanced profile parameters`"
+                                    >
+                                        <div class="detail-grid">
+                                            <section class="param-card">
+                                                <h4 class="param-title">
+                                                    {{ tr('rx.colConic') }}
+                                                </h4>
+                                                <div class="cell-line">
+                                                    <div class="field-stack">
+                                                        <NumberField
+                                                            :aria-label="
+                                                                tr('rx.surfaceConic', { n: i + 1 })
+                                                            "
+                                                            :model-value="s.conic"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, { conic: v })
+                                                            "
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        class="var-badge"
+                                                        :class="{ on: hasVar(i, 'conic') }"
+                                                        :aria-pressed="hasVar(i, 'conic')"
+                                                        :aria-label="`Surface ${i + 1} conic optimization variable`"
+                                                        title="Toggle optimization variable"
+                                                        @click.stop="toggleVar(i, 'conic')"
+                                                    >
+                                                        V
+                                                    </button>
+                                                    <span
+                                                        v-for="m in configMarks(i, 'conic')"
+                                                        :key="m.index"
+                                                        class="cfg-tag"
+                                                        :class="{ active: m.active }"
+                                                        :title="m.title"
+                                                        >C{{ m.index + 1 }}</span
+                                                    >
+                                                </div>
+                                            </section>
+                                            <section class="param-card">
+                                                <h4 class="param-title">{{ tr('rx.colEven') }}</h4>
+                                                <NumberListField
+                                                    allow-empty
+                                                    :aria-label="tr('rx.surfaceEven', { n: i + 1 })"
+                                                    :model-value="s.even"
+                                                    @update:model-value="
+                                                        (v: number[]) => patch(i, { even: v })
+                                                    "
+                                                />
+                                            </section>
+                                            <section class="param-card">
+                                                <h4 class="param-title">{{ tr('rx.colOdd') }}</h4>
+                                                <NumberListField
+                                                    allow-empty
+                                                    :aria-label="tr('rx.surfaceOdd', { n: i + 1 })"
+                                                    :model-value="s.odd"
+                                                    @update:model-value="
+                                                        (v: number[]) => patch(i, { odd: v })
+                                                    "
+                                                />
+                                            </section>
+                                            <section class="param-card">
+                                                <h4 class="param-title">
+                                                    {{ tr('rx.colToroid') }}
+                                                </h4>
+                                                <template v-if="s.toroid">
+                                                    <NumberField
+                                                        :aria-label="
+                                                            tr('rx.toroidRevolution', { n: i + 1 })
+                                                        "
+                                                        :model-value="s.toroid.revolution"
+                                                        @update:model-value="
+                                                            (v: number) =>
+                                                                patch(i, {
+                                                                    toroid: {
+                                                                        ...s.toroid!,
+                                                                        revolution: v,
+                                                                    },
+                                                                })
+                                                        "
+                                                    />
+                                                    <NumberListField
+                                                        allow-empty
+                                                        :aria-label="
+                                                            tr('rx.toroidEvenY', { n: i + 1 })
+                                                        "
+                                                        :model-value="s.toroid.even_y"
+                                                        @update:model-value="
+                                                            (v: number[]) =>
+                                                                patch(i, {
+                                                                    toroid: {
+                                                                        ...s.toroid!,
+                                                                        even_y: v,
+                                                                    },
+                                                                })
+                                                        "
+                                                    />
+                                                    <div class="param-actions">
+                                                        <button
+                                                            type="button"
+                                                            class="small"
+                                                            :aria-label="
+                                                                tr('rx.profileRemove', { n: i + 1 })
+                                                            "
+                                                            @click.stop="patch(i, { toroid: null })"
+                                                        >
+                                                            ×
+                                                        </button>
+                                                    </div>
+                                                </template>
+                                                <div v-else class="param-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="small"
+                                                        :aria-label="
+                                                            tr('rx.toroidAdd', { n: i + 1 })
+                                                        "
+                                                        @click.stop="
+                                                            patch(i, {
+                                                                toroid: {
+                                                                    revolution: 0,
+                                                                    even_y: [],
+                                                                },
+                                                            })
+                                                        "
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+                                            </section>
+                                            <section class="param-card">
+                                                <h4 class="param-title">
+                                                    {{ tr('rx.colZernike') }}
+                                                </h4>
+                                                <template v-if="s.zernike">
+                                                    <NumberField
+                                                        min="0"
+                                                        :aria-label="
+                                                            tr('rx.zernikeNormalize', { n: i + 1 })
+                                                        "
+                                                        :model-value="s.zernike.normalize"
+                                                        @update:model-value="
+                                                            (v: number) =>
+                                                                patch(i, {
+                                                                    zernike: {
+                                                                        ...s.zernike!,
+                                                                        normalize: v,
+                                                                    },
+                                                                })
+                                                        "
+                                                    />
+                                                    <NumberListField
+                                                        allow-empty
+                                                        :aria-label="
+                                                            tr('rx.zernikeCoefficients', {
+                                                                n: i + 1,
+                                                            })
+                                                        "
+                                                        :model-value="s.zernike.coefficients"
+                                                        @update:model-value="
+                                                            (v: number[]) =>
+                                                                patch(i, {
+                                                                    zernike: {
+                                                                        ...s.zernike!,
+                                                                        coefficients: v,
+                                                                    },
+                                                                })
+                                                        "
+                                                    />
+                                                    <div class="param-actions">
+                                                        <button
+                                                            type="button"
+                                                            class="small"
+                                                            :aria-label="
+                                                                tr('rx.profileRemove', { n: i + 1 })
+                                                            "
+                                                            @click.stop="
+                                                                patch(i, { zernike: null })
+                                                            "
+                                                        >
+                                                            ×
+                                                        </button>
+                                                    </div>
+                                                </template>
+                                                <div v-else class="param-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="small"
+                                                        :aria-label="
+                                                            tr('rx.zernikeAdd', { n: i + 1 })
+                                                        "
+                                                        @click.stop="
+                                                            patch(i, {
+                                                                zernike: {
+                                                                    normalize: 1,
+                                                                    coefficients: [],
+                                                                },
+                                                            })
+                                                        "
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+                                            </section>
+                                            <section class="param-card">
+                                                <h4 class="param-title">
+                                                    {{ tr('rx.colTransform') }}
+                                                </h4>
+                                                <div v-if="s.transform" class="transform-block">
+                                                    <div class="transform-grid">
+                                                        <NumberField
+                                                            :aria-label="`S${i + 1} dx`"
+                                                            :model-value="s.transform.decenter[0]"
+                                                            title="dx (mm)"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            decenter: [
+                                                                                v,
+                                                                                s.transform!
+                                                                                    .decenter[1],
+                                                                            ],
+                                                                        },
+                                                                    })
+                                                            "
+                                                        />
+                                                        <NumberField
+                                                            :aria-label="`S${i + 1} dy`"
+                                                            :model-value="s.transform.decenter[1]"
+                                                            title="dy (mm)"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            decenter: [
+                                                                                s.transform!
+                                                                                    .decenter[0],
+                                                                                v,
+                                                                            ],
+                                                                        },
+                                                                    })
+                                                            "
+                                                        />
+                                                        <NumberField
+                                                            :aria-label="`S${i + 1} rx`"
+                                                            :model-value="s.transform.tilt[0]"
+                                                            title="rx (deg)"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            tilt: [
+                                                                                v,
+                                                                                s.transform!
+                                                                                    .tilt[1],
+                                                                                s.transform!
+                                                                                    .tilt[2],
+                                                                            ],
+                                                                        },
+                                                                    })
+                                                            "
+                                                        />
+                                                        <NumberField
+                                                            :aria-label="`S${i + 1} ry`"
+                                                            :model-value="s.transform.tilt[1]"
+                                                            title="ry (deg)"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            tilt: [
+                                                                                s.transform!
+                                                                                    .tilt[0],
+                                                                                v,
+                                                                                s.transform!
+                                                                                    .tilt[2],
+                                                                            ],
+                                                                        },
+                                                                    })
+                                                            "
+                                                        />
+                                                        <NumberField
+                                                            :aria-label="`S${i + 1} rz`"
+                                                            :model-value="s.transform.tilt[2]"
+                                                            title="rz (deg)"
+                                                            @update:model-value="
+                                                                (v: number) =>
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            tilt: [
+                                                                                s.transform!
+                                                                                    .tilt[0],
+                                                                                s.transform!
+                                                                                    .tilt[1],
+                                                                                v,
+                                                                            ],
+                                                                        },
+                                                                    })
+                                                            "
+                                                        />
+                                                    </div>
+                                                    <div class="param-actions">
+                                                        <label class="inline">
+                                                            <input
+                                                                type="checkbox"
+                                                                :checked="s.transform.tilt_first"
+                                                                @change="
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            tilt_first: (
+                                                                                $event.target as HTMLInputElement
+                                                                            ).checked,
+                                                                        },
+                                                                    })
+                                                                "
+                                                            />
+                                                            {{ tr('rx.tiltFirst') }}
+                                                        </label>
+                                                        <label class="inline">
+                                                            <input
+                                                                type="checkbox"
+                                                                :checked="s.transform.return_after"
+                                                                @change="
+                                                                    patch(i, {
+                                                                        transform: {
+                                                                            ...s.transform!,
+                                                                            return_after: (
+                                                                                $event.target as HTMLInputElement
+                                                                            ).checked,
+                                                                        },
+                                                                    })
+                                                                "
+                                                            />
+                                                            {{ tr('rx.returnAfter') }}
+                                                        </label>
+                                                        <button
+                                                            type="button"
+                                                            class="small"
+                                                            :aria-label="
+                                                                tr('rx.profileRemove', { n: i + 1 })
+                                                            "
+                                                            @click.stop="
+                                                                patch(i, { transform: null })
+                                                            "
+                                                        >
+                                                            ×
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div v-else class="param-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="small"
+                                                        :aria-label="
+                                                            tr('rx.transformAdd', { n: i + 1 })
+                                                        "
+                                                        @click.stop="
+                                                            patch(i, {
+                                                                transform: {
+                                                                    decenter: [0, 0],
+                                                                    tilt: [0, 0, 0],
+                                                                    tilt_first: false,
+                                                                    return_after: false,
+                                                                },
+                                                            })
+                                                        "
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+                                            </section>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
                     </tbody>
                 </table>
             </div>
@@ -757,3 +1135,179 @@ const DRAW_HELP = computed(() => tr('rx.drawHelp'));
         </div>
     </section>
 </template>
+
+<style scoped>
+.cell-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: flex-start;
+}
+.field-stack {
+    flex: 1 1 90px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.var-badge {
+    flex: none;
+    width: 22px;
+    min-height: 22px;
+    padding: 0;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+.var-badge:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.var-badge.on {
+    color: var(--accent-ink);
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.cfg-tag {
+    flex: none;
+    align-self: center;
+    font-size: 9px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: var(--surface);
+    white-space: nowrap;
+}
+.cfg-tag.active {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.row-head {
+    min-width: 96px;
+}
+.row-idline {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.row-idline input[type='radio'] {
+    width: auto;
+    min-width: 0;
+    margin: 0;
+}
+.row-toggle {
+    min-height: 0;
+    padding: 0 3px;
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--muted);
+    background: transparent;
+    border-color: transparent;
+}
+.row-toggle:hover {
+    color: var(--accent);
+    background: transparent;
+}
+.profile-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 4px;
+}
+.profile-chip {
+    min-height: 0;
+    padding: 1px 6px;
+    font-size: 9px;
+    line-height: 1.6;
+    border-radius: 999px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+}
+.profile-chip:hover {
+    color: var(--accent-ink);
+    background: var(--accent);
+}
+.rx-row.hovered > td,
+.rx-row.hovered > th {
+    background: var(--hover);
+}
+.rx-row.selected > td,
+.rx-row.selected > th {
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+.rx-row.selected .surface-index {
+    color: var(--accent-ink);
+    background: var(--accent);
+}
+.rx-detail-row > td {
+    padding: 0 12px 12px;
+    background: var(--surface);
+}
+.detail-panel {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 10px;
+}
+.param-card {
+    min-width: 0;
+    padding: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+}
+.param-title {
+    margin: 0 0 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+.param-card > input + input {
+    margin-top: 4px;
+}
+.param-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+}
+.transform-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+    gap: 4px;
+}
+.solve-mark {
+    display: inline-block;
+    align-self: flex-start;
+    padding: 1px 5px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    white-space: nowrap;
+}
+@media (max-width: 900px) {
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+    .row-head {
+        min-width: 0;
+    }
+}
+</style>

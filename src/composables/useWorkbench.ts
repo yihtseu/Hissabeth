@@ -15,6 +15,7 @@ import type {
     RunInfo,
     SpotDiagram,
     Spectrum,
+    SurfaceEditResult,
     SystemSnapshot,
 } from '../types';
 import { type SpectralMode } from '../sampling';
@@ -23,6 +24,11 @@ import { samplingPreset } from '../preferences';
 import { FALLBACK_COLOR } from '../color';
 import { checkRevision, savedSystemChanged } from '../provenance';
 import { canonicalJson, clone, fieldLabel, validateSystem } from '../validation';
+import {
+    hoveredSurfaceIndex,
+    selectedSurfaceIndex,
+    syncSurfaceSelection,
+} from './useSurfaceSelection';
 
 const FALLBACK_MATERIALS = ['AIR'];
 const DEFAULT_WAVELENGTH = 587.5618;
@@ -68,7 +74,24 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     /** Live Sync: on = a valid draft commits automatically shortly after edits settle; off = manual Apply. */
     const liveSync = ref(false);
     /** Shared optimization variable list: the surface table toggles entries, the optimize panel edits bounds. */
-    const optimizationVariables = ref<OptimizeVariable[]>([]);
+    const optimizationVariables = ref<OptimizeVariable[] | null>(null);
+    const savedSurfaceKeys = ref<number[]>([]);
+    const draftSurfaceKeys = ref<number[]>([]);
+    const expandedSurfaceDetails = ref<ReadonlyMap<number, boolean>>(new Map());
+    let nextSurfaceKey = 0;
+    // The write and the snapshot read are separate. Promote these keys when its revision is read.
+    let savedDraftStructure: { revision: number; keys: number[] } | null = null;
+    const savedToDraftSurfaceIndexes = computed(() =>
+        savedSurfaceKeys.value.map((key) => {
+            const index = draftSurfaceKeys.value.indexOf(key);
+            return index < 0 ? null : index;
+        }),
+    );
+    const draftStructureChanged = computed(
+        () =>
+            draftSurfaceKeys.value.length !== savedSurfaceKeys.value.length ||
+            savedToDraftSurfaceIndexes.value.some((index, previous) => index !== previous),
+    );
     /** Last server-observed source text; the repair text is re-seeded only while it still matches. */
     let recoverySeed: string | null = null;
     /** Draft text captured when the current recovery action started; null outside one. */
@@ -153,10 +176,50 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         }
     }
 
+    // Keep index-based state on the same physical rows as the draft changes.
+    function setDraftSurfaceKeys(keys: number[]): void {
+        if (keys === draftSurfaceKeys.value) return;
+        const indexes = new Map(keys.map((key, index) => [key, index]));
+        const previous = draftSurfaceKeys.value;
+        const remap = (index: number | null): number | null =>
+            index === null ? null : (indexes.get(previous[index]!) ?? null);
+        selectedSurfaceIndex.value = remap(selectedSurfaceIndex.value);
+        hoveredSurfaceIndex.value = remap(hoveredSurfaceIndex.value);
+        syncSurfaceSelection(keys.length);
+        if (optimizationVariables.value) {
+            optimizationVariables.value = optimizationVariables.value.flatMap((variable) => {
+                const surface = remap(variable.surface);
+                return surface === null ? [] : [{ ...variable, surface }];
+            });
+        }
+        expandedSurfaceDetails.value = new Map(
+            [...expandedSurfaceDetails.value].filter(([key]) => indexes.has(key)),
+        );
+        draftSurfaceKeys.value = keys;
+    }
+
+    function applySurfaceEdit(result: SurfaceEditResult): void {
+        const keys = Array<number>(result.system.surfaces.length);
+        result.old_to_new.forEach((index, previous) => {
+            if (index !== null) keys[index] = draftSurfaceKeys.value[previous]!;
+        });
+        for (const index of result.inserted) keys[index] = nextSurfaceKey++;
+        setDraftSurfaceKeys(keys);
+        draft.value = result.system;
+    }
+
     function adopt(snapshot: SystemSnapshot): void {
         if (snapshot.revision !== revision.value) materialsLoaded = false; // custom glasses may have changed
         const previous = system.value;
         const selectedValue = previous?.wavelengths[wavelengthIndex.value]?.value;
+        const count = snapshot.system.surfaces.length;
+        if (savedDraftStructure?.revision === snapshot.revision) {
+            savedSurfaceKeys.value = savedDraftStructure.keys;
+        } else if (savedSurfaceKeys.value.length !== count) {
+            savedSurfaceKeys.value = Array.from({ length: count }, () => nextSurfaceKey++);
+        }
+        savedDraftStructure = null;
+        setDraftSurfaceKeys(savedSurfaceKeys.value);
         system.value = clone(snapshot.system);
         draft.value = clone(snapshot.system);
         revision.value = snapshot.revision;
@@ -609,9 +672,14 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
             actionError.value = tr('workbench.m2');
             return false;
         }
-        return commit(() =>
-            callTool('system_set', { system: clone(next), revision: revision.value }),
-        );
+        const keys = next === draft.value ? draftSurfaceKeys.value : null;
+        return commit(async () => {
+            const saved = await callTool('system_set', {
+                system: clone(next),
+                revision: revision.value,
+            });
+            if (keys) savedDraftStructure = { revision: saved.revision, keys };
+        });
     }
 
     /**
@@ -705,13 +773,17 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     /** Add the variable when absent, remove it when present; surface V-badges drive this. */
     function toggleOptimizationVariable(variable: OptimizeVariable): void {
         const key = variableKey(variable);
-        const i = optimizationVariables.value.findIndex((v) => variableKey(v) === key);
-        if (i >= 0) optimizationVariables.value.splice(i, 1);
-        else optimizationVariables.value.push({ ...variable });
+        const variables = optimizationVariables.value ?? [];
+        optimizationVariables.value = variables.some((v) => variableKey(v) === key)
+            ? variables.filter((v) => variableKey(v) !== key)
+            : [...variables, variable];
     }
 
     function revert(): void {
-        if (system.value) draft.value = clone(system.value);
+        if (system.value) {
+            setDraftSurfaceKeys(savedSurfaceKeys.value);
+            draft.value = clone(system.value);
+        }
         actionError.value = '';
     }
 
@@ -825,6 +897,11 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         liveSync,
         optimizationVariables,
         toggleOptimizationVariable,
+        draftSurfaceKeys,
+        expandedSurfaceDetails,
+        savedToDraftSurfaceIndexes,
+        draftStructureChanged,
+        applySurfaceEdit,
         autofocus,
         undo,
         redo,

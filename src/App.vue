@@ -68,6 +68,7 @@ import { useAppearance } from './composables/useAppearance';
 import { tr } from './i18n';
 import { callTool, errorMessage } from './api';
 import { useWorkbench } from './composables/useWorkbench';
+import { hoverSurface } from './composables/useSurfaceSelection';
 import AnalysisPanel from './components/AnalysisPanel.vue';
 import ApertureTools from './components/ApertureTools.vue';
 import ConfigurationPanel from './components/ConfigurationPanel.vue';
@@ -79,7 +80,6 @@ import OpticalLayoutView from './components/OpticalLayoutView.vue';
 import OptimizePanel from './components/OptimizePanel.vue';
 import PrescriptionView from './components/PrescriptionView.vue';
 import AnalysisNavigator, { type AnalysisView } from './components/AnalysisNavigator.vue';
-import { syncSurfaceSelection } from './composables/useSurfaceSelection';
 import ChatPanel from './components/ChatPanel.vue';
 import MetricsBar from './components/MetricsBar.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
@@ -93,7 +93,6 @@ import SpotView from './components/SpotView.vue';
 import {
     TABS,
     type OpticalSystem,
-    type OptimizeVariable,
     type ProjectListResult,
     type Tab,
 } from './types';
@@ -143,13 +142,6 @@ const wb = useWorkbench(wantMtf);
 function setDraft(next: OpticalSystem): void {
     wb.draft.value = next;
 }
-const optimizationVariables = computed<OptimizeVariable[]>({
-    get: () => wb.optimizationVariables.value,
-    set: (value) => (wb.optimizationVariables.value = value),
-});
-const toggleOptimizationVariable = (variable: OptimizeVariable): void =>
-    wb.toggleOptimizationVariable(variable);
-
 /** Live Sync is owned by useWorkbench (M6); the shell only persists the user's choice across sessions. */
 const liveSyncStored = useLocalStorage('hissabeth.liveSync', false);
 wb.liveSync.value = liveSyncStored.value;
@@ -192,7 +184,10 @@ const navDrawer = ref(false);
 const settingsError = ref('');
 const chatOpen = useLocalStorage('hissabeth.assistantOpen', true);
 const chatSize = useLocalStorage('hissabeth.assistantSize', 32);
-watch(tab, (value) => (savedView.value = value));
+watch(tab, (value) => {
+    savedView.value = value;
+    hoverSurface(null);
+});
 
 // ---- sequential / laser-bench mode + unified save --------------------------------
 type OpticalMode = 'section' | '2d' | '3d';
@@ -262,14 +257,6 @@ function switchConfiguration(index: number): void {
     setDraft({ ...draft, active_configuration: index });
     if (wasClean) void wb.applyDraft();
 }
-
-// ---- shared surface hover/selection lives in composables/useSurfaceSelection (M8/M9) ----
-// Report the draft's surface count so stale indexes drop even while the layout view is hidden.
-watch(
-    () => wb.draft.value?.surfaces.length ?? 0,
-    (count) => syncSurfaceSelection(count),
-    { immediate: true },
-);
 
 // ---- project menu (recent / new / native dialogs with path fallback) ----
 const projects = ref<ProjectListResult | null>(null);
@@ -1074,6 +1061,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             v-model:mode="effectiveMode"
                                             v-model:bench-dirty="benchDirty"
                                             :system="wb.system.value"
+                                            :saved-to-draft="wb.savedToDraftSurfaceIndexes.value"
                                             :layout="wb.layout.value"
                                             :wavelength="wb.layoutWavelength.value"
                                             :revision="wb.revision.value"
@@ -1160,11 +1148,16 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             <SystemEditor v-model="wb.draft.value" />
                                             <SurfaceTable
                                                 v-model="wb.draft.value"
+                                                v-model:expanded="wb.expandedSurfaceDetails.value"
+                                                :surface-keys="wb.draftSurfaceKeys.value"
                                                 :materials="wb.materials.value"
                                                 :dirty="wb.dirty.value"
                                                 :online="wb.online.value"
-                                                :variables="optimizationVariables"
-                                                @toggle-variable="toggleOptimizationVariable"
+                                                :variables="
+                                                    wb.optimizationVariables.value ?? undefined
+                                                "
+                                                @toggle-variable="wb.toggleOptimizationVariable"
+                                                @structure-edit="wb.applySurfaceEdit"
                                             />
                                             <GapSolveEditor
                                                 :system="wb.system.value"
@@ -1186,8 +1179,11 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         </template>
                                         <OptimizePanel
                                             v-if="tab === 'Optimize'"
-                                            v-model:variables="optimizationVariables"
-                                            :system="wb.system.value"
+                                            v-model:variables="wb.optimizationVariables.value"
+                                            :system="wb.draft.value"
+                                            :draft-structure-changed="
+                                                wb.draftStructureChanged.value
+                                            "
                                             :paraxial="wb.paraxial.value"
                                             :revision="wb.revision.value"
                                             :online="wb.online.value"
@@ -1221,6 +1217,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         />
                                         <PrescriptionView
                                             v-if="tab === 'Prescription'"
+                                            :saved-to-draft="wb.savedToDraftSurfaceIndexes.value"
                                             :system="wb.system.value"
                                             :chat-open="chatOpen"
                                         />
@@ -1250,9 +1247,9 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     compact
                                     editable
                                     :materials="wb.materials.value"
-                                    :variables="optimizationVariables"
+                                    :variables="wb.optimizationVariables.value ?? undefined"
                                     @update:model-value="setDraft"
-                                    @toggle-variable="toggleOptimizationVariable"
+                                    @toggle-variable="wb.toggleOptimizationVariable"
                                 /></section
                         ></Pane>
                     </Splitpanes>
