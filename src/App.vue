@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, provide, ref, watch, type Ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
@@ -77,10 +77,9 @@ import ImportExportPanel from './components/ImportExportPanel.vue';
 import MaterialsPanel from './components/MaterialsPanel.vue';
 import OpticalLayoutView from './components/OpticalLayoutView.vue';
 import OptimizePanel from './components/OptimizePanel.vue';
-import PrescriptionView, {
-    SURFACE_SELECTION,
-    type SurfaceSelectionState,
-} from './components/PrescriptionView.vue';
+import PrescriptionView from './components/PrescriptionView.vue';
+import AnalysisNavigator, { type AnalysisView } from './components/AnalysisNavigator.vue';
+import { syncSurfaceSelection } from './composables/useSurfaceSelection';
 import ChatPanel from './components/ChatPanel.vue';
 import MetricsBar from './components/MetricsBar.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
@@ -136,57 +135,29 @@ const NAV_ICONS: Partial<Record<WorkbenchView, unknown>> = {
 };
 const wantMtf = computed(() => tab.value === 'MTF');
 const wb = useWorkbench(wantMtf);
-// ---- parallel useWorkbench contract (liveSync / applyDraft / optimization variables) ----
-type WorkbenchContract = {
-    liveSync?: Ref<boolean>;
-    applyDraft?: (next: OpticalSystem) => void;
-    optimizationVariables?: Ref<OptimizeVariable[]>;
-    toggleOptimizationVariable?: (variable: OptimizeVariable) => void;
-};
-const wbx = wb as typeof wb & WorkbenchContract;
-
-const applyDraft = (next: OpticalSystem): void => {
-    if (wbx.applyDraft) wbx.applyDraft(next);
-    else wb.draft.value = next;
-};
-
-const localVariables = ref<OptimizeVariable[]>([]);
-const optimizationVariables = computed<OptimizeVariable[]>({
-    get: () => wbx.optimizationVariables?.value ?? localVariables.value,
-    set: (value) => {
-        if (wbx.optimizationVariables) wbx.optimizationVariables.value = value;
-        else localVariables.value = value;
-    },
-});
-/** Structural identity of a variable: kind + address fields, independent of bounds. */
-const variableKey = (v: OptimizeVariable): string =>
-    JSON.stringify([
-        v.kind,
-        v.surface ?? null,
-        'index' in v ? v.index : null,
-        'axis' in v ? v.axis : null,
-        'configuration' in v ? v.configuration : null,
-    ]);
-function toggleOptimizationVariable(variable: OptimizeVariable): void {
-    if (wbx.toggleOptimizationVariable) {
-        wbx.toggleOptimizationVariable(variable);
-        return;
-    }
-    const list = optimizationVariables.value;
-    const existing = list.findIndex((v) => variableKey(v) === variableKey(variable));
-    optimizationVariables.value =
-        existing >= 0
-            ? list.filter((_, i) => i !== existing)
-            : [...list, { ...variable, min: null, max: null }];
+/**
+ * Draft edits from the shell (dock, configuration quick switch) go straight into the shared M6
+ * draft. Live Sync commits them through useWorkbench's own debounce; with Live Sync off they wait
+ * for Apply. The shell never runs a second commit path of its own.
+ */
+function setDraft(next: OpticalSystem): void {
+    wb.draft.value = next;
 }
+const optimizationVariables = computed<OptimizeVariable[]>({
+    get: () => wb.optimizationVariables.value,
+    set: (value) => (wb.optimizationVariables.value = value),
+});
+const toggleOptimizationVariable = (variable: OptimizeVariable): void =>
+    wb.toggleOptimizationVariable(variable);
 
-/** Live sync applies a valid draft as soon as it changes; stored locally until the engine-side contract lands. */
+/** Live Sync is owned by useWorkbench (M6); the shell only persists the user's choice across sessions. */
 const liveSyncStored = useLocalStorage('hissabeth.liveSync', false);
+wb.liveSync.value = liveSyncStored.value;
 const liveSync = computed<boolean>({
-    get: () => wbx.liveSync?.value ?? liveSyncStored.value,
+    get: () => wb.liveSync.value,
     set: (value) => {
+        wb.liveSync.value = value;
         liveSyncStored.value = value;
-        if (wbx.liveSync) wbx.liveSync.value = value;
     },
 });
 
@@ -285,30 +256,19 @@ const activeConfiguration = computed(() => wb.draft.value?.active_configuration 
 function switchConfiguration(index: number): void {
     const draft = wb.draft.value;
     if (!draft || !draft.configurations?.[index] || index === activeConfiguration.value) return;
-    applyDraft({ ...draft, active_configuration: index });
+    // A clean draft switches immediately; pending edits keep the switch in the draft so Apply (or
+    // Live Sync) commits everything together instead of silently pushing unrelated changes.
+    const wasClean = !wb.dirty.value;
+    setDraft({ ...draft, active_configuration: index });
+    if (wasClean) void wb.applyDraft();
 }
 
-// ---- shared surface hover/selection (useSurfaceSelection contract shape) ----
-const hoveredSurfaceIndex = ref<number | null>(null);
-const selectedSurfaceIndex = ref<number | null>(null);
-const surfaceSelection: SurfaceSelectionState = {
-    hoveredSurfaceIndex,
-    selectedSurfaceIndex,
-    hoverSurface: (index) => {
-        hoveredSurfaceIndex.value = index;
-    },
-    selectSurface: (index) => {
-        selectedSurfaceIndex.value = index;
-    },
-    clearSurfaceSelection: () => {
-        hoveredSurfaceIndex.value = null;
-        selectedSurfaceIndex.value = null;
-    },
-};
-provide(SURFACE_SELECTION, surfaceSelection);
+// ---- shared surface hover/selection lives in composables/useSurfaceSelection (M8/M9) ----
+// Report the draft's surface count so stale indexes drop even while the layout view is hidden.
 watch(
-    () => wb.revision.value,
-    () => surfaceSelection.clearSurfaceSelection(),
+    () => wb.draft.value?.surfaces.length ?? 0,
+    (count) => syncSurfaceSelection(count),
+    { immediate: true },
 );
 
 // ---- project menu (recent / new / native dialogs with path fallback) ----
@@ -486,12 +446,10 @@ useEventListener('keydown', (event: KeyboardEvent) => {
         }
     }
 });
-/** Live sync: a valid dirty draft is applied without waiting for Ctrl+S. */
-watch(
-    () => liveSync.value && canSave.value,
-    (ready) => {
-        if (ready) void wb.save();
-    },
+/** Spot / MTF / Analysis share the merged analysis sub-navigation. */
+const ANALYSIS_VIEWS: readonly AnalysisView[] = ['Spot diagram', 'MTF', 'Analysis'];
+const analysisView = computed<AnalysisView | null>(() =>
+    (ANALYSIS_VIEWS as readonly string[]).includes(tab.value) ? (tab.value as AnalysisView) : null,
 );
 const layoutSection = ref(true);
 const showTable = computed(
@@ -1125,9 +1083,15 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                             :stale="wb.stale.value"
                                             :refresh-pending="wb.refreshPending.value"
                                             :mutate="wb.mutate"
+                                            :paraxial="wb.paraxial.value"
                                             :chat-open="chatOpen"
                                             @chat="chatOpen = true"
                                             @scope="layoutSection = $event"
+                                        />
+                                        <AnalysisNavigator
+                                            v-if="analysisView"
+                                            :active="analysisView"
+                                            @navigate="tab = $event"
                                         />
                                         <SpotView
                                             v-if="tab === 'Spot diagram'"
@@ -1177,7 +1141,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         />
                                         <MaterialsPanel
                                             v-if="tab === 'Materials'"
-                                            :model-value="wb.system.value"
+                                            v-model="wb.draft.value"
                                             :online="wb.online.value"
                                         />
                                         <ImportExportPanel
@@ -1287,7 +1251,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     editable
                                     :materials="wb.materials.value"
                                     :variables="optimizationVariables"
-                                    @update:model-value="applyDraft"
+                                    @update:model-value="setDraft"
                                     @toggle-variable="toggleOptimizationVariable"
                                 /></section
                         ></Pane>
