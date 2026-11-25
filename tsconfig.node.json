@@ -1,10 +1,17 @@
 {
-  "compilerOptions": {
-    "composite": true,
-    "skipLibCheck": true,
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true
-  },
-  "include": ["vite.config.ts"]
+    "compilerOptions": {
+        "composite": true,
+        "skipLibCheck": true,
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "allowSyntheticDefaultImports": true,
+        "types": ["node"]
+    },
+    "include": [
+        "vite.config.ts",
+        "scripts/**/*.ts",
+        "src-tauri/tests/agent_chat.ts",
+        "src-tauri/tests/agent_models.ts",
+        "src-tauri/tests/ui_preferences.ts"
+    ]
 }

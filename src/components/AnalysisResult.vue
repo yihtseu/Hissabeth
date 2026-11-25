@@ -21,15 +21,15 @@ const BLUE = '#286c8d',
 const o = computed(() => props.outcome);
 
 /** Field-local basis of the analyses that sample or project in the tangential/sagittal frame. */
+const frameVector = (a: [number, number]): string => `(${fmt(a[0], 4)}, ${fmt(a[1], 4)})`;
 const frameText = computed(() => {
     const r = o.value;
     if (!('frame' in r.data)) return '';
     const { tangential: t, sagittal: s } = r.data.frame;
-    const v = (a: [number, number]): string => `(${fmt(a[0], 4)}, ${fmt(a[1], 4)})`;
     return tr('result.frame', {
         field: props.fieldText ? `Field ${props.fieldText} · ` : '',
-        t: v(t),
-        s: v(s),
+        t: frameVector(t),
+        s: frameVector(s),
     });
 });
 
@@ -137,7 +137,7 @@ const longitudinal = computed(() => {
 const sphero = computed(() => {
     const r = o.value;
     if (r.kind !== 'spherochromatism') return null;
-    const ref = r.data.reference_focus;
+    const referenceFocus = r.data.reference_focus;
     const label = (c: (typeof r.data.curves)[number]): string =>
         `${c.wavelength_index + 1}: ${c.wavelength} nm${c.weight === 0 ? tr('result.weightZero') : ''}`;
     const series: ChartSeries[] = r.data.curves.map((c) => ({
@@ -145,7 +145,10 @@ const sphero = computed(() => {
         color: rgbCss(c.color),
         dashed: c.weight === 0,
         // Offset from the common reference focus, not the curve's own shift, so longitudinal color stays visible.
-        points: c.points.map((p) => ({ x: p.pupil, y: p.focus === null ? null : p.focus - ref })),
+        points: c.points.map((p) => ({
+            x: p.pupil,
+            y: p.focus === null ? null : p.focus - referenceFocus,
+        })),
     }));
     const invalid = [
         ...new Set(
@@ -251,13 +254,15 @@ const wave = computed(() => {
 const logPsf = ref(true);
 const psfHalf = computed(() => {
     const r = o.value;
-    return r.kind === 'diffraction_psf' ? (r.data.grid * r.data.pixel_size * 1000) / 2 : 0;
+    return r.kind === 'diffraction_psf' || r.kind === 'huygens_psf'
+        ? (r.data.grid * r.data.pixel_size * 1000) / 2
+        : 0;
 });
 
 // ---- other curves -------------------------------------------------------------------
 const diffMtf = computed(() => {
     const r = o.value;
-    if (r.kind !== 'diffraction_mtf') return null;
+    if (r.kind !== 'diffraction_mtf' && r.kind !== 'huygens_mtf') return null;
     const f = r.data.frequencies;
     return [
         {
@@ -279,7 +284,7 @@ const diffMtf = computed(() => {
 });
 const diffRows = computed<LedgerRow[]>(() => {
     const r = o.value;
-    if (r.kind !== 'diffraction_mtf') return [];
+    if (r.kind !== 'diffraction_mtf' && r.kind !== 'huygens_mtf') return [];
     return r.data.components.map((c) => ({
         wavelength: c.wavelength,
         weight: c.weight,
@@ -796,7 +801,7 @@ const raw = computed(() =>
         </template>
 
         <!-- PSF -->
-        <template v-else-if="o.kind === 'diffraction_psf'">
+        <template v-else-if="o.kind === 'diffraction_psf' || o.kind === 'huygens_psf'">
             <label class="inline"
                 ><input v-model="logPsf" type="checkbox" /> {{ tr('result.logScale') }}</label
             >
@@ -832,7 +837,7 @@ const raw = computed(() =>
         </template>
 
         <!-- diffraction MTF -->
-        <template v-else-if="diffMtf && o.kind === 'diffraction_mtf'">
+        <template v-else-if="diffMtf && (o.kind === 'diffraction_mtf' || o.kind === 'huygens_mtf')">
             <p class="note">{{ frameText }}</p>
             <LineChart
                 :title="tr('result.diffMtfTitle')"
@@ -914,6 +919,145 @@ const raw = computed(() =>
                 {{ tr('fragments.fractionIsTheCumulativeTransmittedPupilAreaWeightNormalizedTo') }}
                 {{ o.data.normalization }}.
             </p>
+        </template>
+
+        <!-- Zernike decomposition -->
+        <template v-else-if="o.kind === 'wavefront_zernike'">
+            <dl class="kv">
+                <div>
+                    <dt>{{ tr('result.zernikeResidual') }}</dt>
+                    <dd>{{ fmt(o.data.fit_residual_rms) }} {{ tr('result.waves') }}</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.validFailed') }}</dt>
+                    <dd>{{ o.data.valid }}</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.zernikeOrdering') }}</dt>
+                    <dd>{{ o.data.ordering }}</dd>
+                </div>
+            </dl>
+            <table class="wide-table">
+                <caption class="sr-only">
+                    {{
+                        tr('result.zernikeCaption')
+                    }}
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">j</th>
+                        <th scope="col">{{ tr('result.zernikeName') }}</th>
+                        <th scope="col">n</th>
+                        <th scope="col">m</th>
+                        <th scope="col">{{ tr('result.zernikeCoefficient') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="t in o.data.terms" :key="t.j">
+                        <td>{{ t.j }}</td>
+                        <td>{{ t.name }}</td>
+                        <td>{{ t.n }}</td>
+                        <td>{{ t.m }}</td>
+                        <td>{{ fmt(t.coefficient) }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p class="note">{{ o.data.normalization }}.</p>
+        </template>
+
+        <!-- Gaussian beam -->
+        <template v-else-if="o.kind === 'gaussian_beam'">
+            <dl class="kv">
+                <div>
+                    <dt>{{ tr('result.gaussImageRadius') }}</dt>
+                    <dd>{{ fmt(o.data.image.radius * 1000) }} µm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussWaist') }}</dt>
+                    <dd>{{ fmt(o.data.image.waist * 1000) }} µm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussWaistOffset') }}</dt>
+                    <dd>{{ fmt(o.data.image.waist_offset) }} mm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussRayleigh') }}</dt>
+                    <dd>{{ fmt(o.data.image.rayleigh_range) }} mm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussDivergence') }}</dt>
+                    <dd>{{ fmt(o.data.image.divergence * 1000) }} mrad</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussCurvature') }}</dt>
+                    <dd>
+                        {{
+                            o.data.image.curvature === null
+                                ? tr('result.gaussFlat')
+                                : fmt(o.data.image.curvature) + ' mm'
+                        }}
+                    </dd>
+                </div>
+            </dl>
+            <table class="wide-table">
+                <caption class="sr-only">
+                    {{
+                        tr('result.gaussCaption')
+                    }}
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">{{ tr('result.gaussSurface') }}</th>
+                        <th scope="col">z (mm)</th>
+                        <th scope="col">{{ tr('result.gaussRadius') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="row in o.data.surfaces" :key="row.surface">
+                        <td>{{ row.surface + 1 }}</td>
+                        <td>{{ fmt(row.z) }}</td>
+                        <td>{{ fmt(row.radius) }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p class="note">{{ o.data.model }}.</p>
+        </template>
+
+        <!-- fiber coupling -->
+        <template v-else-if="o.kind === 'fiber_coupling'">
+            <dl class="kv">
+                <div>
+                    <dt>{{ tr('result.fiberEfficiency') }}</dt>
+                    <dd>{{ percent(o.data.efficiency) }}</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.fiberMfd') }}</dt>
+                    <dd>{{ fmt(o.data.mode_field_diameter * 1000) }} µm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussImageRadius') }}</dt>
+                    <dd>{{ fmt(o.data.beam_radius * 1000) }} µm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.gaussCurvature') }}</dt>
+                    <dd>
+                        {{
+                            o.data.wavefront_curvature === null
+                                ? tr('result.gaussFlat')
+                                : fmt(o.data.wavefront_curvature) + ' mm'
+                        }}
+                    </dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.fiberOptimalMfd') }}</dt>
+                    <dd>{{ fmt(o.data.optimal_mode_field_diameter * 1000) }} µm</dd>
+                </div>
+                <div>
+                    <dt>{{ tr('result.fiberOptimalEfficiency') }}</dt>
+                    <dd>{{ percent(o.data.optimal_efficiency) }}</dd>
+                </div>
+            </dl>
+            <p class="note">{{ o.data.model }}.</p>
         </template>
 
         <div v-if="problems.length" role="status" class="banner warn problem-list">

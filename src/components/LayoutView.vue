@@ -2,7 +2,9 @@
 import { tr } from '../i18n';
 import { usePreferencesStore } from '../stores/preferences';
 const preferences = usePreferencesStore();
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { select } from 'd3-selection';
+import { zoom, zoomIdentity, type D3ZoomEvent, type ZoomBehavior } from 'd3-zoom';
 import { FALLBACK_COLOR, rgbCss } from '../color';
 import { drawRadius, profileCurve, sag, type Profile } from '../profile';
 import type { Layout, OpticalSystem, Point3, Ray } from '../types';
@@ -206,6 +208,31 @@ const shapeText = (p: Profile): string =>
     p.radius === 0 && !p.even.length && !p.odd.length
         ? tr('layout.shapePlane')
         : tr('layout.shapeCurved');
+
+/** Pan/zoom over the auto-fit base view; the user's framing survives data updates, double-click resets to fit. */
+const svgEl = ref<SVGSVGElement | null>(null);
+const zoomTransform = ref('');
+let zoomBehavior: ZoomBehavior<SVGSVGElement, unknown> | undefined;
+
+onMounted(() => {
+    const el = svgEl.value;
+    if (!el) return;
+    const selection = select(el);
+    zoomBehavior = zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.4, 40])
+        .on('zoom', (event: D3ZoomEvent<SVGSVGElement, unknown>) => {
+            zoomTransform.value = event.transform.toString();
+        });
+    selection.call(zoomBehavior);
+    selection.on('dblclick.zoom', (event: MouseEvent) => {
+        event.preventDefault();
+        selection.call(zoomBehavior!.transform, zoomIdentity);
+    });
+});
+
+onBeforeUnmount(() => {
+    if (svgEl.value) select(svgEl.value).on('.zoom', null);
+});
 </script>
 
 <template>
@@ -213,13 +240,20 @@ const shapeText = (p: Profile): string =>
         <div class="panel-head">
             <h3 id="layout-title">{{ tr('layout.title') }}</h3>
             <span>{{ tr('fragments.objectImageMmVertical') }}{{ exaggeration.toFixed(1) }}</span>
+            <span class="optical-hint">{{ tr('layout.zoomHint') }}</span>
             <label class="inline"
                 ><input v-model="includeObject" type="checkbox" :disabled="distance === null" />
                 {{ tr('layout.includeObject')
                 }}{{ distance === null ? tr('layout.atInfinity') : ` (${distance} mm)` }}</label
             >
         </div>
-        <svg :viewBox="`0 0 ${W} ${H}`" role="img" aria-labelledby="layout-svg-title">
+        <svg
+            ref="svgEl"
+            class="zoomable"
+            :viewBox="`0 0 ${W} ${H}`"
+            role="img"
+            aria-labelledby="layout-svg-title"
+        >
             <title id="layout-svg-title">
                 {{ tr('fragments.meridionalRayLayoutWith') }} {{ system.surfaces.length }}
                 {{ tr('fragments.surfacesAnd') }} {{ layout.rays.length }}
@@ -249,63 +283,99 @@ const shapeText = (p: Profile): string =>
                 :height="H"
                 fill="url(#grid)"
             />
-            <line
-                :x1="10"
-                :y1="CY"
-                :x2="W - 10"
-                :y2="CY"
-                stroke="var(--plot-ink)"
-                stroke-dasharray="6 5"
-            />
-            <polyline
-                v-for="(r, i) in layout.rays"
-                class="data-mark"
-                :key="`r${i}`"
-                :points="rayPath(r)"
-                fill="none"
-                :stroke="fieldColor(layout.field_indices[i])"
-                stroke-width="1.15"
-                opacity=".8"
-            />
-            <polygon
-                v-for="(a, i) in arrows"
-                :key="`a${i}`"
-                points="6,0 -5,3.5 -5,-3.5"
-                :transform="`translate(${a.x} ${a.y}) rotate(${a.deg})`"
-                :fill="a.color"
-            />
-            <g v-for="(s, i) in surfaceShapes" :key="`s${i}`">
-                <polyline
-                    :points="s.points"
-                    fill="none"
-                    :stroke="style(s.interaction).stroke"
-                    :stroke-width="style(s.interaction).width"
-                    :stroke-dasharray="style(s.interaction).dash"
-                />
+            <g :transform="zoomTransform || undefined">
                 <line
-                    v-for="(c, k) in s.clips"
-                    :key="k"
-                    :x1="c.x - 5"
-                    :y1="c.y"
-                    :x2="c.x + 5"
-                    :y2="c.y"
-                    stroke="var(--optic-aperture)"
-                    stroke-width="2.4"
+                    :x1="10"
+                    :y1="CY"
+                    :x2="W - 10"
+                    :y2="CY"
+                    stroke="var(--plot-ink)"
+                    stroke-dasharray="6 5"
                 />
-                <text :x="s.x" :y="s.top" font-size="9" fill="var(--plot-ink)" text-anchor="middle">
-                    {{ i + 1 }}{{ i === system.stop_index ? tr('layout.stop') : '' }}
-                </text>
-            </g>
-            <g v-if="showObject">
                 <polyline
-                    :points="objectShape.points"
+                    v-for="(r, i) in layout.rays"
+                    class="data-mark"
+                    :key="`r${i}`"
+                    :points="rayPath(r)"
+                    fill="none"
+                    :stroke="fieldColor(layout.field_indices[i])"
+                    stroke-width="1.15"
+                    opacity=".8"
+                />
+                <polygon
+                    v-for="(a, i) in arrows"
+                    :key="`a${i}`"
+                    points="6,0 -5,3.5 -5,-3.5"
+                    :transform="`translate(${a.x} ${a.y}) rotate(${a.deg})`"
+                    :fill="a.color"
+                />
+                <g v-for="(s, i) in surfaceShapes" :key="`s${i}`">
+                    <polyline
+                        :points="s.points"
+                        fill="none"
+                        :stroke="style(s.interaction).stroke"
+                        :stroke-width="style(s.interaction).width"
+                        :stroke-dasharray="style(s.interaction).dash"
+                    />
+                    <line
+                        v-for="(c, k) in s.clips"
+                        :key="k"
+                        :x1="c.x - 5"
+                        :y1="c.y"
+                        :x2="c.x + 5"
+                        :y2="c.y"
+                        stroke="var(--optic-aperture)"
+                        stroke-width="2.4"
+                    />
+                    <text
+                        :x="s.x"
+                        :y="s.top"
+                        font-size="9"
+                        fill="var(--plot-ink)"
+                        text-anchor="middle"
+                    >
+                        {{ i + 1 }}{{ i === system.stop_index ? tr('layout.stop') : '' }}
+                    </text>
+                </g>
+                <g v-if="showObject">
+                    <polyline
+                        :points="objectShape.points"
+                        fill="none"
+                        stroke="var(--optic-endpoint)"
+                        stroke-width="2"
+                    />
+                    <line
+                        v-for="(c, k) in objectShape.clips"
+                        :key="k"
+                        :x1="c.x - 5"
+                        :y1="c.y"
+                        :x2="c.x + 5"
+                        :y2="c.y"
+                        stroke="var(--optic-aperture)"
+                        stroke-width="2.4"
+                    />
+                    <text
+                        :x="px(objectZ)"
+                        :y="CY - HALF - 6"
+                        font-size="11"
+                        fill="var(--text)"
+                        text-anchor="middle"
+                    >
+                        {{ objectCaption }}
+                    </text>
+                </g>
+                <text v-else x="10" y="16" font-size="11" fill="var(--text)">
+                    {{ objectCaption }} · {{ objectPlace }}
+                </text>
+                <polyline
+                    :points="imageShape.points"
                     fill="none"
                     stroke="var(--optic-endpoint)"
                     stroke-width="2"
                 />
                 <line
-                    v-for="(c, k) in objectShape.clips"
-                    :key="k"
+                    v-for="(c, k) in imageShape.clips"
+                    :key="`ic${k}`"
                     :x1="c.x - 5"
                     :y1="c.y"
                     :x2="c.x + 5"
@@ -314,43 +384,15 @@ const shapeText = (p: Profile): string =>
                     stroke-width="2.4"
                 />
                 <text
-                    :x="px(objectZ)"
+                    :x="px(imageZ)"
                     :y="CY - HALF - 6"
                     font-size="11"
                     fill="var(--text)"
                     text-anchor="middle"
                 >
-                    {{ objectCaption }}
+                    {{ imageCaption }}
                 </text>
             </g>
-            <text v-else x="10" y="16" font-size="11" fill="var(--text)">
-                {{ objectCaption }} · {{ objectPlace }}
-            </text>
-            <polyline
-                :points="imageShape.points"
-                fill="none"
-                stroke="var(--optic-endpoint)"
-                stroke-width="2"
-            />
-            <line
-                v-for="(c, k) in imageShape.clips"
-                :key="`ic${k}`"
-                :x1="c.x - 5"
-                :y1="c.y"
-                :x2="c.x + 5"
-                :y2="c.y"
-                stroke="var(--optic-aperture)"
-                stroke-width="2.4"
-            />
-            <text
-                :x="px(imageZ)"
-                :y="CY - HALF - 6"
-                font-size="11"
-                fill="var(--text)"
-                text-anchor="middle"
-            >
-                {{ imageCaption }}
-            </text>
         </svg>
         <ul class="legend" :aria-label="tr('layout.legend')">
             <li v-for="(_f, i) in system.fields" :key="i" :style="{ color: fieldColor(i) }">

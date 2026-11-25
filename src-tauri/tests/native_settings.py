@@ -213,7 +213,7 @@ def exercise():
     commands_path.unlink(missing_ok=True)
     for agent in ("codex", "claude"):
         script = fixture_dir / agent
-        script.write_text("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\nbase=Path(__file__).resolve().parent\nwith (base/'native-selected-commands.jsonl').open('a') as f:f.write(json.dumps({'name':Path(sys.argv[0]).name,'args':sys.argv[1:]})+'\\n')\nif sys.argv[2]=='get':sys.exit(1)\nprint('Fixture registered')\n")
+        script.write_text("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\nbase=Path(__file__).resolve().parent\nwith (base/'native-selected-commands.jsonl').open('a') as f:f.write(json.dumps({'name':Path(sys.argv[0]).name,'args':sys.argv[1:]})+'\\n')\nif sys.argv[2]=='list':print('[]');sys.exit(0)\nprint('Fixture registered')\n")
         script.chmod(0o755)
     os.environ["PATH"] = str(fixture_dir) + os.pathsep + os.environ["PATH"]
     os.environ.pop("HISSABETH_SKIP_AGENT_REGISTRATION",None)

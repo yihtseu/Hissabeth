@@ -40,6 +40,8 @@ pub fn blank() -> System {
         temperature: 25.,
         pressure: 101325.,
         custom_glasses: vec![],
+        configurations: vec![],
+        active_configuration: 0,
     }
 }
 
@@ -109,6 +111,12 @@ fn profile_json(
     aperture: f64,
     clear_aperture: bool,
 ) -> Result<Value, String> {
+    if profile.toroid.is_some() || profile.zernike.is_some() {
+        return Err(
+            "Geopter project profiles cannot store toroidal or Zernike sag; export native JSON"
+                .into(),
+        );
+    }
     if !profile.even.is_empty() && !profile.odd.is_empty() {
         return Err(
             "Geopter project profiles cannot combine even and odd coefficient lists".into(),
@@ -281,6 +289,8 @@ pub fn import(text: &str) -> Result<System, String> {
         temperature: 25.,
         pressure: 101325.,
         custom_glasses: vec![],
+        configurations: vec![],
+        active_configuration: 0,
     };
     system.update()?;
     Ok(system)
@@ -411,7 +421,24 @@ mod tests {
                 assert!((ray.opl + ray.entrance_opl).abs() < 1e-12);
             }
         }
-        assert!(s.paraxial(s.reference()).unwrap_err().contains("Afocal"));
+        let first_order = s.paraxial(s.reference()).unwrap();
+        for key in [
+            "efl",
+            "bfl",
+            "front_focal_distance",
+            "image_distance",
+            "f_number",
+            "magnification",
+        ] {
+            assert!(first_order[key].is_null(), "{key}: {}", first_order[key]);
+        }
+        assert_eq!(first_order["matrix"], json!([1., 0., 0., 1.]));
+        assert_eq!(first_order["entrance_pupil_radius"], 5.);
+        assert_eq!(first_order["exit_pupil_radius"], 5.);
+        assert_eq!(first_order["image_na"], 0.);
+        assert!(solve::autofocus(&s, 587.5618).is_err());
+        assert!(analysis::longitudinal(&s, s.reference(), 5).is_err());
+        assert!(analysis::chromatic_focus(&s, 500., 650., 3).is_err());
     }
     #[test]
     fn geopter_export_rejects_unstored_builtin_dispersion_for_each_medium() {

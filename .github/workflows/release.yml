@@ -1,0 +1,196 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - 'v[0-9]*'
+
+permissions:
+    contents: read
+
+concurrency:
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    prepare:
+        name: Validate tag and prepare release
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        outputs:
+            release-id: ${{ steps.release.outputs.result }}
+            prerelease: ${{ steps.version.outputs.prerelease }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Validate release version
+              id: version
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              run: |
+                  python3 - <<'PY'
+                  import json
+                  import os
+                  import re
+                  import tomllib
+                  from pathlib import Path
+
+                  tag = os.environ["RELEASE_TAG"]
+                  if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", tag):
+                      raise SystemExit("Expected a version tag such as v0.1.0 or v0.1.0-rc.1")
+                  version = tag[1:]
+                  versions = {
+                      "package.json": json.loads(Path("package.json").read_text())["version"],
+                      "src-tauri/tauri.conf.json": json.loads(Path("src-tauri/tauri.conf.json").read_text())["version"],
+                      "src-tauri/Cargo.toml": tomllib.loads(Path("src-tauri/Cargo.toml").read_text())["package"]["version"],
+                  }
+                  for path, actual in versions.items():
+                      if actual != version:
+                          raise SystemExit(f"{path}: version {actual!r} does not match tag {tag!r}")
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                      output.write(f"prerelease={str('-' in version).lower()}\n")
+                  PY
+
+            - name: Create or reuse draft release
+              id: release
+              uses: actions/github-script@v9
+              env:
+                  PRERELEASE: ${{ steps.version.outputs.prerelease }}
+              with:
+                  result-encoding: string
+                  script: |
+                      const tag = context.ref.slice('refs/tags/'.length);
+                      let release;
+                      try {
+                        ({ data: release } = await github.rest.repos.getReleaseByTag({
+                          ...context.repo, tag,
+                        }));
+                      } catch (error) {
+                        if (error.status !== 404) throw error;
+                      }
+                      if (release && !release.draft) {
+                        throw new Error(`Release ${tag} is already published`);
+                      }
+                      if (!release) {
+                        ({ data: release } = await github.rest.repos.createRelease({
+                          ...context.repo,
+                          tag_name: tag,
+                          name: `Hissabeth ${tag}`,
+                          draft: true,
+                          prerelease: process.env.PRERELEASE === 'true',
+                          generate_release_notes: true,
+                        }));
+                      }
+                      return release.id;
+
+    build:
+        name: Build ${{ matrix.name }}
+        needs: prepare
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 60
+        permissions:
+            contents: write
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: Windows x64
+                      runner: windows-latest
+                      target: x86_64-pc-windows-msvc
+                      bundle: msi
+                    - name: macOS Apple Silicon
+                      runner: macos-latest
+                      target: aarch64-apple-darwin
+                      bundle: dmg
+                    - name: macOS Intel
+                      runner: macos-latest
+                      target: x86_64-apple-darwin
+                      bundle: dmg
+                    - name: Linux x64
+                      runner: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                      bundle: appimage,deb
+        env:
+            CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - name: Install Tauri Linux system libraries
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+
+            - name: Install frontend dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Build installer
+              env:
+                  BUILD_TARGET: ${{ matrix.target }}
+                  BUNDLE: ${{ matrix.bundle }}
+                  TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+              run: bun run tauri build --target "$BUILD_TARGET" --bundles "$BUNDLE" -- --locked
+              shell: bash
+
+            - name: Upload installer to draft release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  RELEASE_TAG: ${{ github.ref_name }}
+                  BUILD_TARGET: ${{ matrix.target }}
+                  BUNDLE: ${{ matrix.bundle }}
+              run: |
+                  shopt -s nullglob
+                  IFS=, read -r -a bundles <<< "$BUNDLE"
+                  installers=()
+                  for bundle in "${bundles[@]}"; do
+                    extension="$bundle"
+                    if [[ "$bundle" == appimage ]]; then
+                      extension=AppImage
+                    fi
+                    matches=("$CARGO_TARGET_DIR/$BUILD_TARGET/release/bundle/$bundle/"*."$extension")
+                    if (( ${#matches[@]} == 0 )); then
+                      echo "No $bundle installer found for $BUILD_TARGET" >&2
+                      exit 1
+                    fi
+                    installers+=("${matches[@]}")
+                  done
+                  gh release upload "$RELEASE_TAG" "${installers[@]}" --clobber
+
+    publish:
+        name: Publish completed release
+        needs: [prepare, build]
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+        steps:
+            - name: Publish release
+              uses: actions/github-script@v9
+              env:
+                  RELEASE_ID: ${{ needs.prepare.outputs.release-id }}
+                  PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+              with:
+                  script: |
+                      await github.rest.repos.updateRelease({
+                        ...context.repo,
+                        release_id: Number(process.env.RELEASE_ID),
+                        draft: false,
+                        prerelease: process.env.PRERELEASE === 'true',
+                        make_latest: process.env.PRERELEASE === 'true' ? 'false' : 'true',
+                      });

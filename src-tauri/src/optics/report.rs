@@ -185,32 +185,106 @@ fn enum_text<T: Serialize>(value: &T) -> Cell {
 }
 
 fn general(s: &System, p: usize) -> Section {
-    section(
-        SectionId::General,
-        vec![format!("Note:\n{}", s.note)],
-        vec![metrics(
-            "general",
-            "System information",
-            vec![
-                metric("name", "Title", Cell::text(&s.name), ""),
-                metric(
-                    "object_label",
-                    "Object label",
-                    Cell::text(&s.object_label),
-                    "",
-                ),
-                metric("image_label", "Image label", Cell::text(&s.image_label), ""),
-                metric("temperature", "Temperature", num(s.temperature, p), "C"),
-                metric("pressure", "Pressure", num(s.pressure, p), "Pa"),
-                metric(
-                    "custom_glasses",
-                    "Project glass entries",
-                    num(s.custom_glasses.len() as f64, 0),
-                    "",
-                ),
+    let mut paragraphs = vec![format!("Note:\n{}", s.note)];
+    let mut tables = vec![metrics(
+        "general",
+        "System information",
+        vec![
+            metric("name", "Title", Cell::text(&s.name), ""),
+            metric(
+                "object_label",
+                "Object label",
+                Cell::text(&s.object_label),
+                "",
+            ),
+            metric("image_label", "Image label", Cell::text(&s.image_label), ""),
+            metric("temperature", "Temperature", num(s.temperature, p), "C"),
+            metric("pressure", "Pressure", num(s.pressure, p), "Pa"),
+            metric(
+                "custom_glasses",
+                "Project glass entries",
+                num(s.custom_glasses.len() as f64, 0),
+                "",
+            ),
+        ],
+    )];
+    if !s.configurations.is_empty() {
+        paragraphs.push("Configuration surfaces use the same one-based numbering as the aperture stop; override values replace the shared base row in the resolved prescription. Every other section of this report evaluates the active configuration.".into());
+        let configurations = s
+            .configurations
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                row(
+                    format!("configuration_{i}"),
+                    vec![
+                        num((i + 1) as f64, 0),
+                        Cell::text(&c.name),
+                        Cell::text(if i == s.active_configuration {
+                            "Yes"
+                        } else {
+                            "No"
+                        }),
+                        num(c.overrides.len() as f64, 0),
+                    ],
+                )
+            })
+            .collect();
+        tables.push(table(
+            "configurations",
+            "Configurations",
+            &[
+                ("index", "Entry", None),
+                ("name", "Name", None),
+                ("active", "Active", None),
+                ("overrides", "Override count", None),
             ],
-        )],
-    )
+            configurations,
+        ));
+        let mut overrides = vec![];
+        for (i, c) in s.configurations.iter().enumerate() {
+            for (j, o) in c.overrides.iter().enumerate() {
+                let surface = |k: usize| num((k + 1) as f64, 0);
+                let (kind, target, value) = match o {
+                    Override::Thickness { surface: k, value } => {
+                        ("thickness", surface(*k), num(*value, p))
+                    }
+                    Override::Radius { surface: k, value } => {
+                        ("radius", surface(*k), radius(*value, p))
+                    }
+                    Override::Conic { surface: k, value } => ("conic", surface(*k), num(*value, p)),
+                    Override::Aperture { surface: k, value } => {
+                        ("aperture", surface(*k), num(*value, p))
+                    }
+                    Override::Material {
+                        surface: k,
+                        material,
+                    } => ("material", surface(*k), Cell::text(material)),
+                    Override::ObjectDistance { value } => (
+                        "object_distance",
+                        Cell::na("Shared object vertex"),
+                        value.map_or(Cell::infinite(1), |v| num(v, p)),
+                    ),
+                };
+                overrides.push(row(
+                    format!("override_{i}_{j}"),
+                    vec![num((i + 1) as f64, 0), Cell::text(kind), target, value],
+                ));
+            }
+        }
+        tables.push(table(
+            "configuration_overrides",
+            "Configuration overrides",
+            &[
+                ("configuration", "Configuration", None),
+                ("kind", "Operand", None),
+                ("surface", "Surface", None),
+                ("value", "Value", None),
+            ],
+            overrides,
+        ));
+    }
+    section(SectionId::General, paragraphs, tables)
 }
 fn specification(s: &System, p: usize) -> Section {
     let rows = vec![
@@ -862,9 +936,42 @@ fn surface_data(s: &System, p: usize) -> Section {
                 ));
             }
         }
+        if let Some(t) = profile.toroid {
+            rows.push(metric(
+                "toroid_revolution",
+                "Toroidal revolution radius",
+                num(t.revolution, p),
+                "mm",
+            ));
+            for (index, a) in t.even_y.iter().enumerate() {
+                let power = 4 + 2 * index;
+                rows.push(metric(
+                    &format!("toroid_y{power}"),
+                    &format!("toroidal y^{power}"),
+                    num(*a, p),
+                    &format!("mm^{}", 1 - power as i32),
+                ));
+            }
+        }
+        if let Some(z) = profile.zernike {
+            rows.push(metric(
+                "zernike_normalize",
+                "Zernike normalization radius",
+                num(z.normalize, p),
+                "mm",
+            ));
+            for (index, a) in z.coefficients.iter().enumerate() {
+                rows.push(metric(
+                    &format!("zernike_z{}", index + 1),
+                    &format!("Zernike Fringe Z{}", index + 1),
+                    num(*a, p),
+                    "mm",
+                ));
+            }
+        }
         tables.push(metrics(&id, &format!("{name} profile"), rows));
     }
-    section(SectionId::SurfaceData,vec!["Sag is the base conic plus even powers r^4,r^6,... and odd-list powers r^3,r^4,... . Every saved coefficient is listed, including zero entries and simultaneous even/odd terms. Object and image profiles are included. Display formatting uses scientific notation for small nonzero values; structured numeric cells retain full precision.".into()],tables)
+    section(SectionId::SurfaceData,vec!["Sag is the base conic plus even powers r^4,r^6,... and odd-list powers r^3,r^4,... . Toroidal profiles add a revolution radius with even y^4,y^6,... coefficients on the YZ section. Zernike Fringe sag terms Z1..Z37 (mm, Fringe ordering) add on their normalization radius. Every saved coefficient is listed, including zero entries and simultaneous even/odd terms. Object and image profiles are included. Display formatting uses scientific notation for small nonzero values; structured numeric cells retain full precision.".into()],tables)
 }
 fn one_line(s: &str) -> String {
     s.replace('\\', "\\\\")

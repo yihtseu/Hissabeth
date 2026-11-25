@@ -1,32 +1,37 @@
 use crate::optics::{
-    self, Field, PupilSampling, Spectrum, System, analysis, aperture, bench, editing, focus,
-    inspection, material, project, report, solve,
+    self, Field, PupilSampling, Spectrum, System, analysis, aperture, bench, bench_lab, editing,
+    focus, gaussian, inspection, material, optimize, project, report, solve, tolerance, zernike,
+    zmx,
 };
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
+
+mod broker;
+mod history;
+mod schema;
 mod workspace;
+
+pub use broker::{relay, rpc, rpc_shared, serve, serve_with_notifier};
+pub use schema::{bench_schema, system_schema, tools, validate_args};
 pub use workspace::Workspace;
+use workspace::{ProjectFiles, persist_system};
+
+pub type SharedWorkspace = Arc<RwLock<Workspace>>;
+pub type ChangeNotifier = Arc<dyn Fn(u64) + Send + Sync>;
 
 pub struct Engine {
     pub system: System,
     pub revision: u64,
     pub path: PathBuf,
     _lease: Arc<std::fs::File>,
+    history: history::History,
+    projects: ProjectFiles,
 }
-fn persist_system(path: &std::path::Path, system: &System) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(system).map_err(|e| e.to_string())?;
-    let pending = path.with_extension("pending");
-    let mut file = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    std::fs::rename(&pending, path).map_err(|e| e.to_string())
-}
+
 pub fn field_argument(s: &System, args: &Value) -> Result<Field, String> {
     if let Some(i) = args["field_index"].as_u64() {
         return s
@@ -96,141 +101,219 @@ impl Engine {
         let stored = serde_json::to_value(&system).map_err(|e| e.to_string())?;
         system.update()?;
         system.validate()?;
-        if bytes.is_some() && stored != serde_json::to_value(&system).map_err(|e| e.to_string())? {
-            if std::fs::read(&path).map_err(|e| e.to_string())?.as_slice() != bytes.unwrap() {
-                return Err("Saved file changed while loading; retry from disk".into());
+        let projects = ProjectFiles::load(&path);
+        if let Some(bytes) = bytes {
+            if stored != serde_json::to_value(&system).map_err(|e| e.to_string())? {
+                if std::fs::read(&path).map_err(|e| e.to_string())? != bytes {
+                    return Err("Saved file changed while loading; retry from disk".into());
+                }
+                persist_system(&path, &system, &projects, false)?;
             }
-            persist_system(&path, &system)?;
         }
-        Ok(Self {
+        Ok(Self::new(path, lease, revision, system, projects))
+    }
+
+    fn new(
+        path: PathBuf,
+        lease: Arc<std::fs::File>,
+        revision: u64,
+        system: System,
+        projects: ProjectFiles,
+    ) -> Self {
+        Self {
+            history: history::History::initial(
+                revision,
+                system.clone(),
+                projects.linked_path.clone(),
+            ),
             system,
             revision,
             path,
             _lease: lease,
-        })
-    }
-    fn replace(&mut self, mut next: System, expected: u64) -> Result<Value, String> {
-        if expected != self.revision {
-            return Err("System changed; read it again before editing".into());
+            projects,
         }
+    }
+
+    fn check_revision(&self, expected: u64) -> Result<(), String> {
+        check_revision(self.revision, expected)
+    }
+
+    fn replace(&mut self, mut next: System, expected: u64, action: &str) -> Result<Value, String> {
+        self.check_revision(expected)?;
         next.update()?;
-        self.commit(next, expected)
+        self.commit_with_action(next, expected, action)
     }
-    fn commit(&mut self, next: System, expected: u64) -> Result<Value, String> {
-        if expected != self.revision {
-            return Err("System changed; read it again before editing".into());
-        }
-        persist_system(&self.path, &next)?;
-        self.system = next;
-        self.revision += 1;
+
+    fn commit_with_action(
+        &mut self,
+        next: System,
+        expected: u64,
+        action: &str,
+    ) -> Result<Value, String> {
+        self.commit_project(next, expected, action, self.projects.clone())
+    }
+
+    fn commit_project(
+        &mut self,
+        next: System,
+        expected: u64,
+        action: &str,
+        projects: ProjectFiles,
+    ) -> Result<Value, String> {
+        self.check_revision(expected)?;
+        self.persist(next, &projects)?;
+        self.projects = projects;
+        self.history.push(
+            self.revision,
+            action,
+            self.system.clone(),
+            self.projects.linked_path.clone(),
+        );
         Ok(json!({"revision":self.revision}))
     }
+
+    fn persist(&mut self, next: System, projects: &ProjectFiles) -> Result<(), String> {
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("Workspace revision exhausted")?;
+        persist_system(&self.path, &next, projects, projects != &self.projects)?;
+        self.system = next;
+        self.revision = revision;
+        Ok(())
+    }
+
+    fn step_history(&mut self, expected: u64, undo: bool) -> Result<Value, String> {
+        self.check_revision(expected)?;
+        let entry = if undo {
+            self.history.peek_undo()?
+        } else {
+            self.history.peek_redo()?
+        };
+        let mut projects = self.projects.clone();
+        projects.linked_path = entry.linked_path.clone();
+        self.persist(entry.system.clone(), &projects)?;
+        self.projects = projects;
+        if undo {
+            self.history.step_undo(self.revision);
+        } else {
+            self.history.step_redo(self.revision);
+        }
+        Ok(json!({
+            "revision": self.revision,
+            "cursor": self.history.cursor(),
+            "can_undo": self.history.can_undo(),
+            "can_redo": self.history.can_redo(),
+        }))
+    }
+
+    fn project_open(&mut self, path: &str, expected: u64) -> Result<Value, String> {
+        self.check_revision(expected)?;
+        let path = ProjectFiles::resolve(&self.path, path, false)?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let linked = !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zmx"));
+        let mut next: System = if linked {
+            serde_json::from_str(&text).map_err(|e| format!("Invalid optical project: {e}"))?
+        } else {
+            zmx::import(&text)?
+        };
+        next.update()?;
+        next.validate()?;
+        let mut projects = self.projects.clone();
+        projects.select(&path, linked);
+        let mut result = self.commit_project(next, expected, "project_open", projects)?;
+        result["path"] = json!(path);
+        result["linked"] = json!(linked);
+        Ok(result)
+    }
+
+    fn project_save_as(&mut self, path: &str, expected: u64) -> Result<Value, String> {
+        self.check_revision(expected)?;
+        let path = ProjectFiles::resolve(&self.path, path, true)?;
+        let mut projects = self.projects.clone();
+        projects.select(&path, true);
+        let mut result =
+            self.commit_project(self.system.clone(), expected, "project_save_as", projects)?;
+        result["path"] = json!(path);
+        Ok(result)
+    }
+
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
         validate_args(name, &args)?;
-        let w = args["wavelength"]
-            .as_f64()
-            .unwrap_or(self.system.reference());
-        let field = field_argument(&self.system, &args)?;
-        let grid = args["grid"].as_u64().unwrap_or(17) as usize;
-        let samples = args["samples"].as_u64().unwrap_or(33) as usize;
-        let expected = || {
-            args["revision"]
-                .as_u64()
-                .ok_or_else(|| "revision is required".to_string())
-        };
-        let mut result = match name {
-            "bench_get" => Ok(json!({"bench":self.system.bench,"revision":self.revision})),
-            "bench_example" => Ok(json!({"bench":bench::example()})),
+        self.call_validated(name, args)
+    }
+
+    fn call_validated(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        match name {
+            "history_list" => Ok(self.history.list(self.revision)),
+            "history_compare" => {
+                let (from, to, from_index, to_index) = self.history.pair(&args)?;
+                Ok(history::compare(from, to, from_index, to_index))
+            }
+            "project_list" => Ok(self.projects.list(&self.path)),
+            "optimize" if args["apply"] == true => {
+                let expected = args["revision"].as_u64().unwrap();
+                self.check_revision(expected)?;
+                let result = run_optimization(&self.system, args)?;
+                self.apply_optimization(result, expected)
+            }
+            _ if is_mutating(name, &args) => self.mutate(name, args),
+            _ => read_system(&self.system, self.revision, name, args),
+        }
+    }
+
+    fn apply_optimization(
+        &mut self,
+        result: optimize::OptimizationResult,
+        expected: u64,
+    ) -> Result<Value, String> {
+        let mut response = optimization_response(&result, true, expected)?;
+        let committed = self.commit_with_action(result.system, expected, "optimize")?;
+        response["revision"] = committed["revision"].clone();
+        Ok(response)
+    }
+
+    fn mutate(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        let expected = args["revision"].as_u64().unwrap();
+        self.check_revision(expected)?;
+        match name {
             "bench_set" => {
                 let scene: bench::Bench =
                     serde_json::from_value(args["bench"].clone()).map_err(|e| e.to_string())?;
                 scene.validate()?;
                 let mut next = self.system.clone();
                 next.bench = Some(scene);
-                self.commit(next, expected()?)
+                self.commit_with_action(next, expected, name)
             }
-            "bench_trace" | "bench_assembly" => {
-                let supplied: Option<bench::Bench> = args
-                    .get("bench")
-                    .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
-                    .transpose()?;
-                let scene = supplied
-                    .as_ref()
-                    .or(self.system.bench.as_ref())
-                    .ok_or("Create a free-space bench first")?;
-                scene.validate()?;
-                let mut value = if name == "bench_trace" {
-                    serde_json::to_value(scene.trace()?).map_err(|e| e.to_string())?
-                } else {
-                    scene.assembly()
-                };
-                value["revision"] = json!(self.revision);
-                value["saved"] = json!(supplied.is_none());
-                Ok(value)
+            "bench_template" | "bench_auto_aim" => {
+                let mut result = bench_preview(&self.system, name, &args)?;
+                let scene = serde_json::from_value::<bench::Bench>(result["bench"].clone())
+                    .map_err(|e| e.to_string())?;
+                scene.validate_groups(&self.system)?;
+                let mut next = self.system.clone();
+                next.bench = Some(scene);
+                let committed = self.commit_with_action(next, expected, name)?;
+                result["revision"] = committed["revision"].clone();
+                result["applied"] = json!(true);
+                Ok(result)
             }
-            "system_get" => Ok(json!({"system":self.system,"revision":self.revision})),
             "system_set" => {
                 let s: System =
                     serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-                self.replace(s, expected()?)
+                self.replace(s, expected, name)
             }
-            "system_validate" => {
-                let mut s: System =
-                    serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-                s.update()?;
-                Ok(json!({"valid":true,"system":s}))
+            "configuration_activate" => {
+                let index = args["index"].as_u64().unwrap() as usize;
+                if index >= self.system.configurations.len().max(1) {
+                    return Err("Configuration index outside the configuration table".into());
+                }
+                let mut next = self.system.clone();
+                next.active_configuration = index;
+                self.replace(next, expected, name)
             }
-            "surface_edit" => {
-                let system: System =
-                    serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-                let operation: editing::Operation =
-                    serde_json::from_value(args["operation"].clone()).map_err(|e| e.to_string())?;
-                serde_json::to_value(editing::apply(&system, operation)?).map_err(|e| e.to_string())
-            }
-            "materials_list" => {
-                let mut names: Vec<String> = material::catalogs()
-                    .iter()
-                    .chain(&self.system.custom_glasses)
-                    .map(|g| g.key())
-                    .collect();
-                names.extend(["AIR".into(), "FUSED_SILICA".into()]);
-                names.sort();
-                names.dedup();
-                Ok(json!(names))
-            }
-            "material_search" => {
-                let query = args["query"].as_str().unwrap_or("").to_uppercase();
-                let catalog = args["catalog"].as_str().unwrap_or("").to_uppercase();
-                let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-                let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-                let matches: Vec<_> = material::catalogs()
-                    .iter()
-                    .chain(&self.system.custom_glasses)
-                    .filter(|g| {
-                        (catalog.is_empty() || g.catalog == catalog)
-                            && (g.name.contains(&query) || g.catalog.contains(&query))
-                    })
-                    .collect();
-                let data:Vec<_>=matches.iter().skip(offset).take(limit).map(|g|json!({"key":g.key(),"name":g.name,"catalog":g.catalog,"nd":g.nd,"vd":g.vd,"formula":g.formula,"wavelength_range":g.wavelength_range})).collect();
-                Ok(
-                    json!({"total":matches.len(),"glasses":data,"warnings":material::catalog_warnings().iter().filter(|w|catalog.is_empty()||w.catalog==catalog).collect::<Vec<_>>()}),
-                )
-            }
-            "material_index" => {
-                let name = args["material"].as_str().unwrap();
-                let temperature = args["temperature"]
-                    .as_f64()
-                    .unwrap_or(self.system.temperature);
-                let pressure = args["pressure"].as_f64().unwrap_or(self.system.pressure);
-                let mut s = self.system.clone();
-                s.temperature = temperature;
-                s.pressure = pressure;
-                let n = s.material_index(name, w)?;
-                Ok(json!({"index":n,"wavelength":w,"temperature":temperature,"pressure":pressure}))
-            }
-            "air_index" => Ok(
-                json!({"index":material::air_index(w/1000.,args["temperature"].as_f64().unwrap_or(self.system.temperature),args["pressure"].as_f64().unwrap_or(self.system.pressure))?}),
-            ),
             "catalog_import" => {
                 let mut next = self.system.clone();
                 let catalog = args["catalog"].as_str().unwrap();
@@ -239,136 +322,41 @@ impl Engine {
                 next.custom_glasses
                     .retain(|g| g.catalog != catalog.to_uppercase());
                 next.custom_glasses.extend(glasses.glasses);
-                let mut r = self.replace(next, expected()?)?;
+                let mut r = self.replace(next, expected, name)?;
                 r["glasses_imported"] = json!(count);
                 r["warnings"] = json!(glasses.warnings);
                 Ok(r)
             }
-            "prescription_report" => serde_json::to_value(report::generate(
-                &self.system,
-                self.revision,
-                serde_json::from_value(args["sections"].clone()).map_err(|e| e.to_string())?,
-                w,
-                args["precision"].as_u64().unwrap() as usize,
-            )?)
-            .map_err(|e| e.to_string()),
-            "paraxial" => self.system.paraxial(w),
-            "paraxial_trace" => inspection::paraxial_trace(&self.system, &field, w),
-            "trace_inspect" => inspection::inspect(
-                &self.system,
-                serde_json::from_value(args["launch"].clone()).map_err(|e| e.to_string())?,
-                w,
-            ),
-            "trace_ray" => serde_json::to_value(self.system.trace_field(
-                args["x"].as_f64().unwrap_or(0.),
-                args["y"].as_f64().unwrap_or(0.),
-                &field,
-                w,
-            )?)
-            .map_err(|e| e.to_string()),
-            "spot_diagram" => self.system.spot_field(
-                &field,
-                w,
-                serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                    .map_err(|e| e.to_string())?,
-            ),
-            "polychromatic_spot" => analysis::polychromatic_spot(
-                &self.system,
-                &field,
-                serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                    .map_err(|e| e.to_string())?,
-            ),
-            "layout" => Ok(self.system.layout()),
-            "geometric_mtf" => crate::compute::geometric_mtf(&self.system, &args),
-            "ray_fan" => analysis::ray_fan(&self.system, &field, w, samples),
-            "opd_fan" => analysis::opd_fan(&self.system, &field, w, samples),
-            "chromatic_focus" => analysis::chromatic_focus(
-                &self.system,
-                args["lower"].as_f64().unwrap_or_else(|| {
-                    self.system
-                        .wavelengths
-                        .iter()
-                        .map(|w| w.value)
-                        .fold(f64::INFINITY, f64::min)
-                }),
-                args["upper"].as_f64().unwrap_or_else(|| {
-                    self.system
-                        .wavelengths
-                        .iter()
-                        .map(|w| w.value)
-                        .fold(f64::NEG_INFINITY, f64::max)
-                }),
-                samples,
-            ),
-            "longitudinal_aberration" => analysis::longitudinal(&self.system, w, samples),
-            "spherochromatism" => {
-                let reference_wavelength = self.system.reference();
-                let reference_focus = self.system.paraxial(reference_wavelength)?["image_distance"]
-                    .as_f64()
-                    .unwrap();
-                let curves: Vec<_> = self
-                    .system
-                    .wavelengths
-                    .iter()
-                    .enumerate()
-                    .map(|(index, wv)| -> Result<Value, String> {
-                        let mut curve = analysis::longitudinal(&self.system, wv.value, samples)?;
-                        curve["color"] = json!(wv.color);
-                        curve["weight"] = json!(wv.weight);
-                        curve["wavelength_index"] = json!(index);
-                        Ok(curve)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(
-                    json!({"curves":curves,"reference_focus":reference_focus,"reference_wavelength":reference_wavelength,"units":"mm"}),
-                )
-            }
-            "astigmatism" => analysis::astigmatism(&self.system, &field, w),
-            "field_curvature" => focus::field_curvature(
-                &self.system,
-                args.get("field_end")
-                    .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
-                    .transpose()?,
-                samples,
-            ),
-            "distortion" => analysis::distortion(&self.system, &field, w),
-            "wavefront" => Ok(analysis::wavefront(&self.system, &field, w, grid)?.json()),
-            "diffraction_psf" => analysis::diffraction_psf(
-                &self.system,
-                &field,
-                w,
-                args["grid"].as_u64().unwrap_or(32) as usize,
-            ),
-            "diffraction_mtf" => analysis::diffraction_mtf(
-                &self.system,
-                &field,
-                serde_json::from_value::<Spectrum>(args["spectrum"].clone())
-                    .map_err(|e| e.to_string())?,
-                args["grid"].as_u64().unwrap_or(32) as usize,
-                args["max_frequency"].as_f64(),
-            ),
-            "encircled_energy" => analysis::encircled_energy(
-                &self.system,
-                &field,
-                w,
-                serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                    .map_err(|e| e.to_string())?,
-                samples,
-            ),
-            "surface_sag" => {
-                let i = args["surface"].as_u64().unwrap() as usize;
-                let s = self
-                    .system
-                    .surfaces
-                    .get(i)
-                    .ok_or("Surface index outside prescription")?;
-                let h = args["height"].as_f64().unwrap();
-                let (z, dz) = optics::sag(s, h)?;
-                Ok(json!({"sag":z,"derivative":dz,"height":h,"units":"mm"}))
-            }
             "autofocus" => {
-                let s = solve::autofocus(&self.system, w)?;
-                self.commit(s, expected()?)
+                let resolved = self.system.resolved()?;
+                let w = args["wavelength"]
+                    .as_f64()
+                    .unwrap_or(self.system.reference());
+                let s = solve::autofocus(&resolved, w)?;
+                let mut next = self.system.clone();
+                for (i, surface) in s.surfaces.iter().enumerate() {
+                    if surface.thickness == resolved.surfaces[i].thickness {
+                        continue;
+                    }
+                    let covered = next
+                        .configurations
+                        .get_mut(next.active_configuration)
+                        .and_then(|c| {
+                            c.overrides.iter_mut().find_map(|o| match o {
+                                crate::optics::Override::Thickness { surface: k, value }
+                                    if *k == i =>
+                                {
+                                    Some(value)
+                                }
+                                _ => None,
+                            })
+                        });
+                    match covered {
+                        Some(value) => *value = surface.thickness,
+                        None => next.surfaces[i].thickness = surface.thickness,
+                    }
+                }
+                self.commit_with_action(next, expected, name)
             }
             "solve" => {
                 let definition = serde_json::from_value(args["definition"].clone())
@@ -378,739 +366,599 @@ impl Engine {
                     args["gap"].as_u64().unwrap() as usize,
                     definition,
                 )?;
-                let mut r = self.commit(next, expected()?)?;
+                let mut r = self.commit_with_action(next, expected, name)?;
                 r["solve"] = result;
                 Ok(r)
             }
             "solve_recalculate" => {
-                let mut r = self.replace(self.system.clone(), expected()?)?;
+                let mut r = self.replace(self.system.clone(), expected, name)?;
                 r["solves"] = json!(solve::states(&self.system));
                 Ok(r)
             }
-            "aperture_report" => {
-                let mut report = serde_json::to_value(aperture::semi_diameters(&self.system)?)
-                    .map_err(|e| e.to_string())?;
-                report["revision"] = json!(self.revision);
-                Ok(report)
-            }
             "vignetting_update" => {
-                let revision = expected()?;
-                if revision != self.revision {
-                    return Err("System changed; read it again before editing".into());
-                }
-                let (next, report) = aperture::update_vignetting(&self.system)?;
-                let committed = self.commit(next, revision)?;
+                let resolved = self.system.resolved()?;
+                let (solved, report) = aperture::update_vignetting(&resolved)?;
+                let mut next = self.system.clone();
+                next.fields = solved.fields;
                 let mut result = serde_json::to_value(report).map_err(|e| e.to_string())?;
+                let committed = self.commit_with_action(next, expected, name)?;
                 result["revision"] = committed["revision"].clone();
                 Ok(result)
             }
-            "project_new" => self.replace(project::blank(), expected()?),
             "project_import" => {
                 let text = args["text"].as_str().unwrap();
                 let next = match args["format"].as_str().unwrap() {
                     "geopter" => project::import(text)?,
+                    "zmx" => zmx::import(text)?,
                     "hissabeth" => serde_json::from_str(text).map_err(|e| e.to_string())?,
                     _ => unreachable!(),
                 };
-                self.replace(next, expected()?)
+                self.replace(next, expected, name)
             }
-            "project_export" => {
-                let v = if args["format"] == "geopter" {
-                    project::export(&self.system)?
-                } else {
-                    serde_json::to_value(&self.system).map_err(|e| e.to_string())?
-                };
-                Ok(
-                    json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?,"revision":self.revision,"name":self.system.name,"format":args["format"]}),
-                )
+            "project_new" => {
+                let mut next = project::blank();
+                next.update()?;
+                let mut projects = self.projects.clone();
+                projects.linked_path = None;
+                self.commit_project(next, expected, name, projects)
             }
-            "capabilities" => Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":{"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"folded_coordinates":false,"polarization":false,"nonsequential":false,"free_space_bench":true,"bench_spatial_poses":true,"bench_scalar_splitters":true,"bench_nearest_hits":true,"bench_assembly":true,"bench_lens_model":"ideal thin lens; slope approximation"}}),
-            ),
-            _ => Err(format!("Unknown tool {name}")),
-        }?;
-        if [
-            "prescription_report",
-            "paraxial",
-            "paraxial_trace",
-            "trace_inspect",
-            "trace_ray",
-            "layout",
-            "spot_diagram",
-            "polychromatic_spot",
-            "geometric_mtf",
-            "ray_fan",
-            "opd_fan",
-            "chromatic_focus",
-            "longitudinal_aberration",
-            "spherochromatism",
-            "astigmatism",
-            "field_curvature",
-            "distortion",
-            "wavefront",
-            "diffraction_psf",
-            "diffraction_mtf",
-            "encircled_energy",
-            "surface_sag",
-        ]
-        .contains(&name)
-        {
-            result["revision"] = json!(self.revision);
-        }
-        Ok(result)
-    }
-}
-fn num(min: f64, max: f64) -> Value {
-    json!({"type":"number","minimum":min,"maximum":max})
-}
-fn integer(min: usize, max: usize) -> Value {
-    json!({"type":"integer","minimum":min,"maximum":max})
-}
-fn string() -> Value {
-    json!({"type":"string"})
-}
-fn array(items: Value, min: usize, max: usize) -> Value {
-    json!({"type":"array","items":items,"minItems":min,"maxItems":max})
-}
-fn enumeration(values: &[&str]) -> Value {
-    json!({"type":"string","enum":values})
-}
-fn object(props: Value, required: &[&str]) -> Value {
-    json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
-}
-fn sampling_schema() -> Value {
-    json!({"oneOf":[
-        object(json!({"kind":enumeration(&["grid"]),"count":integer(3,129)}), &["kind","count"]),
-        object(json!({"kind":enumeration(&["hexapolar"]),"rings":integer(1,64)}), &["kind","rings"])
-    ]})
-}
-fn spectrum_schema() -> Value {
-    json!({"oneOf":[
-        object(json!({"kind":enumeration(&["monochromatic"]),"wavelength":num(100.,20000.)}), &["kind","wavelength"]),
-        object(json!({"kind":enumeration(&["polychromatic"])}), &["kind"])
-    ]})
-}
-fn solve_schema() -> Value {
-    let number = num(-1e15, 1e15);
-    json!({"oneOf":[
-        object(json!({"kind":enumeration(&["fixed"])}), &["kind"]),
-        object(json!({"kind":enumeration(&["pickup"]),"source":integer(0,127),"scale":number,"offset":number}), &["kind","source","scale","offset"]),
-        object(json!({"kind":enumeration(&["edge_thickness"]),"height":num(0.,1e6),"value":number}), &["kind","height","value"]),
-        object(json!({"kind":enumeration(&["overall_length"]),"first":integer(0,127),"last":integer(1,128),"value":number}), &["kind","first","last","value"]),
-        object(json!({"kind":enumeration(&["marginal_height"]),"value":number,"zone":{"type":"number"}}), &["kind","value","zone"])
-    ]})
-}
-pub fn system_schema() -> Value {
-    let finite = num(-1e15, 1e15);
-    let nonnegative = num(0., 1e15);
-    let surface = object(
-        json!({"label":string(),"radius":finite,"thickness":finite,"material":string(),"aperture":num(1e-12,1e9),"semi_diameter":nonnegative,"clear_aperture":{"type":"boolean"},"conic":finite,"even":array(finite.clone(),0,16),"odd":array(finite.clone(),0,20),"interaction":enumeration(&["refract","reflect","dummy"]),"gap_solve":solve_schema()}),
-        &[
-            "label",
-            "radius",
-            "thickness",
-            "material",
-            "aperture",
-            "semi_diameter",
-            "clear_aperture",
-            "conic",
-            "even",
-            "odd",
-            "interaction",
-            "gap_solve",
-        ],
-    );
-    let endpoint = object(
-        json!({"radius":finite,"conic":finite,"even":array(finite.clone(),0,16),"odd":array(finite.clone(),0,20),"aperture":{"type":"number","exclusiveMinimum":0.},"clear_aperture":{"type":"boolean"},"semi_diameter":nonnegative}),
-        &[
-            "radius",
-            "conic",
-            "even",
-            "odd",
-            "aperture",
-            "clear_aperture",
-            "semi_diameter",
-        ],
-    );
-    let field = object(
-        json!({"x":finite,"y":finite,"weight":nonnegative,"vignetting":array(json!({"type":"number","exclusiveMaximum":1.}),4,4),"color":array(num(0.,1.),4,4)}),
-        &["x", "y", "weight", "vignetting", "color"],
-    );
-    let wavelength = object(
-        json!({"value":num(100.,20000.),"weight":nonnegative,"color":array(num(0.,1.),4,4)}),
-        &["value", "weight", "color"],
-    );
-    let glass = object(
-        json!({"name":string(),"catalog":string(),"formula":integer(1,13),"coefficients":array(finite.clone(),0,20),"nd":finite,"vd":finite,"wavelength_range":{"type":["array","null"],"items":num(0.,100.),"minItems":2,"maxItems":2},"thermal":{"type":["array","null"],"items":finite,"minItems":7,"maxItems":7},"transmission":array(array(finite.clone(),3,3),0,10000),"comment":string()}),
-        &[
-            "name",
-            "catalog",
-            "formula",
-            "coefficients",
-            "nd",
-            "vd",
-            "wavelength_range",
-            "thermal",
-            "transmission",
-            "comment",
-        ],
-    );
-    let mut schema = object(
-        json!({"name":string(),"note":string(),"surfaces":array(surface,1,128),"wavelengths":array(wavelength,1,32),"reference_wavelength":integer(0,31),"fields":array(field,1,64),"field_type":enumeration(&["angle","object_height","image_height"]),"pupil":object(json!({"kind":enumeration(&["entrance_pupil_diameter","f_number","object_na","image_na"]),"value":num(1e-12,1e9)}),&["kind","value"]),"pupil_mapping":enumeration(&["reference_entrance_pupil","real_stop"]),"object_distance":{"type":["number","null"],"exclusiveMinimum":0.},"object_material":string(),"object_label":string(),"image_label":string(),"object_surface":endpoint,"image_surface":endpoint,"stop_index":integer(0,127),"temperature":num(-200.,500.),"pressure":num(0.,1e8),"custom_glasses":array(glass,0,10000)}),
-        &[
-            "name",
-            "note",
-            "surfaces",
-            "wavelengths",
-            "reference_wavelength",
-            "fields",
-            "field_type",
-            "pupil",
-            "pupil_mapping",
-            "object_distance",
-            "object_material",
-            "object_label",
-            "image_label",
-            "object_surface",
-            "image_surface",
-            "stop_index",
-            "temperature",
-            "pressure",
-            "custom_glasses",
-        ],
-    );
-    schema["properties"]["bench"] = json!({"oneOf":[bench_schema(),{"type":"null"}]});
-    schema
-}
-pub fn bench_schema() -> Value {
-    let xyz = array(num(-1e6, 1e6), 3, 3);
-    let mount = object(
-        json!({"part":string(),"base_size":array(num(1e-9,1e5),2,2),"height_range":array(num(0.,1e6),2,2)}),
-        &["part", "base_size", "height_range"],
-    );
-    let element = object(
-        json!({"id":string(),"label":string(),"kind":enumeration(&["mirror","lens","splitter","detector","aperture","blocker"]),"position":xyz,"rotation":xyz,"aperture":num(1e-9,1e5),"body_radius":num(1e-9,1e5),"focal_length":num(-1e6,1e6),"reflectance":num(0.,1.),"transmittance":num(0.,1.),"mount":{"oneOf":[mount,{"type":"null"}]}}),
-        &[
-            "id",
-            "label",
-            "kind",
-            "position",
-            "rotation",
-            "aperture",
-            "body_radius",
-            "focal_length",
-            "reflectance",
-            "transmittance",
-            "mount",
-        ],
-    );
-    let source = object(
-        json!({"id":string(),"position":xyz,"direction":xyz,"wavelength":num(100.,20000.),"power":num(1e-12,1e6),"beam_radius":num(0.,1e5),"rings":integer(0,8)}),
-        &[
-            "id",
-            "position",
-            "direction",
-            "wavelength",
-            "power",
-            "beam_radius",
-            "rings",
-        ],
-    );
-    let connection = object(
-        json!({"from":string(),"port":enumeration(&["out","reflected","transmitted"]),"to":string()}),
-        &["from", "port", "to"],
-    );
-    object(
-        json!({"name":string(),"table_size":array(num(1e-9,1e6),2,2),"hole_pitch":num(1e-9,1e6),"origin":xyz,"elements":array(element,0,128),"sources":array(source,1,16),"connections":array(connection,0,384),"max_interactions":integer(1,128),"min_power":num(0.,1.)}),
-        &[
-            "name",
-            "table_size",
-            "hole_pitch",
-            "origin",
-            "elements",
-            "sources",
-            "connections",
-            "max_interactions",
-            "min_power",
-        ],
-    )
-}
-pub fn tools() -> Value {
-    let mut list = vec![];
-    let mut add = |name: &str, description: &str, properties: Value, required: &[&str]| {
-        list.push(json!({"name":name,"description":description,"inputSchema":object(properties,required)}))
-    };
-    add(
-        "bench_get",
-        "Read the saved free-space laser bench and shared project revision. Table XY; Z height; mm; rotations [roll,pitch,yaw] in degrees.",
-        json!({}),
-        &[],
-    );
-    add(
-        "bench_example",
-        "Get a read-only two-arm laser bench example. Nothing is saved until bench_set or system_set.",
-        json!({}),
-        &[],
-    );
-    add(
-        "bench_set",
-        "Atomically save a validated free-space bench in the current project. Requires the current shared project revision. Retains the sequential prescription.",
-        json!({"bench":bench_schema(),"revision":integer(0,9_007_199_254_740_991)}),
-        &["bench", "revision"],
-    );
-    add(
-        "bench_trace",
-        "Trace the saved bench or supplied draft without writing. Nearest disk/mount hits, optional intended port connections, ideal thin lenses, scalar splitter power, bounded ray trees. Return partial paths and complete power accounting. This does not compute phase or polarization.",
-        json!({"bench":bench_schema()}),
-        &[],
-    );
-    add(
-        "bench_assembly",
-        "Read assembly coordinates, surface normals, holes/offsets, mounts, BOM and clearance diagnostics from the saved bench or supplied draft. Missing hardware is unresolved. No writes.",
-        json!({"bench":bench_schema()}),
-        &[],
-    );
-    add(
-        "workspace_status",
-        "Read the workspace state before requesting optical data. A recovery state is connected but has no active optical system.",
-        json!({}),
-        &[],
-    );
-    add(
-        "workspace_retry",
-        "While recovery is active, reread a user-repaired saved file under the current workspace lease. A missing or invalid file stays in recovery. Requires its current recovery revision.",
-        json!({"revision":integer(0,9_007_199_254_740_991)}),
-        &["revision"],
-    );
-    add(
-        "workspace_recover",
-        "While recovery is active, validate a chosen native/Geopter project or create a new system. Preserve the original file before installing the chosen system; reject changed disk contents and stale recovery revisions. No optical tool can write through recovery.",
-        json!({"revision":integer(0,9_007_199_254_740_991),"source":{"oneOf":[object(json!({"kind":enumeration(&["default"])}),&["kind"]),object(json!({"kind":enumeration(&["project"]),"format":enumeration(&["hissabeth","geopter"]),"text":string()}),&["kind","format","text"])]}}),
-        &["revision", "source"],
-    );
-    add(
-        "system_get",
-        "Read the entire current optical prescription and revision",
-        json!({}),
-        &[],
-    );
-    add(
-        "system_set",
-        "Atomically save the complete prescription; revision must match system_get",
-        json!({"system":system_schema(),"revision":integer(0,9_007_199_254_740_991)}),
-        &["system", "revision"],
-    );
-    add(
-        "system_validate",
-        "Validate a complete prescription without changing the workspace",
-        json!({"system":system_schema()}),
-        &["system"],
-    );
-    add(
-        "surface_edit",
-        "Stage inserted or removed internal surface rows in a supplied draft without saving, solving or tracing. Zero-based before may equal the row count (before Image). Remaps stop and retained gap references; rejects deletion of gaps referenced by retained solves. Returns the transformed system, old_to_new indices, inserted indices and stop_reassigned.",
-        json!({"system":system_schema(),"operation":{"oneOf":[
-            object(json!({"kind":enumeration(&["insert"]),"before":integer(0,128),"count":integer(1,128)}),&["kind","before","count"]),
-            object(json!({"kind":enumeration(&["remove"]),"first":integer(0,127),"count":integer(1,128)}),&["kind","first","count"])
-        ]}}),
-        &["system", "operation"],
-    );
-    add(
-        "materials_list",
-        "List qualified product_catalog keys for built-in and project glass catalogs",
-        json!({}),
-        &[],
-    );
-    add(
-        "material_search",
-        "Search catalog metadata; wavelengths in metadata are micrometers",
-        json!({"query":string(),"catalog":string(),"offset":integer(0,100000),"limit":integer(1,500)}),
-        &[],
-    );
-    let wave = num(100., 20000.);
-    let revision = integer(0, 9_007_199_254_740_991);
-    add(
-        "material_index",
-        "Compute refractive index at wavelength nm with environmental corrections",
-        json!({"material":string(),"wavelength":wave,"temperature":num(-200.,500.),"pressure":num(0.,1e8)}),
-        &["material", "wavelength"],
-    );
-    add(
-        "air_index",
-        "Compute absolute air index from wavelength nm, temperature C and pressure Pa",
-        json!({"wavelength":wave,"temperature":num(-200.,500.),"pressure":num(0.,1e8)}),
-        &["wavelength"],
-    );
-    add(
-        "catalog_import",
-        "Parse an AGF catalog and replace that named project catalog, preserving all other catalogs",
-        json!({"catalog":string(),"text":string(),"revision":revision}),
-        &["catalog", "text", "revision"],
-    );
-    add(
-        "layout",
-        "Get global 3D ray paths for stored fields, including explicit trace rejection reasons",
-        json!({}),
-        &[],
-    );
-    let pair = json!({"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2});
-    add(
-        "trace_inspect",
-        "Inspect a normalized pupil ray or a finite source XY / (dx/dz,dy/dz) launch with positive initial z direction; return partial paths and physical failures. Pupil rays use saved mapping and vignetting; object rays use the actual curved source without pupil aiming.",
-        json!({"wavelength":wave,"launch":{"oneOf":[
-            object(json!({"kind":enumeration(&["pupil"]),"pupil":pair,"field_index":integer(0,63)}), &["kind","pupil","field_index"]),
-            object(json!({"kind":enumeration(&["object"]),"point":pair,"tangent":pair}), &["kind","point","tangent"])
-        ]}}),
-        &["launch", "wavelength"],
-    );
-    add(
-        "paraxial_trace",
-        "Per-vertex linearized axial and stored-field chief ray tables in global x/y; signed reduced angles include centered reflections. No aperture clipping. The image row uses its vertex plane.",
-        json!({"wavelength":wave,"field_index":integer(0,63)}),
-        &["wavelength", "field_index"],
-    );
-    add(
-        "field_curvature",
-        "Continuous radial field sweep of analytic sagittal/tangential chief-ray foci for every stored wavelength, including zero weights and duplicates. Default endpoint is +Y at the maximum stored field radius; optional field_end selects a 2D slice. Shifts reference the stored image vertex; retain per-branch failures.",
-        json!({"field_end":pair,"samples":integer(2,257)}),
-        &["samples"],
-    );
-    add(
-        "prescription_report",
-        "Assemble selected saved-prescription sections as structured tables and the same canonical text. Includes endpoints, first-order/cardinal quantities, actual media, signed gaps, profiles and gap relations. Per-cell errors preserve other data; no sections returns header only. Does not mutate the system.",
-        json!({"sections":array(enumeration(&["general","specification","first_order","lens_data","surface_data"]),0,5),"wavelength":wave,"precision":integer(0,15)}),
-        &["sections", "wavelength", "precision"],
-    );
-    let common = json!({"wavelength":wave,"field_index":integer(0,63),"field":num(-1e9,1e9),"field_x":num(-1e9,1e9)});
-    for (name, description) in [
-        (
-            "paraxial",
-            "Compute first-order matrix, focal lengths, finite image conjugate, magnification and pupils",
-        ),
-        (
-            "trace_ray",
-            "Trace x/y in pupil mm, normalized by the wavelength's paraxial entrance-pupil radius using the saved pupil mapping; stored field_index or arbitrary field/field_x",
-        ),
-        (
-            "spot_diagram",
-            "Trace a grid or hexapolar pupil quadrature; report area-weighted centroid/RMS, geometric radius and rejected-ray counts",
-        ),
-        (
-            "polychromatic_spot",
-            "Area- and spectrum-weighted spot diagram for positive-weight wavelengths, retaining lateral color and sampled transmission",
-        ),
-        (
-            "geometric_mtf",
-            "Geometric MTF from a complex OTF sum over weighted real intercepts on one physical frequency grid; selected or weighted wavelengths",
-        ),
-        (
-            "ray_fan",
-            "Field-local tangential/sagittal transverse ray aberrations relative to chief ray in mm",
-        ),
-        (
-            "opd_fan",
-            "Field-local tangential/sagittal optical path difference relative to chief reference sphere, in waves",
-        ),
-        (
-            "longitudinal_aberration",
-            "Longitudinal spherical aberration as axis intercept versus pupil radius",
-        ),
-        (
-            "spherochromatism",
-            "Longitudinal spherical aberration for every stored wavelength",
-        ),
-        (
-            "astigmatism",
-            "Differential sagittal/tangential focal positions about the chief ray",
-        ),
-        (
-            "distortion",
-            "Actual chief image intercept relative to the paraxial chief intercept at the stored image plane",
-        ),
-        (
-            "wavefront",
-            "Masked pupil wavefront map, RMS and peak-to-valley in waves",
-        ),
-        (
-            "diffraction_psf",
-            "Unit-energy Fraunhofer diffraction intensity and sampled Strehl ratio; paraxial exit pupil mapping",
-        ),
-        (
-            "diffraction_mtf",
-            "Field-local diffraction MTF from a complex OTF sum at common physical frequencies, with spectral/transmission weights and real-chief lateral color",
-        ),
-        (
-            "encircled_energy",
-            "Geometric encircled energy about the transmitted-ray centroid",
-        ),
-    ] {
-        let mut props = common.clone();
-        if name == "trace_ray" {
-            props["x"] = num(-1e6, 1e6);
-            props["y"] = num(-1e6, 1e6);
-        }
-        let mut required = vec![];
-        if [
-            "spot_diagram",
-            "polychromatic_spot",
-            "geometric_mtf",
-            "encircled_energy",
-        ]
-        .contains(&name)
-        {
-            props["sampling"] = sampling_schema();
-            required.push("sampling");
-        }
-        if ["geometric_mtf", "diffraction_mtf"].contains(&name) {
-            props.as_object_mut().unwrap().remove("wavelength");
-            props["spectrum"] = spectrum_schema();
-            required.push("spectrum");
-        }
-        if name == "polychromatic_spot" {
-            props.as_object_mut().unwrap().remove("wavelength");
-        }
-        if ["wavefront", "diffraction_psf", "diffraction_mtf"].contains(&name) {
-            props["grid"] = match name {
-                "diffraction_psf" | "diffraction_mtf" => {
-                    json!({"type":"integer","enum":[8,16,32,64,128]})
-                }
-                "wavefront" => integer(5, 129),
-                _ => integer(3, 129),
-            };
-        }
-        if [
-            "ray_fan",
-            "opd_fan",
-            "longitudinal_aberration",
-            "spherochromatism",
-            "encircled_energy",
-        ]
-        .contains(&name)
-        {
-            props["samples"] = integer(if name == "encircled_energy" { 2 } else { 3 }, 257);
-        }
-        if name == "geometric_mtf" {
-            props["max_frequency"] =
-                json!({"type":"number","exclusiveMinimum":0.,"maximum":10000.});
-            props["axis"] = enumeration(&["x", "y"]);
-        }
-        if name == "diffraction_mtf" {
-            props["max_frequency"] = json!({"type":"number","exclusiveMinimum":0.});
-        }
-        add(name, description, props, &required);
-    }
-    add(
-        "chromatic_focus",
-        "Paraxial image focus shift across a wavelength interval",
-        json!({"lower":wave,"upper":wave,"samples":integer(2,257)}),
-        &[],
-    );
-    add(
-        "surface_sag",
-        "Evaluate radial sag and its first derivative, including even and odd terms",
-        json!({"surface":integer(0,127),"height":num(0.,1e6)}),
-        &["surface", "height"],
-    );
-    add(
-        "autofocus",
-        "Set final image distance to the finite or infinite conjugate paraxial focus",
-        json!({"wavelength":wave,"revision":revision}),
-        &["revision"],
-    );
-    add(
-        "solve",
-        "Store a persistent gap solve and recalculate all constraints atomically. Fixed removes the relationship and retains thickness. Indices are zero-based; overall length sums the half-open gap interval [first,last)",
-        json!({"gap":integer(0,127),"definition":solve_schema(),"revision":revision}),
-        &["gap", "definition", "revision"],
-    );
-    add(
-        "solve_recalculate",
-        "Recalculate all saved gap constraints atomically and return their definitions and resolved thicknesses",
-        json!({"revision":revision}),
-        &["revision"],
-    );
-    add(
-        "aperture_report",
-        "Reference-wavelength drawing envelopes from chief and four field-local pupil rim rays, ignoring physical clipping; includes reached prefixes and geometric failures",
-        json!({}),
-        &[],
-    );
-    add(
-        "vignetting_update",
-        "Compute four global-axis aperture boundaries per field, store directional vignetting factors, and resolve gap constraints atomically at the reference wavelength",
-        json!({"revision":revision}),
-        &["revision"],
-    );
-    add(
-        "project_new",
-        "Replace the saved project with a minimum blank prescription: one plane air stop, unclipped plane endpoints, infinity source, one on-axis field, d-line and a 10 mm entrance pupil. Clears prior project data. Requires the current revision; creation is atomic and resolves the new model before saving.",
-        json!({"revision":revision}),
-        &["revision"],
-    );
-    add(
-        "project_import",
-        "Import native or Geopter project text and atomically replace current prescription",
-        json!({"format":enumeration(&["geopter","hissabeth"]),"text":string(),"revision":revision}),
-        &["format", "text", "revision"],
-    );
-    add(
-        "project_export",
-        "Export the current prescription as native or Geopter JSON text",
-        json!({"format":enumeration(&["geopter","hissabeth"])}),
-        &["format"],
-    );
-    add(
-        "capabilities",
-        "Describe all implemented tools and physical scope",
-        json!({}),
-        &[],
-    );
-    Value::Array(list)
-}
-fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
-    if let Some(choices) = schema["oneOf"].as_array() {
-        let results: Vec<_> = choices
-            .iter()
-            .map(|s| validate_schema(value, s, path))
-            .collect();
-        let matching = results.iter().filter(|r| r.is_ok()).count();
-        return if matching == 1 {
-            Ok(())
-        } else if matching == 0 {
-            Err(format!(
-                "Invalid definition at {path}: {}",
-                results
-                    .into_iter()
-                    .filter_map(Result::err)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ))
-        } else {
-            Err(format!("Ambiguous definition at {path}"))
-        };
-    }
-    let matches = |kind: &str| match kind {
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "string" => value.is_string(),
-        "number" => value.as_f64().is_some_and(|n| n.is_finite()),
-        "integer" => value.as_u64().is_some(),
-        "boolean" => value.is_boolean(),
-        "null" => value.is_null(),
-        _ => false,
-    };
-    let valid = if let Some(k) = schema["type"].as_str() {
-        matches(k)
-    } else if let Some(kinds) = schema["type"].as_array() {
-        kinds.iter().any(|k| matches(k.as_str().unwrap_or("")))
-    } else {
-        true
-    };
-    if !valid {
-        return Err(format!("Invalid type at {path}"));
-    }
-    if value.is_null() {
-        return Ok(());
-    }
-    if let Some(n) = value.as_f64() {
-        for (bound, inclusive, lower) in [
-            ("minimum", true, true),
-            ("maximum", true, false),
-            ("exclusiveMinimum", false, true),
-            ("exclusiveMaximum", false, false),
-        ] {
-            if let Some(b) = schema[bound].as_f64() {
-                if if lower {
-                    n < b || (!inclusive && n == b)
-                } else {
-                    n > b || (!inclusive && n == b)
-                } {
-                    return Err(format!("Value outside range at {path}"));
-                }
+            "project_open" => self.project_open(args["path"].as_str().unwrap(), expected),
+            "project_save_as" => self.project_save_as(args["path"].as_str().unwrap(), expected),
+            "history_undo" => self.step_history(expected, true),
+            "history_redo" => self.step_history(expected, false),
+            "history_restore" => {
+                let index = args["index"].as_u64().unwrap() as usize;
+                let entry = self.history.entry(index)?;
+                let mut projects = self.projects.clone();
+                projects.linked_path = entry.linked_path.clone();
+                self.commit_project(entry.system.clone(), expected, "restore", projects)
             }
+            _ => Err(format!("Unknown mutating tool {name}")),
         }
     }
-    if let Some(allowed) = schema["enum"].as_array() {
-        if !allowed.contains(value) {
-            return Err(format!("Unknown value at {path}"));
-        }
-    }
-    if let Some(text) = value.as_str() {
-        if text.len() > 8_000_000 {
-            return Err(format!("Text too large at {path}"));
-        }
-    }
-    if let Some(items) = value.as_array() {
-        let min = schema["minItems"].as_u64().unwrap_or(0) as usize;
-        let max = schema["maxItems"].as_u64().unwrap_or(100_000) as usize;
-        if items.len() < min || items.len() > max {
-            return Err(format!("Invalid array length at {path}"));
-        }
-        for (i, v) in items.iter().enumerate() {
-            validate_schema(v, &schema["items"], &format!("{path}[{i}]"))?;
-        }
-    }
-    if let Some(object) = value.as_object() {
-        if let Some(required) = schema["required"].as_array() {
-            for key in required {
-                let key = key.as_str().unwrap();
-                if !object.contains_key(key) {
-                    return Err(format!("Missing {path}.{key}"));
-                }
-            }
-        }
-        for (key, v) in object {
-            let child = &schema["properties"][key];
-            if child.is_null() {
-                return Err(format!("Unknown argument {path}.{key}"));
-            }
-            validate_schema(v, child, &format!("{path}.{key}"))?;
-        }
+}
+
+fn check_revision(current: u64, expected: u64) -> Result<(), String> {
+    if current != expected {
+        return Err("System changed; read it again before editing".into());
     }
     Ok(())
 }
-fn validate_args(name: &str, args: &Value) -> Result<(), String> {
-    let list = tools();
-    let tool = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["name"] == name)
-        .ok_or_else(|| format!("Unknown tool {name}"))?;
-    if args.get("field_index").is_some()
-        && (args.get("field").is_some() || args.get("field_x").is_some())
-    {
-        return Err("Choose a stored field_index or explicit field coordinates".into());
-    }
-    validate_schema(args, &tool["inputSchema"], "arguments")
+
+fn run_optimization(
+    system: &System,
+    mut args: Value,
+) -> Result<optimize::OptimizationResult, String> {
+    let fields = args.as_object_mut().unwrap();
+    fields.remove("apply");
+    fields.remove("revision");
+    let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    optimize::run(system, &request)
 }
-pub fn rpc(request: Value, engine: &mut impl ToolCaller) -> Option<Value> {
-    let id = request.get("id")?.clone();
-    let result = match request["method"].as_str().unwrap_or("") {
-        "initialize" => Ok(
-            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"hissabeth","version":env!("CARGO_PKG_VERSION")},"instructions":"Read workspace_status first; if recovery is active, use workspace_retry or workspace_recover before optical tools. Read system_get before editing. All dimensions are mm and wavelengths nm. GUI reflects changes. Use field_index for stored fields. Every mutating operation requires the current revision."}),
-        ),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools":tools()})),
-        "tools/call" => {
-            let p = &request["params"];
-            let r = engine.call_tool(
-                p["name"].as_str().unwrap_or(""),
-                p.get("arguments").cloned().unwrap_or(json!({})),
-            );
-            Ok(match r {
-                Ok(v) => {
-                    json!({"content":[{"type":"text","text":v.to_string()}],"isError":false})
-                }
-                Err(e) => json!({"content":[{"type":"text","text":e}],"isError":true}),
-            })
-        }
-        _ => Err(json!({"code":-32601,"message":"Method not found"})),
+
+fn optimization_response(
+    result: &optimize::OptimizationResult,
+    applied: bool,
+    revision: u64,
+) -> Result<Value, String> {
+    let mut response = serde_json::to_value(result).map_err(|e| e.to_string())?;
+    response["applied"] = json!(applied);
+    response["revision"] = json!(revision);
+    Ok(response)
+}
+
+fn is_mutating(name: &str, args: &Value) -> bool {
+    matches!(
+        name,
+        "system_set"
+            | "bench_set"
+            | "configuration_activate"
+            | "catalog_import"
+            | "autofocus"
+            | "solve"
+            | "solve_recalculate"
+            | "vignetting_update"
+            | "project_new"
+            | "project_open"
+            | "project_save_as"
+            | "project_import"
+            | "workspace_retry"
+            | "workspace_recover"
+            | "history_undo"
+            | "history_redo"
+            | "history_restore"
+    ) || (matches!(name, "optimize" | "bench_template" | "bench_auto_aim") && args["apply"] == true)
+}
+
+pub fn dispatch(
+    workspace: &SharedWorkspace,
+    name: &str,
+    args: Value,
+    on_change: Option<&ChangeNotifier>,
+) -> Result<Value, String> {
+    schema::validate_args(name, &args)?;
+    if !is_mutating(name, &args) {
+        return dispatch_read(workspace, name, args);
+    }
+    let optimization = if name == "optimize" {
+        let expected = args["revision"].as_u64().unwrap();
+        let system = {
+            let guard = workspace.read().map_err(|e| e.to_string())?;
+            let engine = guard.engine()?;
+            engine.check_revision(expected)?;
+            engine.system.clone()
+        };
+        Some((run_optimization(&system, args.clone())?, expected))
+    } else {
+        None
     };
-    Some(match result {
-        Ok(v) => json!({"jsonrpc":"2.0","id":id,"result":v}),
-        Err(e) => json!({"jsonrpc":"2.0","id":id,"error":e}),
-    })
+    let (result, before, after) = {
+        let mut guard = workspace.write().map_err(|e| e.to_string())?;
+        let before = guard.revision();
+        let result = if let Some((result, expected)) = optimization {
+            guard.engine_mut()?.apply_optimization(result, expected)?
+        } else {
+            guard.call_validated(name, args)?
+        };
+        (result, before, guard.revision())
+    };
+    if let Some(notify) = on_change.filter(|_| before != after) {
+        notify(after);
+    }
+    Ok(result)
+}
+
+fn supplied_bench(args: &Value) -> Result<Option<bench::Bench>, String> {
+    args.get("bench")
+        .map(|value| serde_json::from_value(value.clone()).map_err(|e| e.to_string()))
+        .transpose()
+}
+
+fn selected_bench<'a>(
+    system: &'a System,
+    supplied: &'a Option<bench::Bench>,
+) -> Result<&'a bench::Bench, String> {
+    supplied
+        .as_ref()
+        .or(system.bench.as_ref())
+        .ok_or_else(|| "Create a free-space bench first".into())
+}
+
+fn bench_template_preview(args: &Value) -> Result<Value, String> {
+    let scene = bench_lab::template(args["name"].as_str().unwrap())?;
+    Ok(json!({"bench":scene,"applied":false}))
+}
+
+fn bench_aim_preview(scene: &bench::Bench, args: &Value) -> Result<Value, String> {
+    let mut result = bench_lab::auto_aim(
+        scene,
+        args["snap_holes"].as_bool().unwrap_or(false),
+        args["uniform_z"].as_f64(),
+    )?;
+    result["applied"] = json!(false);
+    Ok(result)
+}
+
+fn bench_preview(system: &System, name: &str, args: &Value) -> Result<Value, String> {
+    if name == "bench_template" {
+        bench_template_preview(args)
+    } else {
+        bench_aim_preview(selected_bench(system, &supplied_bench(args)?)?, args)
+    }
+}
+
+fn lab_catalog(args: &Value) -> Value {
+    bench_lab::catalog(args["query"].as_str(), args["kind"].as_str())
+}
+
+fn dispatch_read(workspace: &SharedWorkspace, name: &str, args: Value) -> Result<Value, String> {
+    match name {
+        "bench_catalog" => return Ok(lab_catalog(&args)),
+        "bench_template" => return bench_template_preview(&args),
+        "bench_auto_aim" if args.get("bench").is_some() => {
+            return bench_aim_preview(&supplied_bench(&args)?.unwrap(), &args);
+        }
+        _ => {}
+    }
+    let guard = workspace.read().map_err(|e| e.to_string())?;
+    if name == "workspace_status" {
+        return Ok(guard.status());
+    }
+    let engine = guard.engine()?;
+    match name {
+        "history_list" => Ok(engine.history.list(engine.revision)),
+        "history_compare" => {
+            let (from, to, from_index, to_index) = engine.history.pair(&args)?;
+            let (from, to) = (from.clone(), to.clone());
+            drop(guard);
+            Ok(history::compare(&from, &to, from_index, to_index))
+        }
+        "project_list" => {
+            let (path, projects) = (engine.path.clone(), engine.projects.clone());
+            drop(guard);
+            Ok(projects.list(&path))
+        }
+        _ => {
+            let (system, revision) = (engine.system.clone(), engine.revision);
+            drop(guard);
+            read_system(&system, revision, name, args)
+        }
+    }
+}
+
+fn read_system(system: &System, revision: u64, name: &str, args: Value) -> Result<Value, String> {
+    let w = args["wavelength"].as_f64().unwrap_or(system.reference());
+    let field = || field_argument(system, &args);
+    let resolved = || system.resolved();
+    let grid = args["grid"].as_u64().unwrap_or(17) as usize;
+    let samples = args["samples"].as_u64().unwrap_or(33) as usize;
+    let mut result = match name {
+        "bench_get" => Ok(json!({"bench":system.bench,"revision":revision})),
+        "bench_example" => Ok(json!({"bench":bench::example()})),
+        "bench_catalog" => Ok(lab_catalog(&args)),
+        "bench_template" => bench_template_preview(&args),
+        "bench_auto_aim" => {
+            let mut result = bench_preview(system, name, &args)?;
+            if args.get("bench").is_none() {
+                result["revision"] = json!(revision);
+            }
+            Ok(result)
+        }
+        "bench_trace"
+        | "bench_assembly"
+        | "bench_lab_check"
+        | "bench_alignment_guide"
+        | "bench_export_blueprint" => {
+            let supplied = supplied_bench(&args)?;
+            let scene = selected_bench(system, &supplied)?;
+            let mut value = match name {
+                "bench_trace" => {
+                    serde_json::to_value(scene.trace(system)?).map_err(|e| e.to_string())?
+                }
+                "bench_assembly" => {
+                    scene.validate()?;
+                    scene.assembly()
+                }
+                "bench_lab_check" => bench_lab::lab_check(scene, system)?,
+                "bench_alignment_guide" => bench_lab::alignment_guide(scene, system)?,
+                _ => bench_lab::export_blueprint(scene, system, args["format"].as_str().unwrap())?,
+            };
+            value["revision"] = json!(revision);
+            value["saved"] = json!(supplied.is_none());
+            Ok(value)
+        }
+        "system_get" => Ok(json!({"system":system,"revision":revision})),
+        "system_validate" => {
+            let mut s: System =
+                serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
+            s.update()?;
+            Ok(json!({"valid":true,"system":s}))
+        }
+        "system_resolved" => Ok(json!({"system":resolved()?,"revision":revision})),
+        "surface_edit" => {
+            let system: System =
+                serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
+            let operation: editing::Operation =
+                serde_json::from_value(args["operation"].clone()).map_err(|e| e.to_string())?;
+            if system
+                .configurations
+                .iter()
+                .any(|c| !c.overrides.is_empty())
+            {
+                return Err(
+                    "Remove configuration overrides before inserting or removing surfaces".into(),
+                );
+            }
+            serde_json::to_value(editing::apply(&system, operation)?).map_err(|e| e.to_string())
+        }
+        "materials_list" => {
+            let mut names: Vec<String> = material::catalogs()
+                .iter()
+                .chain(&system.custom_glasses)
+                .map(|g| g.key())
+                .collect();
+            names.extend(["AIR".into(), "FUSED_SILICA".into()]);
+            names.sort();
+            names.dedup();
+            Ok(json!(names))
+        }
+        "material_search" => {
+            let query = args["query"].as_str().unwrap_or("").to_uppercase();
+            let catalog = args["catalog"].as_str().unwrap_or("").to_uppercase();
+            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+            let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+            let matches: Vec<_> = material::catalogs()
+                .iter()
+                .chain(&system.custom_glasses)
+                .filter(|g| {
+                    (catalog.is_empty() || g.catalog == catalog)
+                        && (g.name.contains(&query) || g.catalog.contains(&query))
+                })
+                .collect();
+            let data:Vec<_>=matches.iter().skip(offset).take(limit).map(|g|json!({"key":g.key(),"name":g.name,"catalog":g.catalog,"nd":g.nd,"vd":g.vd,"formula":g.formula,"wavelength_range":g.wavelength_range})).collect();
+            Ok(
+                json!({"total":matches.len(),"glasses":data,"warnings":material::catalog_warnings().iter().filter(|w|catalog.is_empty()||w.catalog==catalog).collect::<Vec<_>>()}),
+            )
+        }
+        "material_index" => {
+            let name = args["material"].as_str().unwrap();
+            let temperature = args["temperature"].as_f64().unwrap_or(system.temperature);
+            let pressure = args["pressure"].as_f64().unwrap_or(system.pressure);
+            let mut s = system.clone();
+            s.temperature = temperature;
+            s.pressure = pressure;
+            let n = s.material_index(name, w)?;
+            Ok(json!({"index":n,"wavelength":w,"temperature":temperature,"pressure":pressure}))
+        }
+        "air_index" => Ok(
+            json!({"index":material::air_index(w/1000.,args["temperature"].as_f64().unwrap_or(system.temperature),args["pressure"].as_f64().unwrap_or(system.pressure))?}),
+        ),
+        "prescription_report" => serde_json::to_value(report::generate(
+            &resolved()?,
+            revision,
+            serde_json::from_value(args["sections"].clone()).map_err(|e| e.to_string())?,
+            w,
+            args["precision"].as_u64().unwrap() as usize,
+        )?)
+        .map_err(|e| e.to_string()),
+        "paraxial" => resolved()?.paraxial(w),
+        "paraxial_trace" => inspection::paraxial_trace(&resolved()?, &field()?, w),
+        "trace_inspect" => inspection::inspect(
+            &resolved()?,
+            serde_json::from_value(args["launch"].clone()).map_err(|e| e.to_string())?,
+            w,
+        ),
+        "trace_ray" => serde_json::to_value(resolved()?.trace_field(
+            args["x"].as_f64().unwrap_or(0.),
+            args["y"].as_f64().unwrap_or(0.),
+            &field()?,
+            w,
+        )?)
+        .map_err(|e| e.to_string()),
+        "spot_diagram" => resolved()?.spot_field(
+            &field()?,
+            w,
+            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
+                .map_err(|e| e.to_string())?,
+        ),
+        "polychromatic_spot" => analysis::polychromatic_spot(
+            &resolved()?,
+            &field()?,
+            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
+                .map_err(|e| e.to_string())?,
+        ),
+        "layout" => Ok(resolved()?.layout()),
+        "geometric_mtf" => crate::compute::geometric_mtf(&resolved()?, &args),
+        "ray_fan" => analysis::ray_fan(&resolved()?, &field()?, w, samples),
+        "opd_fan" => analysis::opd_fan(&resolved()?, &field()?, w, samples),
+        "chromatic_focus" => {
+            let resolved = system.resolved()?;
+            analysis::chromatic_focus(
+                &resolved,
+                args["lower"].as_f64().unwrap_or_else(|| {
+                    resolved
+                        .wavelengths
+                        .iter()
+                        .map(|w| w.value)
+                        .fold(f64::INFINITY, f64::min)
+                }),
+                args["upper"].as_f64().unwrap_or_else(|| {
+                    resolved
+                        .wavelengths
+                        .iter()
+                        .map(|w| w.value)
+                        .fold(f64::NEG_INFINITY, f64::max)
+                }),
+                samples,
+            )
+        }
+        "longitudinal_aberration" => analysis::longitudinal(&resolved()?, w, samples),
+        "spherochromatism" => {
+            let resolved = system.resolved()?;
+            let reference_wavelength = resolved.reference();
+            let reference_focus = resolved.paraxial(reference_wavelength)?["image_distance"]
+                .as_f64()
+                .ok_or("No finite reference focus")?;
+            let curves: Vec<_> = resolved
+                .wavelengths
+                .iter()
+                .enumerate()
+                .map(|(index, wv)| -> Result<Value, String> {
+                    let mut curve = analysis::longitudinal(&resolved, wv.value, samples)?;
+                    curve["color"] = json!(wv.color);
+                    curve["weight"] = json!(wv.weight);
+                    curve["wavelength_index"] = json!(index);
+                    Ok(curve)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(
+                json!({"curves":curves,"reference_focus":reference_focus,"reference_wavelength":reference_wavelength,"units":"mm"}),
+            )
+        }
+        "astigmatism" => analysis::astigmatism(&resolved()?, &field()?, w),
+        "field_curvature" => focus::field_curvature(
+            &resolved()?,
+            args.get("field_end")
+                .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+                .transpose()?,
+            samples,
+        ),
+        "distortion" => analysis::distortion(&resolved()?, &field()?, w),
+        "wavefront" => Ok(analysis::wavefront(&resolved()?, &field()?, w, grid)?.json()),
+        "diffraction_psf" => analysis::diffraction_psf(
+            &resolved()?,
+            &field()?,
+            w,
+            args["grid"].as_u64().unwrap_or(32) as usize,
+        ),
+        "diffraction_mtf" => analysis::diffraction_mtf(
+            &resolved()?,
+            &field()?,
+            serde_json::from_value::<Spectrum>(args["spectrum"].clone())
+                .map_err(|e| e.to_string())?,
+            args["grid"].as_u64().unwrap_or(32) as usize,
+            args["max_frequency"].as_f64(),
+        ),
+        "wavefront_zernike" => zernike::fit(
+            &analysis::wavefront(&resolved()?, &field()?, w, grid)?,
+            args["terms"].as_u64().unwrap_or(37) as usize,
+        ),
+        "huygens_psf" => analysis::huygens_psf(
+            &resolved()?,
+            &field()?,
+            w,
+            args["grid"].as_u64().unwrap_or(32) as usize,
+            args["size"].as_u64().map(|v| v as usize),
+            args["pitch"].as_f64(),
+        ),
+        "huygens_mtf" => analysis::huygens_mtf(
+            &resolved()?,
+            &field()?,
+            serde_json::from_value::<Spectrum>(args["spectrum"].clone())
+                .map_err(|e| e.to_string())?,
+            args["grid"].as_u64().unwrap_or(32) as usize,
+            args["max_frequency"].as_f64(),
+        ),
+        "gaussian_beam" => gaussian::gaussian_beam(
+            &resolved()?,
+            w,
+            args["waist"].as_f64().unwrap(),
+            args["waist_z"].as_f64().unwrap_or(0.),
+        ),
+        "fiber_coupling" => gaussian::fiber_coupling(
+            &resolved()?,
+            w,
+            args["waist"].as_f64().unwrap(),
+            args["waist_z"].as_f64().unwrap_or(0.),
+            args["mode_field_diameter"].as_f64().unwrap(),
+        ),
+        "encircled_energy" => analysis::encircled_energy(
+            &resolved()?,
+            &field()?,
+            w,
+            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
+                .map_err(|e| e.to_string())?,
+            samples,
+        ),
+        "surface_sag" => {
+            let i = args["surface"].as_u64().unwrap() as usize;
+            let resolved = resolved()?;
+            let s = resolved
+                .surfaces
+                .get(i)
+                .ok_or("Surface index outside prescription")?;
+            let h = args["height"].as_f64().unwrap();
+            let (z, dz) = optics::sag(s, h)?;
+            Ok(json!({"sag":z,"derivative":dz,"height":h,"units":"mm"}))
+        }
+        "aperture_report" => {
+            let mut report = serde_json::to_value(aperture::semi_diameters(&resolved()?)?)
+                .map_err(|e| e.to_string())?;
+            report["revision"] = json!(revision);
+            Ok(report)
+        }
+        "project_export" => {
+            let v = if args["format"] == "geopter" {
+                project::export(system)?
+            } else if args["format"] == "zmx" {
+                return Ok(
+                    json!({"text":zmx::export(system)?,"revision":revision,"name":system.name,"format":args["format"]}),
+                );
+            } else {
+                serde_json::to_value(system).map_err(|e| e.to_string())?
+            };
+            Ok(
+                json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?,"revision":revision,"name":system.name,"format":args["format"]}),
+            )
+        }
+        "design_summary" => optimize::design_summary(&resolved()?),
+        "optimize" => optimization_response(&run_optimization(system, args)?, false, revision),
+        "tolerance_sensitivity" => {
+            let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            serde_json::to_value(tolerance::sensitivity(system, &request)?)
+                .map_err(|e| e.to_string())
+        }
+        "tolerance_monte_carlo" => {
+            let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            serde_json::to_value(tolerance::monte_carlo(system, &request)?)
+                .map_err(|e| e.to_string())
+        }
+        "capabilities" => {
+            let mut scope = json!({"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"project_exchange":["hissabeth","geopter","zmx"],"folded_coordinates":true,"polarization":false,"nonsequential":false,"free_space_bench":true,"bench_spatial_poses":true,"bench_scalar_splitters":true,"bench_nearest_hits":true,"bench_assembly":true,"bench_lens_groups":true});
+            scope["bench_fresnel_splitters"] = json!(true);
+            scope["bench_coatings"] = json!(true);
+            scope["bench_scatter"] = json!(["lambertian", "abg"]);
+            scope["bench_group_ghosts"] = json!(2);
+            scope["bench_polarization"] = json!(true);
+            scope["bench_gaussian_envelope"] = json!(true);
+            scope["bench_hardware_catalog"] = json!(true);
+            scope["bench_auto_aim"] = json!(true);
+            scope["bench_lab_check"] = json!(true);
+            scope["bench_alignment_guide"] = json!(true);
+            scope["bench_blueprint_exports"] = json!(bench_lab::FORMATS);
+            scope["bench_detector_maps"] = json!(true);
+            scope["bench_lens_model"] =
+                json!("ideal thin lens or real current-prescription lens group");
+            scope["surface_profiles"] = json!([
+                "standard",
+                "even_asphere",
+                "odd_asphere",
+                "toroid",
+                "zernike_fringe_sag"
+            ]);
+            scope["huygens_diffraction"] = json!(true);
+            scope["zernike_wavefront_fit"] = json!({"ordering":"noll","max_terms":45});
+            scope["gaussian_beam"] = json!(true);
+            scope["fiber_coupling"] = json!(true);
+            scope["coordinate_breaks"] = json!(true);
+            scope["optimization"] = json!({"solver":"dls","max_variables":64,"max_operands":256});
+            scope["tolerancing"] = json!({"sensitivity":true,"monte_carlo":true,"max_trials":2000});
+            scope["revision_history"] = json!(true);
+            scope["multi_project"] = json!(true);
+            scope["multi_configuration"] = json!({"max_configurations":64,"operands":["thickness","radius","conic","aperture","material","object_distance"]});
+            Ok(
+                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":scope}),
+            )
+        }
+        _ => Err(format!("Unknown tool {name}")),
+    }?;
+    if [
+        "prescription_report",
+        "paraxial",
+        "paraxial_trace",
+        "trace_inspect",
+        "trace_ray",
+        "layout",
+        "spot_diagram",
+        "polychromatic_spot",
+        "geometric_mtf",
+        "ray_fan",
+        "opd_fan",
+        "chromatic_focus",
+        "longitudinal_aberration",
+        "spherochromatism",
+        "astigmatism",
+        "field_curvature",
+        "distortion",
+        "wavefront",
+        "diffraction_psf",
+        "diffraction_mtf",
+        "wavefront_zernike",
+        "huygens_psf",
+        "huygens_mtf",
+        "gaussian_beam",
+        "fiber_coupling",
+        "encircled_energy",
+        "surface_sag",
+        "design_summary",
+        "tolerance_sensitivity",
+        "tolerance_monte_carlo",
+    ]
+    .contains(&name)
+    {
+        result["revision"] = json!(revision);
+    }
+    Ok(result)
 }
 pub fn data_dir() -> PathBuf {
     std::env::var_os("HISSABETH_DATA_DIR")
@@ -1127,113 +975,324 @@ pub fn data_dir() -> PathBuf {
             root.unwrap_or_else(|| PathBuf::from(".")).join("hissabeth")
         })
 }
-pub fn serve(engine: Arc<Mutex<Workspace>>) -> Result<(), String> {
-    let dir = data_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let mut random = [0u8; 32];
-    getrandom::fill(&mut random).map_err(|e| e.to_string())?;
-    let token = random
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let endpoint = json!({"address":listener.local_addr().unwrap().to_string(),"token":token});
-    let path = dir.join("endpoint.json");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|e| e.to_string())?;
-    file.write_all(endpoint.to_string().as_bytes())
-        .map_err(|e| e.to_string())?;
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-            let mut line = String::new();
-            if BufReader::new((&mut stream).take(16_000_000))
-                .read_line(&mut line)
-                .is_err()
-            {
-                continue;
-            }
-            let Ok(req) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if req["token"] != token {
-                continue;
-            }
-            let response = match engine.lock() {
-                Ok(mut e) => rpc(req["request"].clone(), &mut *e),
-                Err(_) => None,
-            };
-            if let Some(r) = response {
-                let _ = writeln!(stream, "{r}");
-            }
-        }
-    });
-    Ok(())
-}
-pub fn relay() -> Result<(), String> {
-    for line in std::io::stdin().lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                println!(
-                    "{}",
-                    json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})
-                );
-                continue;
-            }
-        };
-        if request.get("id").is_none() {
-            continue;
-        }
-        let response = (|| -> Result<Value, String> {
-            let endpoint: Value = serde_json::from_slice(
-                &std::fs::read(data_dir().join("endpoint.json"))
-                    .map_err(|_| "Open Hissabeth before connecting MCP")?,
-            )
-            .map_err(|e| e.to_string())?;
-            let address = endpoint["address"].as_str().ok_or("Invalid endpoint")?;
-            let addr: std::net::SocketAddr = address.parse().map_err(|_| "Invalid endpoint")?;
-            if !addr.ip().is_loopback() {
-                return Err("Endpoint must be loopback".into());
-            }
-            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-                .map_err(|e| format!("Open Hissabeth: {e}"))?;
-            stream
-                .set_read_timeout(Some(Duration::from_secs(60)))
-                .map_err(|e| e.to_string())?;
-            writeln!(
-                stream,
-                "{}",
-                json!({"token":endpoint["token"],"request":request})
-            )
-            .map_err(|e| e.to_string())?;
-            let mut result = String::new();
-            BufReader::new(stream)
-                .read_line(&mut result)
-                .map_err(|e| e.to_string())?;
-            serde_json::from_str(&result).map_err(|e| e.to_string())
-        })();
-        println!(
-            "{}",
-            response.unwrap_or_else(
-                |e| json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":e}})
-            )
-        );
-    }
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lab_tools_preview_report_export_and_commit_with_revision() {
+        let (_dir, workspace) = shared_workspace();
+        let call = |name, args| dispatch(&workspace, name, args, None);
+        let initial = call("bench_get", json!({})).unwrap();
+        let catalog = call("bench_catalog", json!({"query":"PBS251","kind":"pbs"})).unwrap();
+        assert_eq!(catalog["items"][0]["part"], "PBS251");
+        let preview = call("bench_template", json!({"name":"polarized_beam_combiner"})).unwrap();
+        assert_eq!(preview["applied"], false);
+        assert_eq!(call("bench_get", json!({})).unwrap(), initial);
+        let mut draft = preview["bench"].clone();
+        draft["sources"][0]["polarization"] = json!({"kind":"linear","angle_deg":45.});
+        draft["sources"][0]["m2"] = json!(1.2);
+        draft["elements"][1]["screw_tpi"] = json!(100.);
+        let aim = call(
+            "bench_auto_aim",
+            json!({"bench":draft,"snap_holes":true,"uniform_z":80.}),
+        )
+        .unwrap();
+        assert_eq!(aim["bench"]["sources"][0]["position"][2], 80.);
+        assert_eq!(aim["applied"], false);
+        let check = call("bench_lab_check", json!({"bench":aim["bench"]})).unwrap();
+        assert_eq!(check["passed"], true);
+        assert_eq!(check["saved"], false);
+        let guide = call("bench_alignment_guide", json!({"bench":aim["bench"]})).unwrap();
+        assert_eq!(guide["steps"][1]["id"], "HWP");
+        let export = call(
+            "bench_export_blueprint",
+            json!({"bench":aim["bench"],"format":"svg"}),
+        )
+        .unwrap();
+        assert_eq!(export["mime"], "image/svg+xml");
+        assert_eq!(call("bench_get", json!({})).unwrap(), initial);
+        assert!(call("bench_template", json!({"name":"michelson","apply":true})).is_err());
+        let applied = call(
+            "bench_template",
+            json!({"name":"michelson","apply":true,"revision":initial["revision"]}),
+        )
+        .unwrap();
+        assert_eq!(applied["applied"], true);
+        assert!(
+            call(
+                "bench_auto_aim",
+                json!({"bench":aim["bench"],"apply":true,"revision":initial["revision"]})
+            )
+            .is_err()
+        );
+        let committed = workspace
+            .write()
+            .unwrap()
+            .call(
+                "bench_auto_aim",
+                json!({
+                    "bench":aim["bench"],"apply":true,"revision":applied["revision"]
+                }),
+            )
+            .unwrap();
+        assert_eq!(committed["applied"], true);
+        assert_eq!(
+            call("bench_get", json!({})).unwrap()["bench"],
+            committed["bench"]
+        );
+        let saved = call("bench_lab_check", json!({})).unwrap();
+        assert_eq!(saved["saved"], true);
+        assert_eq!(saved["revision"], committed["revision"]);
+        let mut bad = aim["bench"].clone();
+        bad["sources"][0]["polarization"] = json!({"kind":"horizontal","angle_deg":45.});
+        assert!(call("bench_lab_check", json!({"bench":bad})).is_err());
+    }
+
+    fn shared_workspace() -> (tempfile::TempDir, SharedWorkspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(dir.path().join("system.json")).unwrap();
+        (dir, Arc::new(RwLock::new(workspace)))
+    }
+
+    #[test]
+    fn optimization_preview_and_apply_share_results_and_notify_after_commit() {
+        let (dir, workspace) = shared_workspace();
+        let initial = dispatch(&workspace, "system_get", json!({}), None).unwrap();
+        let revision = initial["revision"].as_u64().unwrap();
+        let mut args = json!({
+            "variables": [{"kind":"radius","surface":0,"min":15.0,"max":500.0}],
+            "operands": [{"kind":"efl","target":60.0}],
+        });
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notifier: ChangeNotifier = {
+            let workspace = workspace.clone();
+            let observed = observed.clone();
+            Arc::new(move |revision| {
+                let guard = workspace
+                    .try_write()
+                    .expect("notifier runs after releasing the write lock");
+                assert_eq!(guard.revision(), revision);
+                observed.lock().unwrap().push(revision);
+            })
+        };
+        let preview = dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        assert_eq!(preview["applied"], false);
+        assert_eq!(preview["revision"], revision);
+        assert!(
+            preview["final_merit"].as_f64().unwrap() < preview["initial_merit"].as_f64().unwrap()
+        );
+        assert!(!dir.path().join("system.json").exists());
+        assert!(observed.lock().unwrap().is_empty());
+
+        args["apply"] = json!(true);
+        assert!(dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).is_err());
+        args["revision"] = json!(revision);
+        let applied = dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        assert_eq!(applied["applied"], true);
+        assert_eq!(applied["revision"], revision + 1);
+        assert_eq!(applied["system"], preview["system"]);
+        assert_eq!(
+            dispatch(&workspace, "system_get", json!({}), None).unwrap()["system"],
+            applied["system"]
+        );
+        assert!(dispatch(&workspace, "optimize", args, Some(&notifier)).is_err());
+        assert_eq!(*observed.lock().unwrap(), [revision + 1]);
+        let history = dispatch(&workspace, "history_list", json!({}), None).unwrap();
+        assert_eq!(history["entries"][1]["action"], "optimize");
+    }
+
+    #[test]
+    fn optical_summary_and_tolerance_reads_can_run_concurrently() {
+        let (_dir, workspace) = shared_workspace();
+        let read = workspace.read().unwrap();
+        let revision = read.revision();
+        let tolerance = json!({
+            "tolerances": [{"kind":"radius","surface":0,"delta_percent":0.5}],
+            "criterion": {"kind":"efl"},
+        });
+        let mut monte_carlo = tolerance.clone();
+        monte_carlo["trials"] = json!(10);
+        let calls = [
+            ("design_summary", json!({})),
+            ("tolerance_sensitivity", tolerance),
+            ("tolerance_monte_carlo", monte_carlo),
+        ];
+        let (send, receive) = std::sync::mpsc::channel();
+        let workers: Vec<_> = calls
+            .into_iter()
+            .map(|(name, args)| {
+                let workspace = workspace.clone();
+                let send = send.clone();
+                std::thread::spawn(move || {
+                    send.send((name, dispatch(&workspace, name, args, None)))
+                        .unwrap();
+                })
+            })
+            .collect();
+        let results: Vec<_> = (0..workers.len())
+            .map(|_| receive.recv_timeout(std::time::Duration::from_secs(5)))
+            .collect();
+        drop(read);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        for result in results {
+            let (name, value) =
+                result.expect("optical reads must finish while another reader holds the lock");
+            let value = value.unwrap();
+            assert_eq!(value["revision"], revision);
+            match name {
+                "design_summary" => {
+                    assert_eq!(value["name"], "BK7 singlet");
+                    assert!(value["paraxial"]["efl"].as_f64().unwrap() > 0.);
+                }
+                "tolerance_sensitivity" => {
+                    assert_eq!(value["entries"].as_array().unwrap().len(), 1);
+                    assert!(value["rss_change"].as_f64().unwrap() > 0.);
+                }
+                "tolerance_monte_carlo" => assert_eq!(value["succeeded"], 10),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn history_navigation_persists_snapshots_and_restore_is_undoable() {
+        let (dir, workspace) = shared_workspace();
+        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        let initial = call("system_get", json!({}));
+        let mut system = initial["system"].clone();
+        let initial_radius = system["surfaces"][0]["radius"].as_f64().unwrap();
+        system["surfaces"][0]["radius"] = json!(initial_radius + 10.);
+        let edited = call(
+            "system_set",
+            json!({"revision":initial["revision"],"system":system}),
+        );
+        let compared = call("history_compare", json!({}));
+        assert_eq!(compared["from"]["index"], 0);
+        assert_eq!(compared["to"]["index"], 1);
+        assert_eq!(
+            compared["surface_changes"][0]["changes"][0]["field"],
+            "radius"
+        );
+
+        let undone = call("history_undo", json!({"revision":edited["revision"]}));
+        assert_eq!(undone["cursor"], 0);
+        assert_eq!(undone["can_undo"], false);
+        assert_eq!(undone["can_redo"], true);
+        let disk = || {
+            serde_json::from_slice::<Value>(&std::fs::read(dir.path().join("system.json")).unwrap())
+                .unwrap()
+        };
+        assert_eq!(disk(), initial["system"]);
+
+        let redone = call("history_redo", json!({"revision":undone["revision"]}));
+        assert_eq!(redone["cursor"], 1);
+        assert_eq!(redone["can_redo"], false);
+        let restored = call(
+            "history_restore",
+            json!({"index":0,"revision":redone["revision"]}),
+        );
+        assert_eq!(disk(), initial["system"]);
+        let history = call("history_list", json!({}));
+        assert_eq!(history["entries"][2]["action"], "restore");
+        assert_eq!(history["current_revision"], restored["revision"]);
+        call("history_undo", json!({"revision":restored["revision"]}));
+        assert_eq!(disk()["surfaces"][0]["radius"], initial_radius + 10.);
+        let reversed = call("history_compare", json!({"from_index":1,"to_index":0}));
+        assert_eq!(
+            reversed["surface_changes"][0]["changes"][0]["after"],
+            initial_radius
+        );
+    }
+
+    #[test]
+    fn project_files_link_update_reopen_and_detach() {
+        let (dir, workspace) = shared_workspace();
+        let path = dir.path().join("system.json");
+        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        let initial = call("system_get", json!({}));
+        let first = call(
+            "project_save_as",
+            json!({"path":"singlet","revision":initial["revision"]}),
+        );
+        let first_path = dir.path().join("projects/singlet.hissabeth.json");
+        assert_eq!(first["path"], json!(first_path));
+        let mut system = initial["system"].clone();
+        system["name"] = json!("Modified singlet");
+        let edited = call(
+            "system_set",
+            json!({"system":system,"revision":first["revision"]}),
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(&first_path).unwrap()
+        );
+
+        let second = call(
+            "project_save_as",
+            json!({"path":"second.json","revision":edited["revision"]}),
+        );
+        system["name"] = json!("Second project");
+        let edited_second = call(
+            "system_set",
+            json!({"system":system,"revision":second["revision"]}),
+        );
+        let first_contents = std::fs::read(&first_path).unwrap();
+        let opened = call(
+            "project_open",
+            json!({"path":"singlet.hissabeth.json","revision":edited_second["revision"]}),
+        );
+        assert_eq!(opened["linked"], true);
+        assert_eq!(opened["path"], first["path"]);
+        let list = call("project_list", json!({}));
+        assert_eq!(list["active_file"], first["path"]);
+        assert_eq!(list["workspace_file"], json!(path));
+        assert_eq!(list["recent"], json!([first["path"], second["path"]]));
+        assert_eq!(
+            list["saved_projects"],
+            json!([second["path"], first["path"]])
+        );
+        let undone = call("history_undo", json!({"revision":opened["revision"]}));
+        assert_eq!(
+            call("project_list", json!({}))["active_file"],
+            second["path"]
+        );
+        assert_eq!(
+            call("system_get", json!({}))["system"]["name"],
+            "Second project"
+        );
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_contents);
+        call("history_redo", json!({"revision":undone["revision"]}));
+
+        drop(workspace);
+        let workspace = Arc::new(RwLock::new(Workspace::open(path).unwrap()));
+        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        assert_eq!(call("project_list", json!({})), list);
+        let status = call("workspace_status", json!({}));
+        let zmx_path = dir.path().join("projects/import.ZMX");
+        let exported = call("project_export", json!({"format":"zmx"}));
+        let zmx_text = exported["text"].as_str().unwrap();
+        std::fs::write(&zmx_path, zmx_text).unwrap();
+        let imported = call(
+            "project_open",
+            json!({"path":"import.ZMX","revision":status["revision"]}),
+        );
+        assert_eq!(imported["linked"], false);
+        assert_eq!(call("project_list", json!({}))["active_file"], Value::Null);
+        assert_eq!(std::fs::read_to_string(&zmx_path).unwrap(), zmx_text);
+
+        let opened = call(
+            "project_open",
+            json!({"path":"singlet.hissabeth.json","revision":imported["revision"]}),
+        );
+        let saved = std::fs::read(&first_path).unwrap();
+        call("project_new", json!({"revision":opened["revision"]}));
+        assert_eq!(std::fs::read(&first_path).unwrap(), saved);
+        assert_eq!(call("project_list", json!({}))["active_file"], Value::Null);
+    }
+
     #[test]
     fn bench_transaction_preview_roundtrip_and_restart() {
         let mut e = engine("bench-transaction");
@@ -2059,6 +2118,82 @@ mod tests {
             )
             .unwrap();
         assert!((index["index"].as_f64().unwrap() - 1.5).abs() < 1e-12);
+        std::fs::remove_file(&e.path).unwrap();
+    }
+    #[test]
+    fn active_configuration_drives_analysis_and_writes() {
+        use crate::optics::{Configuration, Override};
+        let mut e = engine("configurations");
+        let mut system = e.system.clone();
+        system.configurations = vec![
+            Configuration {
+                name: "nominal".into(),
+                overrides: vec![],
+            },
+            Configuration {
+                name: "shifted".into(),
+                overrides: vec![Override::Thickness {
+                    surface: 1,
+                    value: 50.,
+                }],
+            },
+        ];
+        let revision = e.revision;
+        e.call("system_set", json!({"system":system,"revision":revision}))
+            .unwrap();
+        let doc = e.call("system_get", json!({})).unwrap();
+        assert_eq!(doc["system"]["configurations"].as_array().unwrap().len(), 2);
+        let resolved = e.call("system_resolved", json!({})).unwrap();
+        assert_eq!(resolved["system"]["surfaces"][1]["thickness"], 46.64);
+        let base_layout = e.call("layout", json!({})).unwrap();
+        e.call(
+            "configuration_activate",
+            json!({"index":1,"revision":e.revision}),
+        )
+        .unwrap();
+        let resolved = e.call("system_resolved", json!({})).unwrap();
+        assert_eq!(resolved["system"]["surfaces"][1]["thickness"], 50.);
+        assert_eq!(resolved["revision"], e.revision);
+        let shifted_layout = e.call("layout", json!({})).unwrap();
+        assert_ne!(base_layout["rays"], shifted_layout["rays"]);
+        assert!(
+            e.call(
+                "configuration_activate",
+                json!({"index":2,"revision":e.revision})
+            )
+            .is_err()
+        );
+        // Autofocus writes through the active configuration's override and
+        // leaves the shared base thickness untouched.
+        e.call("autofocus", json!({"revision":e.revision})).unwrap();
+        let doc = e.call("system_get", json!({})).unwrap();
+        assert_eq!(doc["system"]["surfaces"][1]["thickness"], 46.64);
+        let focused = e.system.configurations[1].overrides[0].clone();
+        let crate::optics::Override::Thickness { value, .. } = focused else {
+            panic!("thickness override retained")
+        };
+        assert!((value - 50.).abs() > 1e-9);
+        let resolved = e.call("system_resolved", json!({})).unwrap();
+        assert_eq!(resolved["system"]["surfaces"][1]["thickness"], value);
+        // With the plain configuration active, autofocus writes the base gap.
+        e.call(
+            "configuration_activate",
+            json!({"index":0,"revision":e.revision}),
+        )
+        .unwrap();
+        e.call("autofocus", json!({"revision":e.revision})).unwrap();
+        let doc = e.call("system_get", json!({})).unwrap();
+        let thickness = doc["system"]["surfaces"][1]["thickness"].as_f64().unwrap();
+        assert!((thickness - 46.64).abs() > 1e-9);
+        // Surface row editing is rejected while overrides index surfaces.
+        let draft = e.call("system_get", json!({})).unwrap()["system"].clone();
+        assert!(
+            e.call(
+                "surface_edit",
+                json!({"system":draft,"operation":{"kind":"insert","before":1,"count":1}})
+            )
+            .is_err()
+        );
         std::fs::remove_file(&e.path).unwrap();
     }
 }

@@ -475,7 +475,11 @@ void detect();
             ><button
                 class="primary"
                 :disabled="
-                    !store.loaded || (!edited && !store.warning) || applying || !!invalid.length || changedElsewhere
+                    !store.loaded ||
+                    (!edited && !store.warning) ||
+                    applying ||
+                    !!invalid.length ||
+                    changedElsewhere
                 "
                 @click="apply"
             >

@@ -2,6 +2,7 @@
 import { usePlotAppearance, plotColor } from '../composables/usePlotAppearance';
 usePlotAppearance(draw);
 import { onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue';
+import { useResizeObserver } from '@vueuse/core';
 import type { RGBA } from '../types';
 
 const props = defineProps<{
@@ -29,7 +30,11 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const cssWidth = ref(W);
 
 let frame = 0;
-let observer: ResizeObserver | undefined;
+
+useResizeObserver(canvas, (entries) => {
+    const el = entries[0]?.target;
+    if (el instanceof HTMLElement) cssWidth.value = el.clientWidth || W;
+});
 
 function draw(): void {
     frame = 0;
@@ -110,21 +115,12 @@ function schedule(): void {
 
 onMounted(() => {
     const el = canvas.value;
-    if (el) {
-        cssWidth.value = el.clientWidth || W;
-        if (typeof ResizeObserver !== 'undefined') {
-            observer = new ResizeObserver(() => {
-                cssWidth.value = el.clientWidth || W;
-            });
-            observer.observe(el);
-        }
-    }
+    if (el) cssWidth.value = el.clientWidth || W;
     schedule();
 });
 onBeforeUnmount(() => {
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
-    observer?.disconnect();
 });
 watch(
     [

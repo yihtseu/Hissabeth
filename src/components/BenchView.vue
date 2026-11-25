@@ -1,369 +1,431 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import {
+    Crosshair,
+    Download,
+    Grid3x3,
+    List,
+    Maximize2,
+    Plus,
+    RefreshCw,
+    RotateCcw,
+    Save,
+    Sparkles,
+    Trash2,
+    ZoomIn,
+    ZoomOut,
+} from 'lucide-vue-next';
 import { callTool, errorMessage } from '../api';
 import { tr } from '../i18n';
 import {
-    BENCH_KINDS,
     benchPorts,
-    benchProblems,
     benchRotate,
     type Bench,
+    type BenchCatalogItem,
     type BenchElement,
-    type BenchKind,
-    type BenchSource,
+    type BenchLabCheck,
+    type BenchPolarization,
     type BenchTrace,
-    type BenchAssembly,
     type Vec3,
 } from '../bench';
+import { profileCurve } from '../profile';
 import { canonicalJson, clone } from '../validation';
-import NumberField from './NumberField.vue';
+import HeatMap from './HeatMap.vue';
+import BenchLabPanel from './BenchLabPanel.vue';
+import type { OpticalSystem } from '../types';
 
 const props = defineProps<{
-    modelValue: Bench | null | undefined;
+    system: OpticalSystem;
     revision: number;
     online: boolean;
-    locked: boolean;
-    canSave: boolean;
+    dirty: boolean;
+    busy: boolean;
+    stale: boolean;
+    refreshPending: boolean;
+    mutate: (op: (revision: number) => Promise<unknown>) => Promise<boolean>;
+    mode: '2d' | '3d';
+    chatOpen?: boolean;
 }>();
-const emit = defineEmits<{ 'update:modelValue': [bench: Bench | null]; save: [] }>();
-const scene = computed(() => props.modelValue);
-const selected = ref('');
-const mode = ref<'2d' | '3d'>('2d');
-const transform = ref<'move' | 'rotate'>('move');
-const axis = ref(0);
-const selectedElement = computed(() => scene.value?.elements.find((e) => e.id === selected.value));
-const selectedSource = computed(() => scene.value?.sources.find((s) => s.id === selected.value));
-const entity = computed(() => selectedElement.value ?? selectedSource.value);
+const emit = defineEmits<{ inspectGroup: []; chat: [] }>();
+const selected = defineModel<string>('selected', { default: '' });
+
+// Local bench draft enables smooth 2D dragging, catalog placement & Auto-Aim with live preview before committing.
+const draft = ref<Bench | null>(null);
+const benchDirty = computed(() => {
+    if (!draft.value && !props.system.bench) return false;
+    return canonicalJson(draft.value) !== canonicalJson(props.system.bench ?? null);
+});
+const scene = computed(() => draft.value ?? props.system.bench ?? null);
+
+watch(
+    () => [props.revision, props.system.bench],
+    () => {
+        draft.value = props.system.bench ? clone(props.system.bench) : null;
+    },
+    { immediate: true },
+);
+
+const allEntities = computed(() => [
+    ...(scene.value?.elements ?? []),
+    ...(scene.value?.sources ?? []),
+]);
+const entity = computed(() => allEntities.value.find((e) => e.id === selected.value));
 const trace = ref<BenchTrace | null>(null);
-const assembly = ref<BenchAssembly | null>(null);
-const error = ref('');
+const labCheck = ref<BenchLabCheck | null>(null);
 const pending = ref(false);
+const labPending = ref(false);
+const saving = ref(false);
+const error = ref('');
+const statusMsg = ref('');
 const branch = ref('');
-const undo = ref<(Bench | null)[]>([]);
-const redo = ref<(Bench | null)[]>([]);
-const addKind = ref<BenchKind>('mirror');
-const addCount = ref(1);
-const connectionFrom = ref('');
-const connectionPort = ref('out');
-const connectionTo = ref('');
-const raw = ref('');
-const rawError = ref('');
+const snapHoles = ref(true);
+const showGaussian = ref(true);
+const showTree = ref(true);
+const hoverCoord = ref<{ x: number; y: number; col: number; row: number } | null>(null);
+const connPort = ref('reflected');
+const connTo = ref('');
+const templateChoice = ref('mach_zehnder');
+const exportFormat = ref<'svg' | 'dxf' | 'stl' | 'alignment_md' | 'csv'>('svg');
+
 const svg = ref<SVGSVGElement>();
 const yaw = ref(-25);
 const pitch = ref(35);
 const zoom = ref(1);
 const pan = ref<[number, number]>([0, 0]);
 let token = 0;
-let timer: ReturnType<typeof setTimeout> | undefined;
+let labToken = 0;
 let alive = true;
-let lastEmitted = '';
-const problems = computed(() => benchProblems(scene.value));
-const editable = computed(() => props.online && !props.locked);
-const allEntities = computed(() => [
-    ...(scene.value?.sources ?? []),
-    ...(scene.value?.elements ?? []),
-]);
-const fromPorts = computed(() =>
-    benchPorts(
-        scene.value?.sources.some((s) => s.id === connectionFrom.value)
-            ? 'source'
-            : (scene.value?.elements.find((e) => e.id === connectionFrom.value)?.kind ??
-                  'detector'),
-    ),
+
+const TEMPLATES = [
+    'mach_zehnder',
+    'michelson',
+    'polarized_beam_combiner',
+    'beam_expander_focus',
+    'periscope_routing',
+] as const;
+
+const canCommit = computed(
+    () =>
+        props.online &&
+        !props.dirty &&
+        !props.busy &&
+        !props.stale &&
+        !props.refreshPending &&
+        !saving.value,
 );
-watch(connectionFrom, () => {
-    connectionPort.value = fromPorts.value[0] ?? 'out';
-});
-const axes = ['X', 'Y', 'Z'];
-const angleNames = ['roll', 'pitch', 'yaw'];
-function edit(next: Bench | null, remember = true): void {
-    if (!editable.value) return;
-    if (remember) {
-        undo.value.push(clone(scene.value ?? null));
-        if (undo.value.length > 100) undo.value.shift();
-        redo.value = [];
-    }
-    lastEmitted = canonicalJson(next);
-    emit('update:modelValue', next);
-}
-function change(fn: (b: Bench) => void): void {
-    if (!scene.value) return;
-    const next = clone(scene.value);
-    fn(next);
-    edit(next);
-}
-function travel(back: boolean): void {
-    if (!editable.value) return;
-    const source = back ? undo : redo;
-    const dest = back ? redo : undo;
-    if (!source.value.length) return;
-    dest.value.push(clone(scene.value ?? null));
-    edit(source.value.pop()!, false);
-}
-function updateEntity(field: string, value: unknown): void {
-    change((b) => {
-        const e = [...b.elements, ...b.sources].find((e) => e.id === selected.value);
-        if (e) Object.assign(e, { [field]: value });
-    });
-}
-function updateVector(
-    field: 'position' | 'rotation' | 'direction',
-    i: number,
-    value: number,
-): void {
-    const e = entity.value as (BenchElement & BenchSource) | undefined;
-    if (!e) return;
-    const v = [...e[field]] as Vec3;
-    v[i] = value;
-    updateEntity(field, v);
-}
-function number(b: Bench, prefix: string): string {
-    let i = 1;
-    while ([...b.elements, ...b.sources].some((e) => e.id === prefix + i)) i++;
-    return prefix + i;
-}
-function addElements(): void {
-    if (
-        !scene.value ||
-        !Number.isInteger(addCount.value) ||
-        addCount.value < 1 ||
-        addCount.value + scene.value.elements.length > 128
-    )
-        return;
-    change((b) => {
-        for (let i = 0; i < addCount.value; i++) {
-            const id = number(b, 'E');
-            b.elements.push({
-                id,
-                label: id,
-                kind: addKind.value,
-                position: [
-                    100 + (b.elements.length % 12) * 50,
-                    100 + Math.floor(b.elements.length / 12) * 50,
-                    75,
-                ],
-                rotation: [0, 0, 0],
-                aperture: 12.5,
-                body_radius: 15,
-                focal_length: 100,
-                reflectance:
-                    addKind.value === 'mirror' ? 1 : addKind.value === 'splitter' ? 0.5 : 0,
-                transmittance:
-                    addKind.value === 'mirror' ? 0 : addKind.value === 'splitter' ? 0.5 : 1,
-                mount: null,
-            });
-            selected.value = id;
-        }
-    });
-}
-function addSource(): void {
-    change((b) => {
-        if (b.sources.length >= 16) return;
-        const id = number(b, 'S');
-        b.sources.push({
-            id,
-            position: [50, 100, 75],
-            direction: [1, 0, 0],
-            wavelength: 532,
-            power: 1,
-            beam_radius: 2,
-            rings: 1,
-        });
-        selected.value = id;
-    });
-}
-function remove(): void {
-    if (selectedSource.value && scene.value?.sources.length === 1) return;
-    change((b) => {
-        b.elements = b.elements.filter((e) => e.id !== selected.value);
-        b.sources = b.sources.filter((e) => e.id !== selected.value);
-        b.connections = b.connections.filter(
-            (c) => c.from !== selected.value && c.to !== selected.value,
-        );
-    });
-    selected.value = '';
-}
-async function example(): Promise<void> {
-    const before = canonicalJson(scene.value);
-    const revision = props.revision;
-    error.value = '';
-    try {
-        const reply = await callTool('bench_example', {});
-        if (
-            alive &&
-            editable.value &&
-            before === canonicalJson(scene.value) &&
-            revision === props.revision
-        )
-            edit(reply.bench);
-    } catch (e) {
-        if (alive) error.value = errorMessage(e);
-    }
-}
+
 async function run(): Promise<void> {
-    if (!scene.value || !props.online || problems.value.length) return;
     const request = ++token;
-    const snapshot = clone(scene.value);
-    const input = canonicalJson(snapshot);
     const revision = props.revision;
-    pending.value = true;
+    const active = scene.value;
     error.value = '';
+    if (!active || !props.online) {
+        trace.value = null;
+        pending.value = false;
+        return;
+    }
+    pending.value = true;
     try {
-        const reply = await callTool('bench_trace', { bench: snapshot });
+        const result = await callTool('bench_trace', benchDirty.value ? { bench: active } : {});
         if (
             alive &&
             request === token &&
             props.online &&
             revision === props.revision &&
-            reply.revision === revision &&
-            input === canonicalJson(scene.value)
-        )
-            trace.value = reply;
+            result.revision === revision
+        ) {
+            trace.value = result;
+        }
     } catch (e) {
         if (alive && request === token) error.value = errorMessage(e);
     } finally {
         if (alive && request === token) pending.value = false;
     }
 }
+
+async function runLabCheck(): Promise<void> {
+    const request = ++labToken;
+    const active = scene.value;
+    if (!active || !props.online) {
+        labCheck.value = null;
+        labPending.value = false;
+        return;
+    }
+    labPending.value = true;
+    try {
+        const res = await callTool('bench_lab_check', benchDirty.value ? { bench: active } : {});
+        if (alive && request === labToken) labCheck.value = res;
+    } catch {
+        // Surface trace errors primarily; lab check stays optional while dragging.
+    } finally {
+        if (alive && request === labToken) labPending.value = false;
+    }
+}
+
+let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+function schedulePreview(): void {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+        void run();
+        void runLabCheck();
+    }, 120);
+}
+
 watch(
-    () => [canonicalJson(scene.value), props.revision, props.online],
+    () => [props.revision, props.online],
     () => {
-        token++;
-        pending.value = false;
-        trace.value = null;
-        assembly.value = null;
         branch.value = '';
-        clearTimeout(timer);
-        if (canonicalJson(scene.value) !== lastEmitted) {
-            undo.value = [];
-            redo.value = [];
-        }
-        if (scene.value && props.online && !problems.value.length)
-            timer = setTimeout(() => void run(), 160);
+        if (!allEntities.value.some((e) => e.id === selected.value)) selected.value = '';
+        void run();
+        void runLabCheck();
     },
     { immediate: true },
 );
+
 onBeforeUnmount(() => {
     alive = false;
     token++;
-    clearTimeout(timer);
+    labToken++;
+    clearTimeout(debounceTimer);
 });
-function download(name: string, text: string, type = 'application/json'): void {
-    const url = URL.createObjectURL(new Blob([text], { type }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+function ensureDraft(): Bench | null {
+    if (!draft.value && props.system.bench) draft.value = clone(props.system.bench);
+    return draft.value;
 }
-async function exportAssembly(csv = false): Promise<void> {
-    if (!scene.value || !props.online || problems.value.length) return;
-    const input = canonicalJson(scene.value);
-    const revision = props.revision;
+
+async function loadTemplate(name: string): Promise<void> {
+    if (!props.online) return;
+    error.value = '';
+    statusMsg.value = '';
     try {
-        const result = await callTool('bench_assembly', { bench: clone(scene.value) });
-        if (
-            !alive ||
-            !props.online ||
-            input !== canonicalJson(scene.value) ||
-            revision !== props.revision ||
-            result.revision !== revision
-        )
-            return;
-        assembly.value = result;
-        if (csv) {
-            const cell = (v: unknown) => '"' + String(v).replace(/"/g, '""') + '"';
-            const rows = [
-                [
-                    'ID',
-                    'Label',
-                    'Kind',
-                    'X_mm',
-                    'Y_mm',
-                    'Z_mm',
-                    'Roll_deg',
-                    'Pitch_deg',
-                    'Yaw_deg',
-                    'Normal_X',
-                    'Normal_Y',
-                    'Normal_Z',
-                    'Hole_X',
-                    'Hole_Y',
-                    'Offset_X_mm',
-                    'Offset_Y_mm',
-                    'Mount',
-                ],
-                ...result.items.map((e) => [
-                    e.id,
-                    e.label,
-                    e.kind,
-                    ...e.position,
-                    ...e.rotation,
-                    ...e.normal,
-                    ...e.hole,
-                    ...e.hole_offset,
-                    e.mount?.part ?? 'Unspecified',
-                ]),
-                ...result.sources.map((s) => [
-                    s.id,
-                    s.id,
-                    'source',
-                    ...s.position,
-                    '',
-                    '',
-                    '',
-                    ...s.direction,
-                    '',
-                    '',
-                    '',
-                    '',
-                    'Unspecified',
-                ]),
-            ];
-            download(
-                'bench-assembly.csv',
-                rows.map((r) => r.map(cell).join(',')).join('\r\n'),
-                'text/csv',
+        if (canCommit.value && !benchDirty.value) {
+            const ok = await props.mutate((rev) =>
+                callTool('bench_template', { name, apply: true, revision: rev }),
             );
-        } else download('bench-assembly.json', JSON.stringify(result, null, 2));
+            if (ok) statusMsg.value = tr('benchLab.templateLoaded', { name });
+        } else {
+            const res = await callTool('bench_template', { name, apply: false });
+            draft.value = res.bench;
+            statusMsg.value = tr('benchLab.templateStaged', { name });
+            schedulePreview();
+        }
     } catch (e) {
-        if (alive) error.value = errorMessage(e);
+        error.value = errorMessage(e);
     }
 }
-function applyRaw(): void {
+
+async function runAutoAim(): Promise<void> {
+    const active = ensureDraft();
+    if (!active || !props.online) return;
+    error.value = '';
+    statusMsg.value = '';
     try {
-        const value: unknown = JSON.parse(raw.value);
-        const p = benchProblems(value);
-        if (p.length || value == null) throw Error(p[0] ?? tr('bench.invalid'));
-        edit(value as Bench);
-        rawError.value = '';
+        const res = await callTool('bench_auto_aim', {
+            bench: active,
+            snap_holes: snapHoles.value,
+            apply: false,
+        });
+        draft.value = res.bench;
+        statusMsg.value = tr('benchLab.autoAimDone', { n: res.adjusted_elements.length });
+        schedulePreview();
     } catch (e) {
-        rawError.value = errorMessage(e);
+        error.value = errorMessage(e);
     }
 }
-function connect(): void {
-    change((b) => {
-        b.connections = b.connections.filter(
-            (c) => !(c.from === connectionFrom.value && c.port === connectionPort.value),
+
+async function saveBench(): Promise<void> {
+    if (!draft.value || !canCommit.value) return;
+    saving.value = true;
+    error.value = '';
+    statusMsg.value = '';
+    try {
+        const next = clone(draft.value);
+        const ok = await props.mutate((rev) =>
+            callTool('bench_set', { bench: next, revision: rev }),
         );
-        b.connections.push({
-            from: connectionFrom.value,
-            port: connectionPort.value,
-            to: connectionTo.value,
-        });
+        if (ok) statusMsg.value = tr('benchLab.saved');
+    } catch (e) {
+        error.value = errorMessage(e);
+    } finally {
+        saving.value = false;
+    }
+}
+
+function discardBench(): void {
+    draft.value = props.system.bench ? clone(props.system.bench) : null;
+    error.value = '';
+    statusMsg.value = '';
+    void run();
+    void runLabCheck();
+}
+
+function nextElementId(prefix: string): string {
+    const used = new Set(allEntities.value.map((e) => e.id));
+    for (let i = 1; i < 999; i++) {
+        const candidate = `${prefix}${i}`;
+        if (!used.has(candidate)) return candidate;
+    }
+    return `${prefix}_${Date.now()}`;
+}
+
+function snapCoord(value: number, originAxis: number, pitchMm: number): number {
+    return originAxis + Math.round((value - originAxis) / pitchMm) * pitchMm;
+}
+
+function addFromCatalog(item: BenchCatalogItem): void {
+    const b = ensureDraft();
+    if (!b) return;
+    const prefixMap: Record<string, string> = {
+        mirror: 'M',
+        curved_mirror: 'CM',
+        lens: 'L',
+        lens_group: 'G',
+        splitter: 'BS',
+        pbs: 'PBS',
+        waveplate: 'WP',
+        polarizer: 'POL',
+        detector: 'D',
+        aperture: 'AP',
+        blocker: 'BD',
+    };
+    const id = nextElementId(prefixMap[item.kind] ?? 'E');
+    const cx = snapCoord(b.origin[0] + b.table_size[0] * 0.5, b.origin[0], b.hole_pitch);
+    const cy = snapCoord(b.origin[1] + b.table_size[1] * 0.5, b.origin[1], b.hole_pitch);
+    const cz = b.sources[0]?.position[2] ?? b.origin[2] + 75;
+    const elem: BenchElement = {
+        id,
+        label: item.name,
+        kind: item.kind,
+        position: [cx, cy, cz],
+        rotation: [0, 0, 0],
+        aperture: item.aperture,
+        body_radius: item.body_radius,
+        focal_length: item.focal_length,
+        reflectance: item.reflectance,
+        transmittance: item.transmittance,
+        mount: clone(item.mount),
+        ...(item.retardance_waves != null ? { retardance_waves: item.retardance_waves } : {}),
+        ...(item.fast_axis_deg != null ? { fast_axis_deg: item.fast_axis_deg } : {}),
+        ...(item.extinction_ratio != null ? { extinction_ratio: item.extinction_ratio } : {}),
+        ...(item.screw_tpi != null ? { screw_tpi: item.screw_tpi } : {}),
+        ...(item.lever_arm_mm != null ? { lever_arm_mm: item.lever_arm_mm } : {}),
+    };
+    b.elements.push(elem);
+    selected.value = id;
+    statusMsg.value = tr('benchLab.addedPart', { id, part: item.part });
+    schedulePreview();
+}
+
+function addBeamDumpAt(position: Vec3, direction: Vec3, branchName: string): void {
+    const b = ensureDraft();
+    if (!b) return;
+    const id = nextElementId('BD');
+    const yawDeg = (Math.atan2(-direction[1], -direction[0]) * 180) / Math.PI;
+    b.elements.push({
+        id,
+        label: `Beam Dump (${branchName})`,
+        kind: 'blocker',
+        position: [position[0], position[1], position[2]],
+        rotation: [0, 0, Number(yawDeg.toFixed(2))],
+        aperture: 12.5,
+        body_radius: 19,
+        focal_length: 0,
+        reflectance: 0,
+        transmittance: 0,
+        mount: { part: 'BT610/M', base_size: [40, 40], height_range: [45, 130] },
     });
+    selected.value = id;
+    statusMsg.value = tr('benchLab.dumpAdded', { id });
+    schedulePreview();
 }
-function addMount(): void {
-    updateEntity('mount', { part: '', base_size: [30, 30], height_range: [40, 150] });
+
+function deleteSelectedElement(): void {
+    const b = ensureDraft();
+    if (!b || !selected.value) return;
+    const idx = b.elements.findIndex((e) => e.id === selected.value);
+    if (idx < 0) return;
+    const removedId = b.elements[idx]!.id;
+    b.elements.splice(idx, 1);
+    b.connections = b.connections.filter((c) => c.from !== removedId && c.to !== removedId);
+    selected.value = '';
+    schedulePreview();
 }
-function mountField(field: string, value: unknown): void {
-    if (selectedElement.value?.mount)
-        updateEntity('mount', { ...selectedElement.value.mount, [field]: value });
+
+function snapSelectedToHole(): void {
+    const b = ensureDraft();
+    if (!b || !selected.value) return;
+    const target =
+        b.elements.find((e) => e.id === selected.value) ??
+        b.sources.find((s) => s.id === selected.value);
+    if (!target) return;
+    target.position[0] = snapCoord(target.position[0], b.origin[0], b.hole_pitch);
+    target.position[1] = snapCoord(target.position[1], b.origin[1], b.hole_pitch);
+    schedulePreview();
 }
-const warnings = computed(() => assembly.value?.warnings ?? trace.value?.warnings ?? []);
-const failures = computed(
-    () => trace.value?.terminations.filter((t) => t.reason !== 'detected') ?? [],
+
+function updateSelectedPol(kind: string): void {
+    const b = ensureDraft();
+    if (!b) return;
+    const src = b.sources.find((s) => s.id === selected.value);
+    if (!src) return;
+    const map: Record<string, BenchPolarization> = {
+        unpolarized: { kind: 'unpolarized' },
+        horizontal: { kind: 'horizontal' },
+        vertical: { kind: 'vertical' },
+        diagonal45: { kind: 'diagonal45' },
+        right_circular: { kind: 'right_circular' },
+        left_circular: { kind: 'left_circular' },
+        linear: { kind: 'linear', angle_deg: 0 },
+    };
+    src.polarization = map[kind] ?? { kind: 'unpolarized' };
+    schedulePreview();
+}
+
+const selectedPorts = computed(() => {
+    const e = entity.value;
+    if (!e) return [];
+    return benchPorts('kind' in e ? e.kind : 'source');
+});
+const selectedConnections = computed(() =>
+    (scene.value?.connections ?? []).filter((c) => c.from === selected.value),
 );
+watch(selectedPorts, (ports) => {
+    if (ports.length && !ports.includes(connPort.value)) connPort.value = ports[0]!;
+});
+function addSelectedConnection(): void {
+    const b = ensureDraft();
+    if (!b || !selected.value || !connTo.value || connTo.value === selected.value) return;
+    b.connections = b.connections.filter(
+        (c) => !(c.from === selected.value && c.port === connPort.value),
+    );
+    b.connections.push({ from: selected.value, port: connPort.value, to: connTo.value });
+    schedulePreview();
+}
+function removeConnection(from: string, port: string): void {
+    const b = ensureDraft();
+    if (!b) return;
+    b.connections = b.connections.filter((c) => !(c.from === from && c.port === port));
+    schedulePreview();
+}
+
+const holeDots = computed(() => {
+    const b = scene.value;
+    if (!b || props.mode !== '2d') return [];
+    const [w, h] = b.table_size;
+    const cols = Math.floor(w / b.hole_pitch) + 1;
+    const rows = Math.floor(h / b.hole_pitch) + 1;
+    if (cols * rows > 1400) return [];
+    const [ox, oy, oz] = b.origin;
+    const pts: [number, number][] = [];
+    for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows; r++) {
+            pts.push(project([ox + c * b.hole_pitch, oy + r * b.hole_pitch, oz]));
+        }
+    }
+    return pts;
+});
+
 const visibleRays = computed(
     () =>
         trace.value?.segments.filter(
@@ -373,13 +435,27 @@ const visibleRays = computed(
                 branch.value.startsWith(s.branch + '/'),
         ) ?? [],
 );
+const failures = computed(
+    () => trace.value?.terminations.filter((t) => t.reason !== 'detected') ?? [],
+);
+const problemIds = computed(
+    () =>
+        new Set(
+            (labCheck.value?.issues ?? [])
+                .filter((i) => i.severity === 'error' || i.severity === 'warning')
+                .map((i) => i.element_id)
+                .filter((id): id is string => !!id),
+        ),
+);
+
+const fixed = (n: number) => Number(n.toPrecision(6)).toString();
 const basis = (point: Vec3): [number, number] => {
     const b = scene.value;
     if (!b) return [0, 0];
     const x = point[0] - b.origin[0] - b.table_size[0] / 2;
     const y = point[1] - b.origin[1] - b.table_size[1] / 2;
     const z = point[2] - b.origin[2];
-    if (mode.value === '2d') return [x, y];
+    if (props.mode === '2d') return [x, y];
     const a = (yaw.value * Math.PI) / 180;
     const p = (pitch.value * Math.PI) / 180;
     return [
@@ -427,6 +503,31 @@ const grid = computed(() => {
         ]);
     return lines;
 });
+
+const gaussianPolygons = computed(() => {
+    if (!showGaussian.value || !labCheck.value?.gaussian.segments.length) return [];
+    return labCheck.value.gaussian.segments
+        .map((seg) => {
+            const p0 = project(seg.from);
+            const p1 = project(seg.to);
+            const dx = p1[0] - p0[0];
+            const dy = p1[1] - p0[1];
+            const len = Math.hypot(dx, dy);
+            if (len < 1e-3) return '';
+            const nx = -dy / len;
+            const ny = dx / len;
+            const r0 = Math.max(2, seg.w_from * factor.value);
+            const r1 = Math.max(2, seg.w_to * factor.value);
+            return [
+                `${(p0[0] + nx * r0).toFixed(1)},${(p0[1] + ny * r0).toFixed(1)}`,
+                `${(p1[0] + nx * r1).toFixed(1)},${(p1[1] + ny * r1).toFixed(1)}`,
+                `${(p1[0] - nx * r1).toFixed(1)},${(p1[1] - ny * r1).toFixed(1)}`,
+                `${(p0[0] - nx * r0).toFixed(1)},${(p0[1] - ny * r0).toFixed(1)}`,
+            ].join(' ');
+        })
+        .filter(Boolean);
+});
+
 function shape(e: BenchElement, radius = e.body_radius): string {
     return path(
         Array.from({ length: 33 }, (_, i) => {
@@ -463,249 +564,362 @@ function mountLines(e: BenchElement): Vec3[][] {
         [3, 7],
     ].map(([a, b]) => [corners[a!]!, corners[b!]!]);
 }
-function vectorPoint(e: Vec3, i: number, length = 60): Vec3 {
-    return e.map((x, j) => x + (i === j ? length : 0)) as Vec3;
+
+function groupCurves(e: BenchElement): Vec3[][] {
+    if (e.kind !== 'lens_group') return [];
+    let z = 0;
+    return props.system.surfaces.flatMap((surface) => {
+        const curve = profileCurve(surface, z);
+        z += surface.thickness;
+        return [0, Math.PI / 2].map((angle) =>
+            curve.map(([x, r]) => {
+                const v = benchRotate([x, r * Math.cos(angle), r * Math.sin(angle)], e.rotation);
+                return e.position.map((p, i) => p + v[i]!) as Vec3;
+            }),
+        );
+    });
 }
-type Drag = {
-    scene: Bench;
-    start: [number, number];
-    position: Vec3;
-    axis: number | null;
-    rotate: boolean;
-    camera: boolean;
-    pan: boolean;
+
+let camera: {
+    x: number;
+    y: number;
     yaw: number;
     pitch: number;
-    offset: [number, number];
-};
-let drag: Drag | null = null;
-function point(event: PointerEvent): [number, number] {
-    const p = svg.value!.createSVGPoint();
-    p.x = event.clientX;
-    p.y = event.clientY;
-    const r = p.matrixTransform(svg.value!.getScreenCTM()!.inverse());
-    return [r.x, r.y];
+    pan: [number, number];
+    translate: boolean;
+} | null = null;
+
+let dragging: {
+    id: string;
+    startClientX: number;
+    startClientY: number;
+    startPos: Vec3;
+    moved: boolean;
+} | null = null;
+
+function beginDragEntity(event: PointerEvent, id: string, pos: Vec3): void {
+    selected.value = id;
+    if (props.mode !== '2d' || event.button !== 0) return;
+    dragging = {
+        id,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startPos: [pos[0], pos[1], pos[2]],
+        moved: false,
+    };
+    svg.value?.setPointerCapture(event.pointerId);
+    event.preventDefault();
 }
-function begin(event: PointerEvent, id?: string, handle: number | null = null): void {
-    if (!scene.value || drag) return;
-    const camera = event.button === 1 || event.button === 2;
-    if (!camera && (!editable.value || !id)) return;
-    if (id) selected.value = id;
-    if (!camera && mode.value === '3d' && handle === null) return;
-    const e = allEntities.value.find((e) => e.id === id);
-    const position = e?.position ?? [0, 0, 0];
-    drag = {
-        scene: clone(scene.value),
-        start: point(event),
-        position: [...position],
-        axis: handle,
-        rotate: transform.value === 'rotate' && !!selectedElement.value,
-        camera,
-        pan: event.shiftKey,
+
+function begin(event: PointerEvent): void {
+    if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+    camera = {
+        x: event.clientX,
+        y: event.clientY,
         yaw: yaw.value,
         pitch: pitch.value,
-        offset: [...pan.value],
+        pan: [...pan.value],
+        translate: event.shiftKey || props.mode === '2d' || event.button === 1,
     };
-    svg.value!.setPointerCapture(event.pointerId);
+    svg.value?.setPointerCapture(event.pointerId);
     event.preventDefault();
-    event.stopPropagation();
 }
+
 function move(event: PointerEvent): void {
-    if (!drag) return;
-    const p = point(event);
-    const dx = p[0] - drag.start[0];
-    const dy = p[1] - drag.start[1];
-    if (drag.camera) {
-        if (drag.pan) {
-            pan.value = [drag.offset[0] + dx, drag.offset[1] + dy];
-        } else if (mode.value === '3d') {
-            yaw.value = drag.yaw + dx * 0.35;
-            pitch.value = Math.max(5, Math.min(85, drag.pitch + dy * 0.25));
+    if (dragging && scene.value && svg.value) {
+        const b = ensureDraft();
+        if (!b) return;
+        const rect = svg.value.getBoundingClientRect();
+        const svgScale = 1000 / Math.max(1, rect.width);
+        const dxMm = ((event.clientX - dragging.startClientX) * svgScale) / factor.value;
+        const dyMm = -((event.clientY - dragging.startClientY) * svgScale) / factor.value;
+        if (Math.hypot(dxMm, dyMm) > 0.2) dragging.moved = true;
+        let nx = dragging.startPos[0] + dxMm;
+        let ny = dragging.startPos[1] + dyMm;
+        if (snapHoles.value) {
+            nx = snapCoord(nx, b.origin[0], b.hole_pitch);
+            ny = snapCoord(ny, b.origin[1], b.hole_pitch);
+        } else {
+            nx = Number(nx.toFixed(2));
+            ny = Number(ny.toFixed(2));
+        }
+        const target =
+            b.elements.find((e) => e.id === dragging!.id) ??
+            b.sources.find((s) => s.id === dragging!.id);
+        if (target) {
+            target.position[0] = nx;
+            target.position[1] = ny;
+            hoverCoord.value = {
+                x: nx,
+                y: ny,
+                col: Math.round((nx - b.origin[0]) / b.hole_pitch),
+                row: Math.round((ny - b.origin[1]) / b.hole_pitch),
+            };
         }
         return;
     }
-    if (!editable.value) {
-        cancel();
-        return;
+    if (props.mode === '2d' && scene.value && svg.value && !camera) {
+        const b = scene.value;
+        const rect = svg.value.getBoundingClientRect();
+        const sx = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 1000;
+        const sy = ((event.clientY - rect.top) / Math.max(1, rect.height)) * 600;
+        const wx = (sx - 500 - pan.value[0]) / factor.value + b.origin[0] + b.table_size[0] / 2;
+        const wy = (340 + pan.value[1] - sy) / factor.value + b.origin[1] + b.table_size[1] / 2;
+        hoverCoord.value = {
+            x: wx,
+            y: wy,
+            col: Math.round((wx - b.origin[0]) / b.hole_pitch),
+            row: Math.round((wy - b.origin[1]) / b.hole_pitch),
+        };
     }
-    const next = clone(drag.scene);
-    const e = [...next.elements, ...next.sources].find((e) => e.id === selected.value);
-    if (!e) return;
-    if (drag.rotate && 'rotation' in e) {
-        const i = drag.axis ?? 2;
-        e.rotation[i] += dx * 0.5;
-    } else if (mode.value === '2d' && drag.axis === null) {
-        e.position[0] += dx / factor.value;
-        e.position[1] -= dy / factor.value;
+    if (!camera) return;
+    const dx = event.clientX - camera.x;
+    const dy = event.clientY - camera.y;
+    if (camera.translate) {
+        const scale = 1000 / Math.max(1, svg.value!.getBoundingClientRect().width);
+        pan.value = [camera.pan[0] + dx * scale, camera.pan[1] + dy * scale];
     } else {
-        const i = drag.axis ?? axis.value;
-        const a = project(drag.position);
-        const b = project(vectorPoint(drag.position, i, 1));
-        const vx = b[0] - a[0];
-        const vy = b[1] - a[1];
-        const den = vx * vx + vy * vy;
-        if (den > 1e-6) e.position[i] += (dx * vx + dy * vy) / den;
+        yaw.value = camera.yaw + dx * 0.35;
+        pitch.value = Math.max(-85, Math.min(85, camera.pitch + dy * 0.25));
     }
-    edit(next, false);
 }
-function end(): void {
-    if (drag && !drag.camera && canonicalJson(drag.scene) !== canonicalJson(scene.value)) {
-        undo.value.push(drag.scene);
-        redo.value = [];
-    }
-    drag = null;
+
+function endPointer(): void {
+    if (dragging?.moved) schedulePreview();
+    dragging = null;
+    camera = null;
 }
-function cancel(): void {
-    if (drag && !drag.camera && canonicalJson(scene.value) === lastEmitted) {
-        lastEmitted = canonicalJson(drag.scene);
-        emit('update:modelValue', clone(drag.scene));
-    }
-    drag = null;
+
+const cell = (v: unknown) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+
+function downloadBlob(content: string, filename: string, mime: string): void {
+    const url = URL.createObjectURL(new Blob([content], { type: mime }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function key(event: KeyboardEvent): void {
-    if ((event.target as HTMLElement).matches('input,select,textarea')) return;
-    if (event.key === 'Escape') {
-        cancel();
-        event.preventDefault();
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-        travel(!event.shiftKey);
-        event.preventDefault();
-        event.stopPropagation();
-    }
-    if (event.key.toLowerCase() === 'w') transform.value = 'move';
-    if (event.key.toLowerCase() === 'e') transform.value = 'rotate';
-    if (
-        ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(
-            event.key,
-        ) &&
-        entity.value
-    ) {
-        const i = event.key.startsWith('Page')
-            ? 2
-            : event.key === 'ArrowLeft' || event.key === 'ArrowRight'
-              ? 0
-              : 1;
-        const sign = ['ArrowLeft', 'ArrowDown', 'PageDown'].includes(event.key) ? -1 : 1;
-        const amount = sign * (event.shiftKey ? 10 : event.altKey ? 0.1 : 1);
-        if (transform.value === 'rotate' && selectedElement.value)
-            updateVector(
-                'rotation',
-                mode.value === '2d' ? 2 : axis.value,
-                selectedElement.value.rotation[mode.value === '2d' ? 2 : axis.value]! + amount,
+
+async function exportDeliverable(): Promise<void> {
+    if (!props.online || !scene.value) return;
+    error.value = '';
+    try {
+        if (exportFormat.value === 'csv') {
+            const report = await callTool(
+                'bench_assembly',
+                benchDirty.value ? { bench: scene.value } : {},
             );
-        else if (mode.value === '3d' || i !== 2)
-            updateVector('position', i, entity.value.position[i]! + amount);
-        event.preventDefault();
-        event.stopPropagation();
+            const rows = [
+                [
+                    'id',
+                    'kind',
+                    'x_mm',
+                    'y_mm',
+                    'z_mm',
+                    'roll_deg',
+                    'pitch_deg',
+                    'yaw_deg',
+                    'hole_col',
+                    'hole_row',
+                    'mount',
+                ],
+                ...report.items.map((e) => [
+                    e.id,
+                    e.kind,
+                    e.position[0],
+                    e.position[1],
+                    e.position[2],
+                    e.rotation[0],
+                    e.rotation[1],
+                    e.rotation[2],
+                    e.hole[0],
+                    e.hole[1],
+                    e.mount?.part ?? '',
+                ]),
+                ...report.sources.map((e) => [
+                    e.id,
+                    'source',
+                    e.position[0],
+                    e.position[1],
+                    e.position[2],
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '',
+                ]),
+            ];
+            downloadBlob(
+                rows.map((r) => r.map(cell).join(',')).join('\r\n'),
+                'optical-assembly.csv',
+                'text/csv',
+            );
+            return;
+        }
+        const out = await callTool('bench_export_blueprint', {
+            ...(benchDirty.value ? { bench: scene.value } : {}),
+            format: exportFormat.value,
+        });
+        downloadBlob(out.content, out.filename, out.mime);
+        statusMsg.value = tr('benchLab.exported', { file: out.filename });
+    } catch (e) {
+        error.value = errorMessage(e);
     }
 }
-const fixed = (n: number) => Number(n.toPrecision(6)).toString();
 </script>
 
 <template>
-    <div class="bench" @keydown="key">
-        <div class="bench-tools">
-            <button :disabled="!editable" @click="example">{{ tr('bench.example') }}</button>
-            <button :disabled="!editable || !undo.length" @click="travel(true)">
-                {{ tr('bench.undo') }}
-            </button>
-            <button :disabled="!editable || !redo.length" @click="travel(false)">
-                {{ tr('bench.redo') }}
-            </button>
-            <button :disabled="!canSave" class="primary" @click="emit('save')">
-                {{ tr('app.applyChanges') }}
-            </button>
-            <span v-if="scene" class="bench-count"
-                >{{ scene.elements.length }} / 128 · {{ tr('bench.elements') }}</span
-            >
-        </div>
-        <p v-if="!scene" class="empty">{{ tr('bench.empty') }}</p>
-        <p v-if="error" class="banner error" role="alert">{{ error }}</p>
-        <p v-for="p in problems" :key="p" class="banner error" role="alert">{{ p }}</p>
-        <template v-if="scene">
-            <div class="bench-controls">
-                <label
-                    >{{ tr('bench.name')
-                    }}<input
-                        :disabled="!editable"
-                        :value="scene.name"
-                        @change="
-                            change((b) => {
-                                b.name = ($event.target as HTMLInputElement).value;
-                            })
-                        "
-                /></label>
-                <button :aria-pressed="mode === '2d'" @click="mode = '2d'">
-                    {{ tr('bench.plan') }}
-                </button>
-                <button :aria-pressed="mode === '3d'" @click="mode = '3d'">
-                    {{ tr('bench.spatial') }}
-                </button>
+    <section class="bench">
+        <div v-if="!scene" class="empty-bench">
+            <p class="empty">{{ tr('optical.emptyBench') }}</p>
+            <div class="controls" style="justify-content: center; margin-bottom: 12px">
                 <button
-                    @click="
-                        zoom = 1;
-                        pan = [0, 0];
-                    "
+                    v-for="tpl in TEMPLATES"
+                    :key="tpl"
+                    type="button"
+                    class="primary"
+                    :disabled="!online"
+                    @click="loadTemplate(tpl)"
                 >
-                    {{ tr('bench.fit') }}
+                    <Sparkles :size="14" /> {{ tr('benchLab.templates.' + tpl) }}
                 </button>
-                <select v-model="transform" :aria-label="tr('bench.transform')">
-                    <option value="move">{{ tr('bench.move') }} (W)</option>
-                    <option value="rotate">{{ tr('bench.rotate') }} (E)</option>
-                </select>
-                <select v-model="axis" :aria-label="tr('bench.axis')">
-                    <option v-for="(a, i) in axes" :key="a" :value="i">{{ a }}</option>
-                </select>
-                <button :disabled="!online || pending || !!problems.length" @click="run">
-                    {{ pending ? tr('bench.tracing') : tr('bench.trace') }}
+                <button v-if="!chatOpen" type="button" @click="emit('chat')">
+                    {{ tr('optical.openChat') }}
                 </button>
             </div>
-            <div class="bench-grid">
-                <div class="bench-tree">
-                    <strong>{{ tr('bench.elements') }}</strong>
-                    <fieldset :disabled="!editable">
-                        <legend class="sr-only">{{ tr('bench.add') }}</legend>
-                        <select v-model="addKind" :aria-label="tr('bench.kind')">
-                            <option v-for="k in BENCH_KINDS" :key="k" :value="k">
-                                {{ tr('bench.kinds.' + k) }}
-                            </option>
-                        </select>
-                        <input
-                            v-model.number="addCount"
-                            type="number"
-                            min="1"
-                            max="128"
-                            :aria-label="tr('bench.addCount')"
-                        />
-                        <button
-                            :disabled="
-                                !Number.isInteger(addCount) ||
-                                addCount < 1 ||
-                                scene.elements.length + addCount > 128
-                            "
-                            @click="addElements"
-                        >
-                            {{ tr('bench.add') }}
-                        </button>
-                        <button :disabled="scene.sources.length >= 16" @click="addSource">
-                            {{ tr('bench.addSource') }}
-                        </button>
-                    </fieldset>
-                    <div role="list" class="bench-element-list">
+        </div>
+        <p v-if="error" class="banner error" role="alert">{{ error }}</p>
+        <p v-if="statusMsg" class="banner ok" role="status">{{ statusMsg }}</p>
+
+        <template v-if="scene">
+            <div class="bench-controls">
+                <button
+                    type="button"
+                    :aria-pressed="showTree"
+                    :title="tr('benchLab.toggleTree')"
+                    @click="showTree = !showTree"
+                >
+                    <List :size="13" /> {{ tr('benchLab.toggleTree') }} ({{
+                        scene.elements.length
+                    }})
+                </button>
+                <span v-if="benchDirty" class="badge badge-warn">
+                    ● {{ tr('statusbar.draft') }}
+                </span>
+
+                <select v-model="templateChoice" aria-label="Lab template">
+                    <option v-for="tpl in TEMPLATES" :key="tpl" :value="tpl">
+                        {{ tr('benchLab.templates.' + tpl) }}
+                    </option>
+                </select>
+                <button type="button" :disabled="!online" @click="loadTemplate(templateChoice)">
+                    <Sparkles :size="13" /> {{ tr('benchLab.loadTemplate') }}
+                </button>
+
+                <button type="button" :disabled="!online" @click="runAutoAim">
+                    <Crosshair :size="13" /> {{ tr('benchLab.autoAim') }}
+                </button>
+                <button type="button" :aria-pressed="snapHoles" @click="snapHoles = !snapHoles">
+                    <Grid3x3 :size="13" /> {{ tr('benchLab.snapHoles') }}
+                </button>
+                <button
+                    type="button"
+                    :aria-pressed="showGaussian"
+                    @click="showGaussian = !showGaussian"
+                >
+                    {{ tr('benchLab.gaussianOverlay') }}
+                </button>
+
+                <div class="spacer"></div>
+
+                <button
+                    v-if="benchDirty"
+                    type="button"
+                    class="primary"
+                    :disabled="!canCommit"
+                    @click="saveBench"
+                >
+                    <Save :size="13" /> {{ tr('benchLab.saveBench') }}
+                </button>
+                <button v-if="benchDirty" type="button" @click="discardBench">
+                    <RotateCcw :size="13" /> {{ tr('app.revert') }}
+                </button>
+
+                <select v-model="exportFormat" aria-label="Export format">
+                    <option value="svg">Blueprint SVG (1:1)</option>
+                    <option value="dxf">AutoCAD DXF</option>
+                    <option value="stl">3D CAD STL</option>
+                    <option value="alignment_md">Lab SOP (Markdown)</option>
+                    <option value="csv">Coordinates CSV</option>
+                </select>
+                <button type="button" :disabled="!online" @click="exportDeliverable">
+                    <Download :size="13" /> {{ tr('benchLab.export') }}
+                </button>
+            </div>
+
+            <div class="bench-grid" :class="{ 'no-tree': !showTree }">
+                <div v-if="showTree" class="bench-tree">
+                    <strong>{{ scene.name }}</strong>
+                    <div class="bench-element-list" role="list">
                         <button
                             v-for="e in allEntities"
                             :key="e.id"
                             :aria-pressed="selected === e.id"
+                            :class="{ 'entity-warn': problemIds.has(e.id) }"
                             @click="selected = e.id"
                         >
                             <b>{{ e.id }}</b>
-                            {{ 'kind' in e ? tr('bench.kinds.' + e.kind) : tr('bench.source')
-                            }}<small>{{ e.position.map(fixed).join(', ') }} mm</small>
+                            {{ 'kind' in e ? tr('bench.kinds.' + e.kind) : tr('bench.source') }}
+                            <small>{{ e.position.map(fixed).join(', ') }} mm</small>
                         </button>
                     </div>
                 </div>
+
                 <div class="bench-stage">
+                    <div class="stage-hud-top">
+                        <button
+                            type="button"
+                            class="small"
+                            :title="tr('bench.fit')"
+                            @click="
+                                zoom = 1;
+                                pan = [0, 0];
+                            "
+                        >
+                            <Maximize2 :size="12" />
+                        </button>
+                        <button
+                            type="button"
+                            class="small"
+                            aria-label="Zoom in"
+                            @click="zoom = Math.min(8, zoom * 1.2)"
+                        >
+                            <ZoomIn :size="12" />
+                        </button>
+                        <button
+                            type="button"
+                            class="small"
+                            aria-label="Zoom out"
+                            @click="zoom = Math.max(0.15, zoom / 1.2)"
+                        >
+                            <ZoomOut :size="12" />
+                        </button>
+                        <button
+                            type="button"
+                            class="small"
+                            :disabled="!online || pending"
+                            :title="tr('optical.refreshTrace')"
+                            @click="run"
+                        >
+                            <RefreshCw :size="12" />
+                        </button>
+                    </div>
+                    <div v-if="hoverCoord && mode === '2d'" class="stage-hud-coord">
+                        X {{ hoverCoord.x.toFixed(1) }} · Y {{ hoverCoord.y.toFixed(1) }} mm ·
+                        <b>C{{ hoverCoord.col }}, R{{ hoverCoord.row }}</b>
+                    </div>
                     <svg
                         ref="svg"
                         class="bench-viewport"
@@ -713,10 +927,12 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
                         tabindex="0"
                         :aria-label="tr('bench.viewport')"
                         @contextmenu.prevent
-                        @pointerdown="begin($event)"
+                        @pointerdown="begin"
                         @pointermove="move"
-                        @pointerup="end"
-                        @pointercancel="cancel"
+                        @pointerup="endPointer"
+                        @pointercancel="endPointer"
+                        @pointerleave="hoverCoord = null"
+                        @keydown.esc="endPointer"
                         @wheel.prevent="
                             zoom = Math.max(
                                 0.15,
@@ -725,6 +941,15 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
                         "
                     >
                         <polygon :points="floor" class="bench-table" />
+                        <g v-if="holeDots.length" class="bench-holes">
+                            <circle
+                                v-for="(pt, hi) in holeDots"
+                                :key="hi"
+                                :cx="pt[0]"
+                                :cy="pt[1]"
+                                r="1.4"
+                            />
+                        </g>
                         <g class="bench-mounts">
                             <template v-for="e in scene.elements" :key="e.id">
                                 <polyline
@@ -740,41 +965,79 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
                             :points="path(line)"
                             class="bench-gridline"
                         />
+                        <!-- Gaussian 1/e² beam envelope polygons -->
+                        <polygon
+                            v-for="(poly, gi) in gaussianPolygons"
+                            :key="'gauss' + gi"
+                            :points="poly"
+                            class="bench-gaussian"
+                        />
                         <polyline
-                            v-for="(s, i) in visibleRays"
+                            v-for="(ray, i) in visibleRays"
                             :key="'ray' + i"
-                            :points="path([s.from, s.to])"
+                            :points="path([ray.from, ray.to])"
                             class="bench-ray"
                             :class="{
-                                bad: !['hit', 'escaped'].includes(s.status),
-                                reflected: s.branch.includes('reflected'),
-                            }"
-                            :style="{
-                                opacity: Math.max(
-                                    0.18,
-                                    Math.min(0.9, (s.power / (trace?.power.launched || 1)) * 6),
-                                ),
+                                bad: !['hit', 'escaped', 'group_surface'].includes(ray.status),
+                                reflected: ray.branch.includes('reflected'),
+                                scattered: ray.branch.includes(':scatter'),
+                                ghost: ray.branch.includes(':ghost'),
                             }"
                         >
                             <title>
-                                {{ s.branch }} · {{ tr('bench.reasons.' + s.status) }} ·
-                                {{ fixed(s.power) }}
+                                {{ ray.branch }} · {{ tr('bench.reasons.' + ray.status) }} ·
+                                {{ fixed(ray.power) }}
                             </title>
                         </polyline>
+                        <!-- Recommended Beam Dump safety markers -->
+                        <g
+                            v-for="(bd, bdi) in labCheck?.recommended_beam_dumps ?? []"
+                            :key="'bd' + bdi"
+                            class="bench-dump-hint"
+                            @pointerdown.stop
+                            @click="addBeamDumpAt(bd.position, bd.direction, bd.branch)"
+                        >
+                            <circle
+                                :cx="project(bd.position)[0]"
+                                :cy="project(bd.position)[1]"
+                                r="11"
+                            />
+                            <text
+                                :x="project(bd.position)[0] + 12"
+                                :y="project(bd.position)[1] + 4"
+                            >
+                                +BD
+                            </text>
+                        </g>
                         <g
                             v-for="e in scene.elements"
                             :key="e.id"
                             class="bench-object"
-                            :class="{ chosen: selected === e.id }"
+                            :class="{
+                                chosen: selected === e.id,
+                                flagged: problemIds.has(e.id),
+                            }"
                             role="button"
                             tabindex="0"
                             :aria-label="tr('bench.selectElement', { id: e.id })"
                             :data-element="e.id"
-                            @pointerdown.stop="begin($event, e.id)"
+                            @pointerdown.stop="beginDragEntity($event, e.id, e.position)"
                             @click="selected = e.id"
                             @keydown.enter="selected = e.id"
+                            @dblclick="e.kind === 'lens_group' && emit('inspectGroup')"
                         >
-                            <polyline :points="shape(e)" class="bench-body" :class="e.kind" />
+                            <polyline
+                                v-if="e.kind !== 'lens_group'"
+                                :points="shape(e)"
+                                class="bench-body"
+                                :class="e.kind"
+                            />
+                            <polyline
+                                v-for="(curve, i) in groupCurves(e)"
+                                :key="i"
+                                :points="path(curve)"
+                                class="bench-body lens"
+                            />
                             <polyline :points="shape(e, e.aperture)" class="bench-aperture" />
                             <circle
                                 :cx="project(e.position)[0]"
@@ -793,7 +1056,7 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
                             role="button"
                             tabindex="0"
                             :aria-label="tr('bench.selectElement', { id: s.id })"
-                            @pointerdown.stop="begin($event, s.id)"
+                            @pointerdown.stop="beginDragEntity($event, s.id, s.position)"
                             @click="selected = s.id"
                             @keydown.enter="selected = s.id"
                         >
@@ -806,452 +1069,503 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
                                 {{ s.id }}
                             </text>
                         </g>
-                        <g v-if="entity && mode === '3d'" class="bench-gizmo">
-                            <g
-                                v-for="(a, i) in axes"
-                                :key="a"
-                                :data-axis="a"
-                                role="button"
-                                tabindex="0"
-                                :aria-label="tr('bench.dragAxis', { axis: a })"
-                                @pointerdown.stop="begin($event, selected, i)"
-                                @keydown.enter="axis = i"
-                            >
-                                <polyline
-                                    :points="
-                                        path([entity.position, vectorPoint(entity.position, i)])
-                                    "
-                                    :class="'axis-' + i"
-                                />
-                                <circle
-                                    :cx="project(vectorPoint(entity.position, i))[0]"
-                                    :cy="project(vectorPoint(entity.position, i))[1]"
-                                    r="12"
-                                    :class="'axis-' + i"
-                                />
-                                <text
-                                    :x="project(vectorPoint(entity.position, i))[0] + 10"
-                                    :y="project(vectorPoint(entity.position, i))[1]"
-                                >
-                                    {{ a }}
-                                </text>
-                            </g>
-                        </g>
                     </svg>
                     <p class="bench-help">
-                        {{ mode === '2d' ? tr('bench.planHelp') : tr('bench.spatialHelp') }}
-                        {{ tr('bench.keyboardHelp') }}
+                        {{ tr('optical.cameraHelp') }}
+                        <span v-if="mode === '2d'"> · {{ tr('benchLab.dragHint') }}</span>
                     </p>
                     <div v-if="trace" class="bench-ledger" role="status">
-                        <span v-for="(value, key) in trace.power" :key="key"
-                            >{{ tr('bench.power.' + key) }} <b>{{ fixed(value) }}</b></span
-                        ><span
-                            >{{ tr('bench.balance') }} <b>{{ fixed(trace.balance_error) }}</b></span
-                        >
+                        <span v-for="(value, key) in trace.power" :key="key">
+                            {{ tr('bench.power.' + key) }} <b>{{ fixed(value) }}</b>
+                        </span>
+                        <span>
+                            {{ tr('bench.balance') }} <b>{{ fixed(trace.balance_error) }}</b>
+                        </span>
                     </div>
-                    <label v-if="trace" class="bench-branch"
-                        >{{ tr('bench.branch')
-                        }}<select v-model="branch">
+                    <label v-if="trace" class="bench-branch">
+                        {{ tr('bench.branch') }}
+                        <select v-model="branch">
                             <option value="">{{ tr('bench.allBranches') }}</option>
                             <option
-                                v-for="t in trace.terminations"
-                                :key="t.branch"
-                                :value="t.branch"
+                                v-for="end in trace.terminations"
+                                :key="end.branch"
+                                :value="end.branch"
                             >
-                                {{ t.branch }} · {{ t.element ?? '—' }} ·
-                                {{ tr('bench.reasons.' + t.reason) }}
+                                {{ end.branch }} · {{ end.element ?? '—' }} ·
+                                {{ tr('bench.reasons.' + end.reason) }}
                             </option>
-                        </select></label
-                    >
+                        </select>
+                    </label>
                 </div>
-                <fieldset class="bench-inspector" :disabled="!editable">
-                    <legend>{{ entity ? selected : tr('bench.selection') }}</legend>
-                    <template v-if="entity">
-                        <label v-if="selectedElement"
-                            >{{ tr('bench.label')
-                            }}<input
-                                :value="selectedElement.label"
-                                @change="
-                                    updateEntity('label', ($event.target as HTMLInputElement).value)
-                                "
-                        /></label>
-                        <label v-for="(a, i) in axes" :key="a"
-                            >{{ a }} (mm)<NumberField
-                                :model-value="entity.position[i]!"
-                                :aria-label="tr('bench.position', { axis: a })"
-                                @update:model-value="updateVector('position', i, $event)"
-                        /></label>
-                        <template v-if="selectedElement">
-                            <label v-for="(a, i) in angleNames" :key="a"
-                                >{{ tr('bench.' + a) }} (°)<NumberField
-                                    :model-value="selectedElement.rotation[i]!"
-                                    :aria-label="tr('bench.' + a)"
-                                    @update:model-value="updateVector('rotation', i, $event)"
-                            /></label>
-                            <label
-                                >{{ tr('bench.aperture') }} (mm)<NumberField
-                                    :model-value="selectedElement.aperture"
-                                    @update:model-value="updateEntity('aperture', $event)"
-                            /></label>
-                            <label
-                                >{{ tr('bench.bodyRadius') }} (mm)<NumberField
-                                    :model-value="selectedElement.body_radius"
-                                    @update:model-value="updateEntity('body_radius', $event)"
-                            /></label>
-                            <label v-if="selectedElement.kind === 'lens'"
-                                >{{ tr('bench.focal') }} (mm)<NumberField
-                                    :model-value="selectedElement.focal_length"
-                                    @update:model-value="updateEntity('focal_length', $event)"
-                            /></label>
-                            <label v-if="['splitter', 'mirror'].includes(selectedElement.kind)"
-                                >{{ tr('bench.reflectance')
-                                }}<NumberField
-                                    :model-value="selectedElement.reflectance"
-                                    @update:model-value="updateEntity('reflectance', $event)"
-                            /></label>
-                            <label v-if="['splitter', 'lens'].includes(selectedElement.kind)"
-                                >{{ tr('bench.transmittance')
-                                }}<NumberField
-                                    :model-value="selectedElement.transmittance"
-                                    @update:model-value="updateEntity('transmittance', $event)"
-                            /></label>
-                            <p v-if="selectedElement.kind === 'lens'" class="bench-help">
-                                {{ tr('bench.idealLens') }}
-                            </p>
-                            <button v-if="!selectedElement.mount" @click="addMount">
-                                {{ tr('bench.addMount') }}
-                            </button>
-                            <template v-if="selectedElement.mount">
-                                <label
-                                    >{{ tr('bench.mountPart')
-                                    }}<input
-                                        :value="selectedElement.mount.part"
-                                        @change="
-                                            mountField(
-                                                'part',
-                                                ($event.target as HTMLInputElement).value,
-                                            )
-                                        "
-                                /></label>
-                                <label v-for="i in [0, 1]" :key="'foot' + i"
-                                    >{{
-                                        tr(i === 0 ? 'bench.footWidth' : 'bench.footDepth')
-                                    }}
-                                    (mm)<NumberField
-                                        :model-value="selectedElement.mount.base_size[i]!"
-                                        @update:model-value="
-                                            mountField(
-                                                'base_size',
-                                                selectedElement!.mount!.base_size.map((x, j) =>
-                                                    i === j ? $event : x,
-                                                ),
-                                            )
-                                        "
-                                /></label>
-                                <label v-for="i in [0, 1]" :key="'height' + i"
-                                    >{{
-                                        tr(i === 0 ? 'bench.minHeight' : 'bench.maxHeight')
-                                    }}
-                                    (mm)<NumberField
-                                        :model-value="selectedElement.mount.height_range[i]!"
-                                        @update:model-value="
-                                            mountField(
-                                                'height_range',
-                                                selectedElement!.mount!.height_range.map((x, j) =>
-                                                    i === j ? $event : x,
-                                                ),
-                                            )
-                                        "
-                                /></label>
-                                <button @click="updateEntity('mount', null)">
-                                    {{ tr('bench.removeMount') }}
-                                </button>
-                            </template>
-                        </template>
-                        <template v-if="selectedSource">
-                            <label v-for="(a, i) in axes" :key="'dir' + a"
-                                >{{ tr('bench.direction', { axis: a })
-                                }}<NumberField
-                                    :model-value="selectedSource.direction[i]!"
-                                    @update:model-value="updateVector('direction', i, $event)"
-                            /></label>
-                            <label
-                                v-for="f in [
-                                    'wavelength',
-                                    'power',
-                                    'beam_radius',
-                                    'rings',
-                                ] as const"
-                                :key="f"
-                                >{{ tr(f === 'power' ? 'bench.sourcePower' : 'bench.' + f)
-                                }}<NumberField
-                                    :model-value="selectedSource[f]"
-                                    @update:model-value="updateEntity(f, $event)"
-                            /></label>
-                        </template>
+
+                <!-- EDITABLE LAB INSPECTOR -->
+                <section class="bench-inspector" :aria-label="tr('bench.selection')">
+                    <div class="panel-head flush">
+                        <strong>{{ entity ? selected : tr('bench.selection') }}</strong>
                         <button
-                            :disabled="!!selectedSource && scene.sources.length === 1"
-                            @click="remove"
+                            v-if="entity && 'kind' in entity"
+                            type="button"
+                            class="small"
+                            :aria-label="tr('bench.remove')"
+                            @click="deleteSelectedElement"
                         >
-                            {{ tr('bench.remove') }}
+                            <Trash2 :size="12" />
                         </button>
-                    </template>
-                    <p v-else>{{ tr('bench.selectHelp') }}</p>
-                </fieldset>
-            </div>
-            <details class="bench-section">
-                <summary>{{ tr('bench.connections') }} ({{ scene.connections.length }})</summary>
-                <fieldset :disabled="!editable" class="bench-controls">
-                    <label
-                        >{{ tr('bench.from')
-                        }}<select v-model="connectionFrom">
-                            <option value="">—</option>
-                            <option v-for="e in allEntities" :key="e.id" :value="e.id">
-                                {{ e.id }}
-                            </option>
-                        </select></label
-                    ><label
-                        >{{ tr('bench.port')
-                        }}<select v-model="connectionPort">
-                            <option v-for="p in fromPorts" :key="p" :value="p">
-                                {{ tr('bench.ports.' + p) }}
-                            </option>
-                        </select></label
-                    ><label
-                        >{{ tr('bench.to')
-                        }}<select v-model="connectionTo">
-                            <option value="">—</option>
-                            <option v-for="e in scene.elements" :key="e.id" :value="e.id">
-                                {{ e.id }}
-                            </option>
-                        </select></label
-                    ><button
-                        :disabled="
-                            !connectionFrom || !connectionTo || !fromPorts.includes(connectionPort)
-                        "
-                        @click="connect"
-                    >
-                        {{ tr('bench.connect') }}
-                    </button>
-                </fieldset>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>{{ tr('bench.from') }}</th>
-                            <th>{{ tr('bench.port') }}</th>
-                            <th>{{ tr('bench.to') }}</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="(c, i) in scene.connections" :key="i">
-                            <td>{{ c.from }}</td>
-                            <td>{{ tr('bench.ports.' + c.port) }}</td>
-                            <td>{{ c.to }}</td>
-                            <td>
-                                <button
-                                    :disabled="!editable"
-                                    :aria-label="
-                                        tr('bench.disconnect', { id: c.from + '/' + c.port })
+                    </div>
+                    <template v-if="entity">
+                        <label>
+                            X (mm)
+                            <input
+                                type="number"
+                                step="1"
+                                :value="entity.position[0]"
+                                @change="
+                                    entity.position[0] = Number(
+                                        ($event.target as HTMLInputElement).value,
+                                    );
+                                    schedulePreview();
+                                "
+                            />
+                        </label>
+                        <label>
+                            Y (mm)
+                            <input
+                                type="number"
+                                step="1"
+                                :value="entity.position[1]"
+                                @change="
+                                    entity.position[1] = Number(
+                                        ($event.target as HTMLInputElement).value,
+                                    );
+                                    schedulePreview();
+                                "
+                            />
+                        </label>
+                        <label>
+                            Z (mm)
+                            <input
+                                type="number"
+                                step="1"
+                                :value="entity.position[2]"
+                                @change="
+                                    entity.position[2] = Number(
+                                        ($event.target as HTMLInputElement).value,
+                                    );
+                                    schedulePreview();
+                                "
+                            />
+                        </label>
+                        <button type="button" class="small" @click="snapSelectedToHole">
+                            <Grid3x3 :size="12" /> {{ tr('benchLab.snapSelected') }}
+                        </button>
+
+                        <template v-if="'kind' in entity">
+                            <label>
+                                {{ tr('bench.kind') }}
+                                <span>{{ tr('bench.kinds.' + entity.kind) }}</span>
+                            </label>
+                            <label>
+                                Roll (°)
+                                <input
+                                    type="number"
+                                    step="1"
+                                    :value="entity.rotation[0]"
+                                    @change="
+                                        entity.rotation[0] = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
                                     "
-                                    @click="
-                                        change((b) => {
-                                            b.connections.splice(i, 1);
-                                        })
+                                />
+                            </label>
+                            <label>
+                                Pitch (°)
+                                <input
+                                    type="number"
+                                    step="1"
+                                    :value="entity.rotation[1]"
+                                    @change="
+                                        entity.rotation[1] = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                Yaw (°)
+                                <input
+                                    type="number"
+                                    step="1"
+                                    :value="entity.rotation[2]"
+                                    @change="
+                                        entity.rotation[2] = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                {{ tr('bench.aperture') }}
+                                <input
+                                    type="number"
+                                    step="0.5"
+                                    min="0.5"
+                                    :value="entity.aperture"
+                                    @change="
+                                        entity.aperture = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label v-if="entity.kind === 'lens' || entity.kind === 'curved_mirror'">
+                                {{ tr('bench.focal') }}
+                                <input
+                                    type="number"
+                                    step="5"
+                                    :value="entity.focal_length"
+                                    @change="
+                                        entity.focal_length = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label v-if="entity.kind === 'waveplate'">
+                                {{ tr('benchLab.retardance') }}
+                                <input
+                                    type="number"
+                                    step="0.25"
+                                    :value="entity.retardance_waves ?? 0.5"
+                                    @change="
+                                        entity.retardance_waves = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label
+                                v-if="entity.kind === 'waveplate' || entity.kind === 'polarizer'"
+                            >
+                                {{ tr('benchLab.fastAxis') }}
+                                <input
+                                    type="number"
+                                    step="5"
+                                    :value="entity.fast_axis_deg ?? 0"
+                                    @change="
+                                        entity.fast_axis_deg = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label v-if="entity.kind === 'pbs' || entity.kind === 'polarizer'">
+                                ER
+                                <input
+                                    type="number"
+                                    step="100"
+                                    min="1"
+                                    :value="entity.extinction_ratio ?? 1000"
+                                    @change="
+                                        entity.extinction_ratio = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label v-if="entity.mount">
+                                {{ tr('optical.mount') }}
+                                <span>{{ entity.mount.part }}</span>
+                            </label>
+                            <button
+                                v-if="entity.kind === 'lens_group'"
+                                type="button"
+                                @click="emit('inspectGroup')"
+                            >
+                                {{ tr('optical.inspectGroup') }}
+                            </button>
+                        </template>
+
+                        <template v-else>
+                            <label>
+                                λ (nm)
+                                <input
+                                    type="number"
+                                    step="1"
+                                    :value="entity.wavelength"
+                                    @change="
+                                        entity.wavelength = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                {{ tr('benchLab.waist') }}
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    min="0.01"
+                                    :value="entity.waist ?? entity.beam_radius"
+                                    @change="
+                                        entity.waist = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                M²
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    min="1"
+                                    :value="entity.m2 ?? 1"
+                                    @change="
+                                        entity.m2 = Number(
+                                            ($event.target as HTMLInputElement).value,
+                                        );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                {{ tr('benchLab.polarization') }}
+                                <select
+                                    :value="entity.polarization?.kind ?? 'unpolarized'"
+                                    @change="
+                                        updateSelectedPol(
+                                            ($event.target as HTMLSelectElement).value,
+                                        )
                                     "
                                 >
-                                    {{ tr('bench.remove') }}
+                                    <option value="unpolarized">Unpol</option>
+                                    <option value="horizontal">H (0°)</option>
+                                    <option value="vertical">V (90°)</option>
+                                    <option value="diagonal45">45°</option>
+                                    <option value="right_circular">RHC</option>
+                                    <option value="left_circular">LHC</option>
+                                </select>
+                            </label>
+                        </template>
+                        <div v-if="selectedPorts.length" class="inspector-conns">
+                            <div class="note">{{ tr('bench.connections') }}</div>
+                            <div
+                                v-for="c in selectedConnections"
+                                :key="c.from + ':' + c.port"
+                                class="conn-chip"
+                            >
+                                <span
+                                    >{{ c.port }} → <b>{{ c.to }}</b></span
+                                >
+                                <button
+                                    type="button"
+                                    class="small"
+                                    @click="removeConnection(c.from, c.port)"
+                                >
+                                    ×
                                 </button>
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </details>
-            <details class="bench-section">
-                <summary>{{ tr('bench.table') }}</summary>
-                <fieldset :disabled="!editable" class="bench-controls">
-                    <label v-for="(a, i) in ['X', 'Y']" :key="a"
-                        >{{ tr('bench.tableSize', { axis: a })
-                        }}<NumberField
-                            :model-value="scene.table_size[i]!"
-                            @update:model-value="
-                                change((b) => {
-                                    b.table_size[i] = $event;
-                                })
-                            " /></label
-                    ><label
-                        >{{ tr('bench.holePitch')
-                        }}<NumberField
-                            :model-value="scene.hole_pitch"
-                            @update:model-value="
-                                change((b) => {
-                                    b.hole_pitch = $event;
-                                })
-                            " /></label
-                    ><label v-for="(a, i) in axes" :key="'origin' + a"
-                        >{{ tr('bench.origin', { axis: a })
-                        }}<NumberField
-                            :model-value="scene.origin[i]!"
-                            @update:model-value="
-                                change((b) => {
-                                    b.origin[i] = $event;
-                                })
-                            " /></label
-                    ><label
-                        >{{ tr('bench.maxInteractions')
-                        }}<NumberField
-                            :model-value="scene.max_interactions"
-                            @update:model-value="
-                                change((b) => {
-                                    b.max_interactions = $event;
-                                })
-                            " /></label
-                    ><label
-                        >{{ tr('bench.minPower')
-                        }}<NumberField
-                            :model-value="scene.min_power"
-                            @update:model-value="
-                                change((b) => {
-                                    b.min_power = $event;
-                                })
-                            "
-                    /></label>
-                </fieldset>
-            </details>
-            <div class="bench-section">
-                <strong>{{ tr('bench.assembly') }}</strong>
-                <p>{{ tr('bench.assemblyHelp') }}</p>
-                <div class="bench-controls">
-                    <button :disabled="!online || !!problems.length" @click="exportAssembly(false)">
-                        {{ tr('bench.exportJson') }}</button
-                    ><button :disabled="!online || !!problems.length" @click="exportAssembly(true)">
-                        {{ tr('bench.exportCsv') }}
-                    </button>
-                </div>
-                <ul v-if="warnings.length" class="bench-diagnostics">
-                    <li v-for="(w, i) in warnings.slice(0, 100)" :key="i">{{ w }}</li>
-                </ul>
-                <p v-if="warnings.length > 100">{{ tr('bench.capped', { n: warnings.length }) }}</p>
-                <table v-if="assembly">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>XYZ (mm)</th>
-                            <th>{{ tr('bench.normal') }}</th>
-                            <th>{{ tr('bench.mountPart') }}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="e in assembly.items" :key="e.id">
-                            <td>{{ e.id }}</td>
-                            <td>{{ e.position.map(fixed).join(', ') }}</td>
-                            <td>{{ e.normal.map(fixed).join(', ') }}</td>
-                            <td>{{ e.mount?.part || tr('bench.unresolved') }}</td>
-                        </tr>
-                    </tbody>
-                </table>
-                <table v-if="assembly">
-                    <thead>
-                        <tr>
-                            <th>{{ tr('bench.mountPart') }}</th>
-                            <th>{{ tr('bench.addCount') }}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="part in assembly.bom" :key="part[0]">
-                            <td>{{ part[0] }}</td>
-                            <td>{{ part[1] }}</td>
-                        </tr>
-                    </tbody>
-                </table>
+                            </div>
+                            <div class="conn-add">
+                                <select v-model="connPort">
+                                    <option v-for="pt in selectedPorts" :key="pt" :value="pt">
+                                        {{ pt }}
+                                    </option>
+                                </select>
+                                <select v-model="connTo">
+                                    <option value="">→</option>
+                                    <option
+                                        v-for="e in scene.elements.filter((x) => x.id !== selected)"
+                                        :key="e.id"
+                                        :value="e.id"
+                                    >
+                                        {{ e.id }}
+                                    </option>
+                                </select>
+                                <button
+                                    type="button"
+                                    class="small"
+                                    :title="tr('benchLab.addConn')"
+                                    :disabled="!connTo"
+                                    @click="addSelectedConnection"
+                                >
+                                    <Plus :size="12" />
+                                </button>
+                            </div>
+                        </div>
+                    </template>
+                    <p v-else class="note">{{ tr('bench.selectHelp') }}</p>
+                </section>
             </div>
-            <details v-if="failures.length" class="bench-section" open>
-                <summary>{{ tr('bench.failures') }} ({{ failures.length }})</summary>
-                <ul class="bench-diagnostics">
-                    <li v-for="(f, i) in failures.slice(0, 100)" :key="i">
-                        <button
-                            @click="
-                                selected = f.element ?? '';
-                                branch = f.branch;
-                            "
-                        >
-                            {{ f.element ?? f.source }}: {{ tr('bench.reasons.' + f.reason) }} ({{
-                                fixed(f.power)
-                            }})
-                        </button>
-                    </li>
-                </ul>
+
+            <!-- LAB ENGINEERING STUDIO SUB-PANEL -->
+            <BenchLabPanel
+                :bench="scene"
+                :online="online"
+                :lab-check="labCheck"
+                :lab-pending="labPending"
+                @select="selected = $event"
+                @add-from-catalog="addFromCatalog"
+                @add-beam-dump="addBeamDumpAt"
+                @refresh-lab="runLabCheck"
+            />
+
+            <details v-if="failures.length" style="margin-top: 8px">
+                <summary>{{ tr('optical.traceDetails') }} ({{ failures.length }})</summary>
+                <p v-for="(f, i) in failures.slice(0, 80)" :key="i">
+                    {{ f.branch }} · {{ f.element ?? '—' }} ·
+                    {{ tr('bench.reasons.' + f.reason) }} ·
+                    {{ f.position.map(fixed).join(', ') }} mm
+                </p>
             </details>
-            <details class="bench-section">
-                <summary>{{ tr('bench.raw') }}</summary>
-                <button @click="raw = JSON.stringify(scene, null, 2)">
-                    {{ tr('bench.readDraft') }}</button
-                ><textarea
-                    v-model="raw"
-                    :aria-label="tr('bench.raw')"
-                    rows="10"
-                    spellcheck="false"
-                /><button :disabled="!editable" @click="applyRaw">
-                    {{ tr('bench.applyRaw') }}
-                </button>
-                <p v-if="rawError" role="alert">{{ rawError }}</p>
+            <details v-if="trace?.detectors.length" open style="margin-top: 8px">
+                <summary>{{ tr('bench.detectorMaps') }} ({{ trace.detectors.length }})</summary>
+                <div class="bench-map-list">
+                    <figure v-for="map in trace.detectors" :key="map.id" class="bench-map">
+                        <HeatMap
+                            :title="map.id"
+                            :values="map.power"
+                            :size="map.bins[1]"
+                            :width="map.bins[0]"
+                        />
+                        <figcaption>
+                            {{ tr('bench.mapTotal') }} <b>{{ fixed(map.total) }}</b> ·
+                            {{ tr('bench.mapCentroid') }}
+                            {{ map.centroid.map(fixed).join(', ') }} mm · RMS
+                            {{ map.rms.map(fixed).join(', ') }} mm
+                        </figcaption>
+                    </figure>
+                </div>
             </details>
-            <p class="bench-help">{{ tr('bench.scope') }}</p>
         </template>
-    </div>
+    </section>
 </template>
 
 <style scoped>
 .bench {
     min-width: 0;
 }
-.bench-tools,
+.empty-bench {
+    padding: 16px;
+    text-align: center;
+}
 .bench-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
     margin-bottom: 10px;
-}
-.bench-controls label {
-    display: flex;
-    gap: 6px;
-    align-items: center;
 }
 .bench-count {
     margin-left: auto;
     color: var(--muted);
+    font-size: 12px;
 }
 .bench-grid {
     display: grid;
-    grid-template-columns: 170px minmax(280px, 1fr) 205px;
+    grid-template-columns: 160px minmax(300px, 1fr) 232px;
     border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
     background: var(--panel);
+}
+.bench-grid.no-tree {
+    grid-template-columns: minmax(300px, 1fr) 232px;
+}
+.bench-stage {
+    position: relative;
+    min-width: 0;
+    background: var(--surface);
+}
+.stage-hud-top {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 5;
+    display: flex;
+    gap: 3px;
+    padding: 3px;
+    border-radius: var(--radius);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+}
+.stage-hud-top button {
+    border: 0;
+    padding: 4px 6px;
+    min-height: 24px;
+}
+.stage-hud-coord {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    box-shadow: var(--shadow-sm);
+}
+.bench-holes circle {
+    fill: var(--border-strong);
+    pointer-events: none;
+}
+.inspector-conns {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.conn-chip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 11px;
+}
+.conn-add {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 4px;
 }
 .bench-tree {
     border-right: 1px solid var(--border);
     padding: 10px;
     min-width: 0;
 }
-.bench-tree fieldset {
-    display: grid;
-    grid-template-columns: 1fr 55px;
-    gap: 4px;
-    padding: 8px 0;
-    border: 0;
-}
-.bench-tree fieldset button {
-    grid-column: 1/-1;
-}
 .bench-element-list {
     max-height: 510px;
     overflow: auto;
     display: grid;
     gap: 3px;
+    margin-top: 6px;
 }
 .bench-element-list button {
     text-align: left;
+    display: block;
     overflow-wrap: anywhere;
+    padding: 6px;
+}
+.bench-element-list button.entity-warn {
+    border-left: 3px solid var(--warning);
 }
 .bench-element-list small {
     display: block;
@@ -1270,7 +1584,7 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
 .bench-viewport {
     display: block;
     width: 100%;
-    min-height: 330px;
+    min-height: 350px;
     max-height: 650px;
     touch-action: none;
     user-select: none;
@@ -1285,6 +1599,11 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     stroke: var(--border);
     stroke-width: 0.7;
 }
+.bench-gaussian {
+    fill: var(--accent);
+    opacity: 0.16;
+    pointer-events: none;
+}
 .bench-ray {
     fill: none;
     stroke: #258ca9;
@@ -1293,6 +1612,13 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
 }
 .bench-ray.reflected {
     stroke: #be8622;
+}
+.bench-ray.scattered {
+    stroke: #7a9e42;
+    stroke-width: 1;
+}
+.bench-ray.ghost {
+    stroke: #8b6db1;
 }
 .bench-ray.bad {
     stroke: #d14450;
@@ -1304,12 +1630,22 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     stroke: var(--text);
     stroke-width: 2;
 }
-.bench-body.splitter {
+.bench-body.splitter,
+.bench-body.pbs {
     stroke: #8b6db1;
 }
 .bench-body.lens {
     stroke: #258ca9;
     fill: transparent;
+}
+.bench-body.curved_mirror {
+    stroke: #c05621;
+}
+.bench-body.waveplate {
+    stroke: #0d9488;
+}
+.bench-body.polarizer {
+    stroke: #d97706;
 }
 .bench-body.detector {
     stroke: #278260;
@@ -1320,16 +1656,36 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     stroke-width: 1.5;
 }
 .bench-object {
-    cursor: pointer;
+    cursor: grab;
+}
+.bench-object:active {
+    cursor: grabbing;
 }
 .bench-object.chosen .bench-center {
     fill: var(--accent);
     stroke: var(--accent);
     stroke-width: 4;
 }
+.bench-object.flagged .bench-aperture {
+    stroke: var(--danger);
+    stroke-dasharray: 4 2;
+}
+.bench-dump-hint {
+    cursor: pointer;
+}
+.bench-dump-hint circle {
+    fill: var(--warning-bg);
+    stroke: var(--warning);
+    stroke-width: 2;
+    stroke-dasharray: 3 2;
+}
+.bench-dump-hint text {
+    fill: var(--warning);
+    font-size: 11px;
+    font-weight: 700;
+}
 .bench-object text,
-.bench-source text,
-.bench-gizmo text {
+.bench-source text {
     fill: var(--text);
     font-size: 14px;
     paint-order: stroke;
@@ -1337,18 +1693,13 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     stroke-width: 3px;
     pointer-events: none;
 }
+.bench-source {
+    cursor: grab;
+}
 .bench-source circle {
     fill: #bf535c;
     stroke: var(--panel);
     stroke-width: 2;
-}
-.bench-gizmo {
-    cursor: grab;
-}
-.bench-gizmo polyline {
-    fill: none;
-    stroke-width: 4;
-    pointer-events: none;
 }
 .bench-mounts {
     pointer-events: none;
@@ -1363,18 +1714,6 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     stroke-width: 1.5;
     pointer-events: none;
 }
-.bench-gizmo .axis-0 {
-    stroke: #d15454;
-    fill: #d15454;
-}
-.bench-gizmo .axis-1 {
-    stroke: #389363;
-    fill: #389363;
-}
-.bench-gizmo .axis-2 {
-    stroke: #397bbe;
-    fill: #397bbe;
-}
 .bench-inspector {
     margin: 0;
     border: 0;
@@ -1382,23 +1721,18 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     padding: 10px;
     min-width: 0;
 }
-.bench-inspector legend {
-    font-weight: 650;
-}
 .bench-inspector label {
     display: grid;
-    grid-template-columns: 1fr 85px;
+    grid-template-columns: 1fr 92px;
     gap: 5px;
     align-items: center;
-    margin-bottom: 7px;
+    margin-bottom: 6px;
     font-size: 12px;
 }
-.bench-inspector input {
+.bench-inspector input,
+.bench-inspector select {
     width: 100%;
     min-width: 0;
-}
-.bench-inspector button {
-    margin: 4px 0;
 }
 .bench-help {
     font-size: 11px;
@@ -1432,91 +1766,29 @@ const fixed = (n: number) => Number(n.toPrecision(6)).toString();
     width: 100%;
     min-width: 0;
 }
-.bench-section {
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
+.bench-map-list {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 10px;
 }
-.bench-section summary {
-    cursor: pointer;
-    font-weight: 600;
-    padding-bottom: 6px;
+.bench-map {
+    margin: 0;
+    min-width: 0;
 }
-.bench-section textarea {
-    display: block;
-    width: 100%;
-    margin: 8px 0;
-    font-family: monospace;
-}
-.bench-section table {
-    width: 100%;
-    font-size: 12px;
-}
-.bench-section th,
-.bench-section td {
-    text-align: left;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
-}
-.bench-diagnostics {
-    max-height: 180px;
-    overflow: auto;
-    padding-left: 22px;
-    font-size: 12px;
-}
-.bench-diagnostics button {
-    text-align: left;
-}
-.bench-controls input {
-    width: 100px;
-}
-.bench-controls fieldset {
-    border: 0;
+.bench-map figcaption {
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
 }
 @media (max-width: 1100px) {
     .bench-grid {
-        grid-template-columns: 140px minmax(240px, 1fr);
+        grid-template-columns: 145px minmax(240px, 1fr);
     }
     .bench-inspector {
         grid-column: 1/-1;
         border-left: 0;
         border-top: 1px solid var(--border);
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-    }
-    .bench-inspector label {
-        width: 190px;
-    }
-    .bench-inspector p {
-        width: 100%;
-    }
-}
-@media (max-width: 650px) {
-    .bench-grid {
-        display: flex;
-        flex-direction: column;
-    }
-    .bench-tree {
-        border-right: 0;
-    }
-    .bench-element-list {
-        max-height: 130px;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .bench-stage {
-        order: -1;
-    }
-    .bench-viewport {
-        min-height: 260px;
-    }
-    .bench-branch {
-        flex-wrap: wrap;
-    }
-    .bench-controls label {
-        max-width: 100%;
-    }
-    .bench-controls input {
-        width: 85px;
     }
 }
 </style>
