@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, provide, ref, watch, type Ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
 import { useWindowSize, useEventListener, useLocalStorage } from '@vueuse/core';
 import { Splitpanes, Pane, type SplitpanesResizedPayload } from 'splitpanes';
 import {
@@ -12,6 +13,13 @@ import {
     MenubarContent,
     MenubarItem,
     MenubarSeparator,
+    DropdownMenuRoot,
+    DropdownMenuTrigger,
+    DropdownMenuPortal,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuLabel,
     ToolbarRoot,
     ToolbarButton,
     ToolbarSeparator,
@@ -28,21 +36,37 @@ import {
     TooltipContent,
 } from 'reka-ui';
 import {
-    Settings2,
-    MessageSquare,
+    Activity,
+    ArrowLeftRight,
+    Boxes,
+    CircleDot,
+    Crosshair,
+    FileText,
+    FolderOpen,
+    Gauge,
+    History,
+    Layers,
+    ListOrdered,
     PanelLeft,
     PanelBottom,
-    Save,
-    Undo2,
+    PencilRuler,
+    Radio,
     Redo2,
     RotateCcw,
-    Crosshair,
+    Route,
+    Save,
+    Settings2,
+    SlidersHorizontal,
+    MessageSquare,
+    Target,
+    Undo2,
+    Waves,
     X,
 } from 'lucide-vue-next';
 import { usePreferencesStore } from './stores/preferences';
 import { useAppearance } from './composables/useAppearance';
 import { tr } from './i18n';
-import { errorMessage } from './api';
+import { callTool, errorMessage } from './api';
 import { useWorkbench } from './composables/useWorkbench';
 import AnalysisPanel from './components/AnalysisPanel.vue';
 import ApertureTools from './components/ApertureTools.vue';
@@ -53,7 +77,10 @@ import ImportExportPanel from './components/ImportExportPanel.vue';
 import MaterialsPanel from './components/MaterialsPanel.vue';
 import OpticalLayoutView from './components/OpticalLayoutView.vue';
 import OptimizePanel from './components/OptimizePanel.vue';
-import PrescriptionView from './components/PrescriptionView.vue';
+import PrescriptionView, {
+    SURFACE_SELECTION,
+    type SurfaceSelectionState,
+} from './components/PrescriptionView.vue';
 import ChatPanel from './components/ChatPanel.vue';
 import MetricsBar from './components/MetricsBar.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
@@ -64,7 +91,13 @@ import PrescriptionReport from './components/PrescriptionReport.vue';
 import RayInspection from './components/RayInspection.vue';
 import RecoveryPanel from './components/RecoveryPanel.vue';
 import SpotView from './components/SpotView.vue';
-import { TABS, type Tab } from './types';
+import {
+    TABS,
+    type OpticalSystem,
+    type OptimizeVariable,
+    type ProjectListResult,
+    type Tab,
+} from './types';
 
 useAppearance();
 const preferences = usePreferencesStore();
@@ -77,16 +110,86 @@ const initialView =
 const tab = ref<Tab>(initialView === 'Agent connections' ? 'Layout' : initialView);
 const views = TABS.filter((view) => view !== 'Agent connections');
 type WorkbenchView = (typeof views)[number];
+/** Prescription stays reachable through the dock and the narrow-screen view select; the grouped navigator drops the redundant entry. */
 const navGroups: { key: string; items: WorkbenchView[] }[] = [
     { key: 'inspect', items: ['Layout', 'Spot diagram', 'MTF', 'Analysis', 'Ray inspection'] },
     { key: 'design', items: ['Edit', 'Optimize', 'Tolerance', 'Configurations'] },
     {
         key: 'project',
-        items: ['Prescription', 'Prescription report', 'Materials', 'History', 'Import / Export'],
+        items: ['Prescription report', 'Materials', 'History', 'Import / Export'],
     },
 ];
+const NAV_ICONS: Partial<Record<WorkbenchView, unknown>> = {
+    Layout: Route,
+    'Spot diagram': Target,
+    MTF: Activity,
+    Analysis: Gauge,
+    'Ray inspection': Crosshair,
+    Edit: PencilRuler,
+    Optimize: SlidersHorizontal,
+    Tolerance: CircleDot,
+    Configurations: Layers,
+    'Prescription report': FileText,
+    Materials: Boxes,
+    History: History,
+    'Import / Export': ArrowLeftRight,
+};
 const wantMtf = computed(() => tab.value === 'MTF');
 const wb = useWorkbench(wantMtf);
+// ---- parallel useWorkbench contract (liveSync / applyDraft / optimization variables) ----
+type WorkbenchContract = {
+    liveSync?: Ref<boolean>;
+    applyDraft?: (next: OpticalSystem) => void;
+    optimizationVariables?: Ref<OptimizeVariable[]>;
+    toggleOptimizationVariable?: (variable: OptimizeVariable) => void;
+};
+const wbx = wb as typeof wb & WorkbenchContract;
+
+const applyDraft = (next: OpticalSystem): void => {
+    if (wbx.applyDraft) wbx.applyDraft(next);
+    else wb.draft.value = next;
+};
+
+const localVariables = ref<OptimizeVariable[]>([]);
+const optimizationVariables = computed<OptimizeVariable[]>({
+    get: () => wbx.optimizationVariables?.value ?? localVariables.value,
+    set: (value) => {
+        if (wbx.optimizationVariables) wbx.optimizationVariables.value = value;
+        else localVariables.value = value;
+    },
+});
+/** Structural identity of a variable: kind + address fields, independent of bounds. */
+const variableKey = (v: OptimizeVariable): string =>
+    JSON.stringify([
+        v.kind,
+        v.surface ?? null,
+        'index' in v ? v.index : null,
+        'axis' in v ? v.axis : null,
+        'configuration' in v ? v.configuration : null,
+    ]);
+function toggleOptimizationVariable(variable: OptimizeVariable): void {
+    if (wbx.toggleOptimizationVariable) {
+        wbx.toggleOptimizationVariable(variable);
+        return;
+    }
+    const list = optimizationVariables.value;
+    const existing = list.findIndex((v) => variableKey(v) === variableKey(variable));
+    optimizationVariables.value =
+        existing >= 0
+            ? list.filter((_, i) => i !== existing)
+            : [...list, { ...variable, min: null, max: null }];
+}
+
+/** Live sync applies a valid draft as soon as it changes; stored locally until the engine-side contract lands. */
+const liveSyncStored = useLocalStorage('hissabeth.liveSync', false);
+const liveSync = computed<boolean>({
+    get: () => wbx.liveSync?.value ?? liveSyncStored.value,
+    set: (value) => {
+        liveSyncStored.value = value;
+        if (wbx.liveSync) wbx.liveSync.value = value;
+    },
+});
+
 const { width } = useWindowSize();
 const narrow = computed(() => width.value < 800);
 const canSave = computed(
@@ -119,6 +222,185 @@ const settingsError = ref('');
 const chatOpen = useLocalStorage('hissabeth.assistantOpen', true);
 const chatSize = useLocalStorage('hissabeth.assistantSize', 32);
 watch(tab, (value) => (savedView.value = value));
+
+// ---- sequential / laser-bench mode + unified save --------------------------------
+type OpticalMode = 'section' | '2d' | '3d';
+const opticalMode = ref<OpticalMode>('section');
+/** The first loaded system picks the sensible default (bench projects open in bench mode); after that the user owns the choice. */
+let modeInitialized = false;
+watch(
+    () => !!wb.system.value?.bench,
+    (hasBench) => {
+        if (modeInitialized || !wb.system.value) return;
+        opticalMode.value = hasBench ? '2d' : 'section';
+        modeInitialized = true;
+    },
+    { immediate: true },
+);
+const effectiveMode = computed<OpticalMode>({
+    get: () => (wb.system.value?.bench ? opticalMode.value : 'section'),
+    set: (mode) => {
+        opticalMode.value = mode;
+    },
+});
+function setMode(mode: OpticalMode): void {
+    opticalMode.value = mode;
+}
+const layoutRef = ref<InstanceType<typeof OpticalLayoutView> | null>(null);
+/** Bench save/discard are exposed by the layout view (parallel contract); absent until that lands. */
+type LayoutApi = InstanceType<typeof OpticalLayoutView> & {
+    saveBench?: () => Promise<unknown>;
+    discardBench?: () => void;
+};
+const layoutApi = computed(() => (layoutRef.value ?? null) as LayoutApi | null);
+/** Bench-side unsaved state, notified by the layout view through the v-model:bench-dirty contract. */
+const benchDirty = ref(false);
+const canSaveBench = computed(
+    () =>
+        benchDirty.value &&
+        wb.online.value &&
+        !wb.recovery.value &&
+        !wb.busy.value &&
+        !wb.stale.value &&
+        !wb.refreshPending.value &&
+        !wb.dirty.value,
+);
+const hasUnsaved = computed(() => wb.dirty.value || benchDirty.value);
+async function unifiedSave(): Promise<void> {
+    if (effectiveMode.value !== 'section' && benchDirty.value && layoutApi.value?.saveBench) {
+        await layoutApi.value.saveBench();
+        return;
+    }
+    if (canSave.value) await wb.save();
+}
+const canApplyAll = computed(
+    () =>
+        canSave.value ||
+        (effectiveMode.value !== 'section' && canSaveBench.value && !!layoutApi.value?.saveBench),
+);
+
+// ---- active configuration quick switch (applies immediately through the draft) ----
+const configurations = computed(() => wb.draft.value?.configurations ?? []);
+const activeConfiguration = computed(() => wb.draft.value?.active_configuration ?? 0);
+function switchConfiguration(index: number): void {
+    const draft = wb.draft.value;
+    if (!draft || !draft.configurations?.[index] || index === activeConfiguration.value) return;
+    applyDraft({ ...draft, active_configuration: index });
+}
+
+// ---- shared surface hover/selection (useSurfaceSelection contract shape) ----
+const hoveredSurfaceIndex = ref<number | null>(null);
+const selectedSurfaceIndex = ref<number | null>(null);
+const surfaceSelection: SurfaceSelectionState = {
+    hoveredSurfaceIndex,
+    selectedSurfaceIndex,
+    hoverSurface: (index) => {
+        hoveredSurfaceIndex.value = index;
+    },
+    selectSurface: (index) => {
+        selectedSurfaceIndex.value = index;
+    },
+    clearSurfaceSelection: () => {
+        hoveredSurfaceIndex.value = null;
+        selectedSurfaceIndex.value = null;
+    },
+};
+provide(SURFACE_SELECTION, surfaceSelection);
+watch(
+    () => wb.revision.value,
+    () => surfaceSelection.clearSurfaceSelection(),
+);
+
+// ---- project menu (recent / new / native dialogs with path fallback) ----
+const projects = ref<ProjectListResult | null>(null);
+const projectMenuOpen = ref(false);
+const projectPath = ref('');
+const projectMenuError = ref('');
+const projectMenuFallback = ref(false);
+const projectBusy = ref(false);
+const pathInput = ref<HTMLInputElement>();
+async function refreshProjects(): Promise<void> {
+    if (!wb.online.value || wb.recovery.value) return;
+    try {
+        projects.value = await callTool('project_list', {});
+        projectPath.value ||= projects.value.active_file ?? '';
+    } catch {
+        // keep the cached list; the menu stays usable
+    }
+}
+watch(projectMenuOpen, async (open) => {
+    if (!open) {
+        projectMenuError.value = '';
+        projectMenuFallback.value = false;
+        return;
+    }
+    await refreshProjects();
+});
+async function openProjectPath(path: string): Promise<void> {
+    const trimmed = path.trim();
+    if (!trimmed || projectBusy.value) return;
+    projectBusy.value = true;
+    projectMenuError.value = '';
+    try {
+        const ok = await wb.mutate((rev) =>
+            callTool('project_open', { path: trimmed, revision: rev }),
+        );
+        if (ok) projectMenuOpen.value = false;
+        else projectMenuError.value = tr('proj.openFailed', { reason: wb.actionError.value });
+    } catch (error) {
+        projectMenuError.value = tr('proj.openFailed', { reason: errorMessage(error) });
+    } finally {
+        projectBusy.value = false;
+    }
+}
+async function saveProjectAsPath(path: string): Promise<void> {
+    const trimmed = path.trim();
+    if (!trimmed || projectBusy.value) return;
+    projectBusy.value = true;
+    projectMenuError.value = '';
+    try {
+        const ok = await wb.mutate((rev) =>
+            callTool('project_save_as', { path: trimmed, revision: rev }),
+        );
+        if (ok) projectMenuOpen.value = false;
+        else projectMenuError.value = tr('proj.saveFailed', { reason: wb.actionError.value });
+    } catch (error) {
+        projectMenuError.value = tr('proj.saveFailed', { reason: errorMessage(error) });
+    } finally {
+        projectBusy.value = false;
+    }
+}
+async function openProjectDialog(): Promise<void> {
+    try {
+        const path = await openFileDialog({
+            title: tr('proj.openDialog'),
+            filters: [{ name: 'Hissabeth project', extensions: ['json'] }],
+        });
+        if (typeof path === 'string' && path) await openProjectPath(path);
+    } catch {
+        await showPathFallback();
+    }
+}
+async function saveProjectDialog(): Promise<void> {
+    try {
+        const path = await saveFileDialog({
+            title: tr('proj.saveAsDialog'),
+            defaultPath: activeFileName.value || undefined,
+            filters: [{ name: 'Hissabeth project', extensions: ['json'] }],
+        });
+        if (typeof path === 'string' && path) await saveProjectAsPath(path);
+    } catch {
+        await showPathFallback();
+    }
+}
+/** The dialog plugin is unavailable (browser or unregistered): reopen the menu on the path fallback. */
+async function showPathFallback(): Promise<void> {
+    projectMenuFallback.value = true;
+    projectMenuOpen.value = true;
+    await nextTick();
+    pathInput.value?.focus();
+}
+
 async function openSettings(section: unknown = 'general'): Promise<void> {
     try {
         await invoke('open_settings', { section: section === 'agents' ? 'agents' : 'general' });
@@ -132,6 +414,7 @@ function activate(view: Tab): void {
     navDrawer.value = false;
 }
 const exchange = ref<InstanceType<typeof ImportExportPanel>>();
+/** New workspace reuses the existing guarded project_new flow (two-step confirmation in Import / Export). */
 async function newSystem(): Promise<void> {
     tab.value = 'Import / Export';
     await nextTick();
@@ -176,7 +459,11 @@ useEventListener('keydown', (event: KeyboardEvent) => {
             void openSettings();
         } else if (event.key.toLowerCase() === 's') {
             event.preventDefault();
-            if (canSave.value) void wb.save();
+            if (event.shiftKey) void saveProjectDialog();
+            else void unifiedSave();
+        } else if (event.key.toLowerCase() === 'o') {
+            event.preventDefault();
+            void openProjectDialog();
         } else if (!typing && event.key.toLowerCase() === 'z' && !event.shiftKey) {
             if (canQuickAction.value && wb.canUndo.value) {
                 event.preventDefault();
@@ -199,6 +486,13 @@ useEventListener('keydown', (event: KeyboardEvent) => {
         }
     }
 });
+/** Live sync: a valid dirty draft is applied without waiting for Ctrl+S. */
+watch(
+    () => liveSync.value && canSave.value,
+    (ready) => {
+        if (ready) void wb.save();
+    },
+);
 const layoutSection = ref(true);
 const showTable = computed(
     () =>
@@ -256,7 +550,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                         ><MenubarTrigger>{{ tr('menu.edit') }}</MenubarTrigger
                         ><MenubarPortal
                             ><MenubarContent class="menu-popup"
-                                ><MenubarItem :disabled="!canSave" @select="wb.save()"
+                                ><MenubarItem :disabled="!canApplyAll" @select="unifiedSave()"
                                     >{{ tr('menu.applyChanges') }}<kbd>Ctrl+S</kbd></MenubarItem
                                 ><MenubarItem
                                     :disabled="!wb.dirty.value || wb.busy.value"
@@ -335,11 +629,35 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                     ><PanelLeft :size="16"
                 /></ToolbarButton>
                 <ToolbarSeparator />
+                <div
+                    v-if="wb.system.value?.bench"
+                    class="mode-switch"
+                    role="group"
+                    :aria-label="tr('app.modeTip')"
+                >
+                    <ToolbarButton
+                        :aria-pressed="effectiveMode === 'section'"
+                        :title="tr('app.modeTip')"
+                        @click="setMode('section')"
+                        ><ListOrdered :size="14" /><span class="tool-label">{{
+                            tr('app.modeSequential')
+                        }}</span></ToolbarButton
+                    >
+                    <ToolbarButton
+                        :aria-pressed="effectiveMode !== 'section'"
+                        :title="tr('app.modeTip')"
+                        @click="setMode(effectiveMode === '3d' ? '3d' : '2d')"
+                        ><Waves :size="14" /><span class="tool-label">{{
+                            tr('app.modeBench')
+                        }}</span></ToolbarButton
+                    >
+                </div>
+                <ToolbarSeparator v-if="wb.system.value?.bench" />
                 <ToolbarButton
-                    :disabled="!canSave"
+                    :disabled="!canApplyAll"
                     :title="tr('app.applyChanges')"
                     :aria-label="tr('app.applyChanges')"
-                    @click="wb.save()"
+                    @click="unifiedSave()"
                     ><Save :size="16" /><span class="tool-label">{{
                         tr('app.applyChanges')
                     }}</span></ToolbarButton
@@ -378,6 +696,36 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                         tr('app.paraxialFocus')
                     }}</span></ToolbarButton
                 >
+                <ToolbarSeparator
+                    v-if="configurations.length || narrow || !p.workspace.showNavigator"
+                />
+                <select
+                    v-if="configurations.length"
+                    class="config-quick"
+                    :aria-label="tr('app.configQuick')"
+                    :value="activeConfiguration"
+                    @change="
+                        switchConfiguration(Number(($event.target as HTMLSelectElement).value))
+                    "
+                >
+                    <option
+                        v-for="(cfg, i) in configurations"
+                        :key="i"
+                        :value="i"
+                        :selected="i === activeConfiguration"
+                    >
+                        {{ cfg.name || tr('cfg.defaultName', { n: i + 1 }) }}
+                    </option>
+                </select>
+                <ToolbarButton
+                    :aria-pressed="liveSync"
+                    :title="tr('app.liveSyncTip')"
+                    :aria-label="tr('app.liveSync')"
+                    @click="liveSync = !liveSync"
+                    ><Radio :size="16" /><span class="tool-label">{{
+                        tr('app.liveSync')
+                    }}</span></ToolbarButton
+                >
                 <select
                     v-if="narrow || !p.workspace.showNavigator"
                     :aria-label="tr('app.workbenchViews')"
@@ -394,15 +742,122 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                             ? wb.system.value.name || tr('app.unnamedSystem')
                             : tr('app.noSystem')
                     }}</strong>
-                    <span
-                        v-if="activeFileName"
-                        class="file-pill"
-                        :title="wb.activeProjectPath.value ?? ''"
-                        >{{ activeFileName }}</span
+                    <DropdownMenuRoot v-model:open="projectMenuOpen"
+                        ><DropdownMenuTrigger as-child
+                            ><button
+                                type="button"
+                                class="file-pill project-menu-trigger"
+                                :title="wb.activeProjectPath.value ?? tr('app.projectMenu')"
+                                :aria-label="
+                                    tr('proj.menuTrigger', {
+                                        name: activeFileName || tr('app.noSystem'),
+                                    })
+                                "
+                            >
+                                <FolderOpen :size="12" /><span class="file-pill-name">{{
+                                    activeFileName || tr('app.projectMenu')
+                                }}</span>
+                            </button></DropdownMenuTrigger
+                        ><DropdownMenuPortal
+                            ><DropdownMenuContent
+                                class="menu-popup project-menu"
+                                :side-offset="4"
+                                align="start"
+                                ><DropdownMenuLabel class="menu-label">{{
+                                    tr('app.projectMenu')
+                                }}</DropdownMenuLabel
+                                ><DropdownMenuItem class="menu-item" @select="openProjectDialog()"
+                                    >{{ tr('proj.openDialog') }}<kbd>Ctrl+O</kbd></DropdownMenuItem
+                                ><DropdownMenuItem class="menu-item" @select="saveProjectDialog()"
+                                    >{{ tr('proj.saveAsDialog')
+                                    }}<kbd>Ctrl+Shift+S</kbd></DropdownMenuItem
+                                ><DropdownMenuItem class="menu-item" @select="newSystem()">{{
+                                    tr('proj.newWorkspace')
+                                }}</DropdownMenuItem
+                                ><DropdownMenuSeparator />
+                                <DropdownMenuLabel class="menu-label">{{
+                                    tr('proj.recent')
+                                }}</DropdownMenuLabel
+                                ><template v-if="projects?.recent.length">
+                                    <DropdownMenuItem
+                                        v-for="path in projects.recent"
+                                        :key="path"
+                                        class="menu-item recent-item"
+                                        :title="path"
+                                        @select="openProjectPath(path)"
+                                        >{{ path.split(/[\\/]/).pop() ?? path }}</DropdownMenuItem
+                                    >
+                                </template>
+                                <DropdownMenuItem v-else class="menu-item" :disabled="true">{{
+                                    tr('proj.noRecent')
+                                }}</DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <div class="project-path-fallback">
+                                    <p v-if="projectMenuFallback" class="menu-note">
+                                        {{ tr('proj.dialogUnavailable') }}
+                                    </p>
+                                    <label class="menu-label" for="project-path">{{
+                                        tr('proj.pathLabel')
+                                    }}</label>
+                                    <div class="project-path-row">
+                                        <input
+                                            id="project-path"
+                                            ref="pathInput"
+                                            v-model="projectPath"
+                                            type="text"
+                                            :placeholder="tr('proj.pathPlaceholder')"
+                                            @keydown.enter.prevent="openProjectPath(projectPath)"
+                                        />
+                                        <button
+                                            type="button"
+                                            :disabled="!projectPath.trim() || projectBusy"
+                                            @click="openProjectPath(projectPath)"
+                                        >
+                                            {{ tr('proj.openPath') }}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            :disabled="!projectPath.trim() || projectBusy"
+                                            @click="saveProjectAsPath(projectPath)"
+                                        >
+                                            {{ tr('proj.savePath') }}
+                                        </button>
+                                    </div>
+                                    <p v-if="projectMenuError" class="menu-error" role="alert">
+                                        {{ projectMenuError }}
+                                    </p>
+                                </div></DropdownMenuContent
+                            ></DropdownMenuPortal
+                        ></DropdownMenuRoot
                     >
-                    <span v-if="wb.dirty.value" class="unsaved">● {{ tr('statusbar.draft') }}</span>
+                    <span
+                        v-if="hasUnsaved"
+                        class="unsaved"
+                        :title="
+                            wb.dirty.value && benchDirty
+                                ? tr('app.unsaved') + ' · ' + tr('app.benchUnsaved')
+                                : wb.dirty.value
+                                  ? tr('app.unsaved')
+                                  : tr('app.benchUnsaved')
+                        "
+                        >●
+                        {{
+                            wb.dirty.value
+                                ? benchDirty
+                                    ? tr('app.unsaved') + ' + ' + tr('app.benchUnsaved')
+                                    : tr('app.unsaved')
+                                : tr('app.benchUnsaved')
+                        }}</span
+                    >
                     <span class="doc-rev">{{ tr('app.revision', { n: wb.revision.value }) }}</span>
                 </div>
+                <MetricsBar
+                    v-if="p.workspace.showMetrics && wb.paraxial.value && !narrow && !showMetrics"
+                    compact
+                    class="toolbar-metrics"
+                    :paraxial="wb.paraxial.value"
+                    :spot="wb.spot.value"
+                />
                 <div class="spacer"></div>
                 <ToolbarButton
                     :aria-label="tr('menu.prescriptionDock')"
@@ -493,6 +948,12 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     @click="activate(view)"
                                     @keydown="onTabKey($event, views.indexOf(view))"
                                 >
+                                    <component
+                                        :is="NAV_ICONS[view]"
+                                        v-if="NAV_ICONS[view]"
+                                        :size="14"
+                                        aria-hidden="true"
+                                    />
                                     {{ tr(`tabs.${view}`) }}
                                 </button>
                             </template>
@@ -650,7 +1111,10 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         />
 
                                         <OpticalLayoutView
+                                            ref="layoutRef"
                                             v-show="tab === 'Layout'"
+                                            v-model:mode="effectiveMode"
+                                            v-model:bench-dirty="benchDirty"
                                             :system="wb.system.value"
                                             :layout="wb.layout.value"
                                             :wavelength="wb.layoutWavelength.value"
@@ -735,6 +1199,8 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                                 :materials="wb.materials.value"
                                                 :dirty="wb.dirty.value"
                                                 :online="wb.online.value"
+                                                :variables="optimizationVariables"
+                                                @toggle-variable="toggleOptimizationVariable"
                                             />
                                             <GapSolveEditor
                                                 :system="wb.system.value"
@@ -756,6 +1222,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         </template>
                                         <OptimizePanel
                                             v-if="tab === 'Optimize'"
+                                            v-model:variables="optimizationVariables"
                                             :system="wb.system.value"
                                             :paraxial="wb.paraxial.value"
                                             :revision="wb.revision.value"
@@ -813,7 +1280,16 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         <X :size="14" />
                                     </button>
                                 </div>
-                                <PrescriptionView :system="wb.system.value!" compact /></section
+                                <PrescriptionView
+                                    :system="wb.system.value!"
+                                    :model-value="wb.draft.value"
+                                    compact
+                                    editable
+                                    :materials="wb.materials.value"
+                                    :variables="optimizationVariables"
+                                    @update:model-value="applyDraft"
+                                    @toggle-variable="toggleOptimizationVariable"
+                                /></section
                         ></Pane>
                     </Splitpanes>
                 </Pane>
@@ -884,6 +1360,12 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                     @click="activate(view)"
                                     @keydown="onTabKey($event, views.indexOf(view))"
                                 >
+                                    <component
+                                        :is="NAV_ICONS[view]"
+                                        v-if="NAV_ICONS[view]"
+                                        :size="14"
+                                        aria-hidden="true"
+                                    />
                                     {{ tr(`tabs.${view}`) }}
                                 </button>
                             </template>
