@@ -1,0 +1,573 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue';
+import {
+    AlertTriangle,
+    CheckCircle2,
+    Compass,
+    PackagePlus,
+    RefreshCw,
+    ShieldAlert,
+} from 'lucide-vue-next';
+import { callTool, errorMessage } from '../api';
+import { tr } from '../i18n';
+import type { Bench, BenchAlignmentGuide, BenchCatalogItem, BenchLabCheck, Vec3 } from '../bench';
+
+const props = defineProps<{
+    bench: Bench;
+    online: boolean;
+    labCheck: BenchLabCheck | null;
+    labPending: boolean;
+}>();
+
+const emit = defineEmits<{
+    select: [id: string];
+    addFromCatalog: [item: BenchCatalogItem];
+    addBeamDump: [position: Vec3, direction: Vec3, branch: string];
+    refreshLab: [];
+}>();
+
+const subtab = ref<'audit' | 'alignment' | 'catalog'>('audit');
+const guide = ref<BenchAlignmentGuide | null>(null);
+const guidePending = ref(false);
+const guideError = ref('');
+
+const catalogItems = ref<BenchCatalogItem[]>([]);
+const catalogQuery = ref('');
+const catalogKind = ref('');
+const catalogError = ref('');
+
+async function loadAlignment(): Promise<void> {
+    if (!props.online) return;
+    guidePending.value = true;
+    guideError.value = '';
+    try {
+        guide.value = await callTool('bench_alignment_guide', { bench: props.bench });
+    } catch (e) {
+        guideError.value = errorMessage(e);
+    } finally {
+        guidePending.value = false;
+    }
+}
+
+async function loadCatalog(): Promise<void> {
+    if (!props.online) return;
+    catalogError.value = '';
+    try {
+        const res = await callTool('bench_catalog', {
+            ...(catalogQuery.value.trim() ? { query: catalogQuery.value.trim() } : {}),
+            ...(catalogKind.value ? { kind: catalogKind.value } : {}),
+        });
+        catalogItems.value = res.items;
+    } catch (e) {
+        catalogError.value = errorMessage(e);
+    }
+}
+
+watch(subtab, (t) => {
+    if (t === 'alignment') void loadAlignment();
+    if (t === 'catalog' && catalogItems.value.length === 0) void loadCatalog();
+});
+
+watch(
+    () => props.bench,
+    () => {
+        if (subtab.value === 'alignment') void loadAlignment();
+    },
+    { deep: true },
+);
+
+onMounted(() => {
+    void loadCatalog();
+});
+
+const scoreClass = computed(() => {
+    const score = props.labCheck?.readiness_score ?? 0;
+    if (score >= 85) return 'badge-ok';
+    if (score >= 60) return 'badge-warn';
+    return 'badge-bad';
+});
+
+const fmt = (n: number | null | undefined, digits = 2) =>
+    n === null || n === undefined ? '—' : n.toFixed(digits);
+</script>
+
+<template>
+    <section class="panel lab-panel" aria-label="Lab engineering assistant">
+        <div class="lab-tabs" role="tablist">
+            <button
+                type="button"
+                role="tab"
+                :aria-selected="subtab === 'audit'"
+                @click="subtab = 'audit'"
+            >
+                <ShieldAlert :size="14" /> {{ tr('benchLab.tabAudit') }}
+                <span v-if="labCheck" class="badge" :class="scoreClass">
+                    {{ labCheck.readiness_score }}/100
+                </span>
+            </button>
+            <button
+                type="button"
+                role="tab"
+                :aria-selected="subtab === 'alignment'"
+                @click="subtab = 'alignment'"
+            >
+                <Compass :size="14" /> {{ tr('benchLab.tabAlignment') }}
+            </button>
+            <button
+                type="button"
+                role="tab"
+                :aria-selected="subtab === 'catalog'"
+                @click="subtab = 'catalog'"
+            >
+                <PackagePlus :size="14" /> {{ tr('benchLab.tabCatalog') }}
+            </button>
+            <div class="spacer"></div>
+            <button
+                v-if="subtab === 'audit'"
+                type="button"
+                class="small"
+                :disabled="!online || labPending"
+                @click="emit('refreshLab')"
+            >
+                <RefreshCw :size="12" /> {{ tr('benchLab.refresh') }}
+            </button>
+            <button
+                v-if="subtab === 'alignment'"
+                type="button"
+                class="small"
+                :disabled="!online || guidePending"
+                @click="loadAlignment"
+            >
+                <RefreshCw :size="12" /> {{ tr('benchLab.refresh') }}
+            </button>
+        </div>
+
+        <!-- TAB 1: LAB READINESS & CLEARANCE AUDIT -->
+        <div v-if="subtab === 'audit'" class="lab-body">
+            <p v-if="labPending && !labCheck" class="note">{{ tr('benchLab.checking') }}</p>
+            <template v-else-if="labCheck">
+                <dl class="metrics">
+                    <div>
+                        <dt>{{ tr('benchLab.readiness') }}</dt>
+                        <dd>
+                            {{ labCheck.readiness_score }}
+                            <small>/ 100</small>
+                        </dd>
+                    </div>
+                    <div>
+                        <dt>{{ tr('benchLab.errors') }}</dt>
+                        <dd>{{ labCheck.counts.errors }}</dd>
+                    </div>
+                    <div>
+                        <dt>{{ tr('benchLab.warnings') }}</dt>
+                        <dd>{{ labCheck.counts.warnings }}</dd>
+                    </div>
+                    <div>
+                        <dt>{{ tr('benchLab.beamDumps') }}</dt>
+                        <dd>{{ labCheck.recommended_beam_dumps.length }}</dd>
+                    </div>
+                </dl>
+
+                <div v-if="labCheck.issues.length" class="lab-section">
+                    <h4>{{ tr('benchLab.issues') }} ({{ labCheck.issues.length }})</h4>
+                    <ul class="issue-list">
+                        <li
+                            v-for="(issue, idx) in labCheck.issues"
+                            :key="idx"
+                            class="issue-row"
+                            :class="`sev-${issue.severity}`"
+                        >
+                            <span
+                                class="badge"
+                                :class="
+                                    issue.severity === 'error'
+                                        ? 'badge-bad'
+                                        : issue.severity === 'warning'
+                                          ? 'badge-warn'
+                                          : 'badge-info'
+                                "
+                            >
+                                {{ issue.code }}
+                            </span>
+                            <button
+                                v-if="issue.element_id"
+                                type="button"
+                                class="small"
+                                @click="emit('select', issue.element_id)"
+                            >
+                                {{ issue.element_id }}
+                            </button>
+                            <div class="issue-text">
+                                <span>{{ issue.message }}</span>
+                                <small v-if="issue.branch" class="note">
+                                    {{ issue.branch }}
+                                </small>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+                <p v-else class="note ok-inline">
+                    <CheckCircle2 :size="14" /> {{ tr('benchLab.allClear') }}
+                </p>
+
+                <div v-if="labCheck.recommended_beam_dumps.length" class="lab-section">
+                    <h4><AlertTriangle :size="13" /> {{ tr('benchLab.beamDumpSection') }}</h4>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>{{ tr('bench.branch') }}</th>
+                                    <th>{{ tr('benchLab.recommendedPos') }}</th>
+                                    <th>{{ tr('bench.sourcePower') }}</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(bd, i) in labCheck.recommended_beam_dumps" :key="i">
+                                    <td>{{ bd.branch }}</td>
+                                    <td>
+                                        {{ bd.position.map((v) => v.toFixed(1)).join(', ') }} mm
+                                    </td>
+                                    <td>{{ bd.power.toFixed(3) }}</td>
+                                    <td>
+                                        <button
+                                            type="button"
+                                            class="small primary"
+                                            @click="
+                                                emit(
+                                                    'addBeamDump',
+                                                    bd.position,
+                                                    bd.direction,
+                                                    bd.branch,
+                                                )
+                                            "
+                                        >
+                                            + {{ tr('benchLab.placeDump') }}
+                                        </button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="eng-two-col">
+                    <div v-if="labCheck.gaussian.hits.length" class="lab-section">
+                        <h4>{{ tr('benchLab.gaussianClearance') }}</h4>
+                        <div class="table-scroll">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>ω (mm)</th>
+                                        <th>2ω (mm)</th>
+                                        <th>R_ap / ω</th>
+                                        <th>{{ tr('opt.status') }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr
+                                        v-for="(h, i) in labCheck.gaussian.hits"
+                                        :key="i"
+                                        @click="emit('select', h.element_id)"
+                                    >
+                                        <td>
+                                            <b>{{ h.element_id }}</b>
+                                        </td>
+                                        <td>{{ fmt(h.beam_radius_mm, 3) }}</td>
+                                        <td>{{ fmt(h.beam_diameter_mm, 3) }}</td>
+                                        <td>{{ fmt(h.clearance_ratio, 2) }}×</td>
+                                        <td>
+                                            <span
+                                                class="badge"
+                                                :class="
+                                                    h.status === 'ok'
+                                                        ? 'badge-ok'
+                                                        : h.status === 'tight'
+                                                          ? 'badge-warn'
+                                                          : 'badge-bad'
+                                                "
+                                            >
+                                                {{ h.status }}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div v-if="labCheck.clamping.length" class="lab-section">
+                        <h4>{{ tr('benchLab.clampingTable') }}</h4>
+                        <div class="table-scroll">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>{{ tr('benchLab.hole') }}</th>
+                                        <th>Δ (mm)</th>
+                                        <th>{{ tr('benchLab.clampingStatus') }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr
+                                        v-for="c in labCheck.clamping"
+                                        :key="c.element_id"
+                                        @click="emit('select', c.element_id)"
+                                    >
+                                        <td>
+                                            <b>{{ c.element_id }}</b>
+                                        </td>
+                                        <td>C{{ c.hole[0] }}, R{{ c.hole[1] }}</td>
+                                        <td>{{ fmt(c.offset_mm, 1) }}</td>
+                                        <td>
+                                            <span
+                                                class="badge"
+                                                :class="
+                                                    c.style === 'direct_hole'
+                                                        ? 'badge-ok'
+                                                        : c.style === 'clamping_fork'
+                                                          ? 'badge-info'
+                                                          : 'badge-bad'
+                                                "
+                                            >
+                                                {{ c.style }}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- TAB 2: ALIGNMENT & BEAM-WALKING GUIDE -->
+        <div v-else-if="subtab === 'alignment'" class="lab-body">
+            <p v-if="guideError" role="alert" class="json-error">{{ guideError }}</p>
+            <p v-else-if="guidePending && !guide" class="note">{{ tr('benchLab.loading') }}</p>
+            <template v-else-if="guide">
+                <div class="lab-section">
+                    <h4>{{ tr('benchLab.buildSteps') }}</h4>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>ID</th>
+                                    <th>{{ tr('benchLab.hole') }}</th>
+                                    <th>Z (mm)</th>
+                                    <th>{{ tr('optical.mount') }}</th>
+                                    <th>ω (mm)</th>
+                                    <th>{{ tr('benchLab.instruction') }}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr
+                                    v-for="s in guide.steps"
+                                    :key="s.step"
+                                    @click="emit('select', s.id)"
+                                >
+                                    <td>{{ s.step }}</td>
+                                    <td>
+                                        <b>{{ s.id }}</b>
+                                    </td>
+                                    <td>
+                                        C{{ s.hole[0] }}, R{{ s.hole[1] }}
+                                        <small class="note">
+                                            (Δ{{ s.hole_offset.toFixed(1) }} mm)
+                                        </small>
+                                    </td>
+                                    <td>{{ s.beam_height_z.toFixed(1) }}</td>
+                                    <td>{{ s.mount_part ?? '—' }}</td>
+                                    <td>{{ fmt(s.expected_beam_radius_mm, 2) }}</td>
+                                    <td>{{ s.instruction }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div v-if="guide.sensitivities.length" class="lab-section">
+                    <h4>{{ tr('benchLab.screwSensitivity') }}</h4>
+                    <div class="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>TPI</th>
+                                    <th>mrad / ¼ turn</th>
+                                    <th>{{ tr('benchLab.downstream') }}</th>
+                                    <th>Δspot / ¼ turn</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr
+                                    v-for="sen in guide.sensitivities"
+                                    :key="sen.element_id"
+                                    @click="emit('select', sen.element_id)"
+                                >
+                                    <td>
+                                        <b>{{ sen.element_id }}</b>
+                                    </td>
+                                    <td>{{ sen.screw_tpi }}</td>
+                                    <td>{{ fmt(sen.mrad_per_quarter_turn, 3) }}</td>
+                                    <td>
+                                        <div v-for="t in sen.targets" :key="t.target_id">
+                                            {{ t.target_id }}
+                                            <span class="note"
+                                                >({{ t.distance_mm.toFixed(0) }} mm)</span
+                                            >
+                                        </div>
+                                        <span v-if="!sen.targets.length">—</span>
+                                    </td>
+                                    <td>
+                                        <div v-for="t in sen.targets" :key="t.target_id">
+                                            <b>{{ fmt(t.spot_shift_mm_per_quarter_turn, 3) }} mm</b>
+                                        </div>
+                                        <span v-if="!sen.targets.length">—</span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- TAB 3: STANDARD LAB HARDWARE CATALOG -->
+        <div v-else class="lab-body">
+            <div class="controls" style="margin-bottom: 10px">
+                <input
+                    v-model="catalogQuery"
+                    type="search"
+                    :placeholder="tr('benchLab.searchCatalog')"
+                    @input="loadCatalog"
+                />
+                <select v-model="catalogKind" @change="loadCatalog">
+                    <option value="">{{ tr('benchLab.allKinds') }}</option>
+                    <option value="mirror">{{ tr('bench.kinds.mirror') }}</option>
+                    <option value="curved_mirror">{{ tr('bench.kinds.curved_mirror') }}</option>
+                    <option value="lens">{{ tr('bench.kinds.lens') }}</option>
+                    <option value="splitter">{{ tr('bench.kinds.splitter') }}</option>
+                    <option value="pbs">{{ tr('bench.kinds.pbs') }}</option>
+                    <option value="waveplate">{{ tr('bench.kinds.waveplate') }}</option>
+                    <option value="polarizer">{{ tr('bench.kinds.polarizer') }}</option>
+                    <option value="detector">{{ tr('bench.kinds.detector') }}</option>
+                    <option value="aperture">{{ tr('bench.kinds.aperture') }}</option>
+                    <option value="blocker">{{ tr('bench.kinds.blocker') }}</option>
+                </select>
+            </div>
+            <p v-if="catalogError" role="alert" class="json-error">{{ catalogError }}</p>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>{{ tr('benchLab.part') }}</th>
+                            <th>{{ tr('bench.kind') }}</th>
+                            <th>{{ tr('bench.aperture') }}</th>
+                            <th>{{ tr('optical.mount') }}</th>
+                            <th>{{ tr('benchLab.price') }}</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="item in catalogItems" :key="item.part">
+                            <td>
+                                <b>{{ item.part }}</b>
+                                <div class="note">{{ item.name }}</div>
+                            </td>
+                            <td>{{ tr('bench.kinds.' + item.kind) }}</td>
+                            <td>R {{ item.aperture }} mm</td>
+                            <td>
+                                {{ item.mount.part }}
+                                <div class="note">
+                                    {{ item.mount.base_size.join('×') }} mm ·
+                                    {{ item.clamping_style }}
+                                </div>
+                            </td>
+                            <td>${{ item.typical_price_usd }}</td>
+                            <td>
+                                <button
+                                    type="button"
+                                    class="small primary"
+                                    @click="emit('addFromCatalog', item)"
+                                >
+                                    + {{ tr('benchLab.addToBench') }}
+                                </button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</template>
+
+<style scoped>
+.lab-panel {
+    margin-top: 10px;
+}
+.lab-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+}
+.lab-tabs button[role='tab'] {
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 5px 10px;
+    font-size: 12px;
+}
+.lab-tabs button[role='tab'][aria-selected='true'] {
+    background: var(--panel);
+    border-color: var(--border);
+    color: var(--accent);
+    font-weight: 600;
+}
+.lab-body {
+    padding: 10px 12px;
+}
+.lab-section {
+    margin-top: 12px;
+}
+.lab-section h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+.issue-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 6px;
+}
+.issue-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: var(--surface);
+    font-size: 12px;
+}
+.issue-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.ok-inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--positive);
+}
+</style>

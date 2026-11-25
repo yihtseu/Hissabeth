@@ -8,7 +8,7 @@ import { readFile, writeFile, mkdir, unlink, rmdir } from 'node:fs/promises';
 import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { defaultPreferences } from './ui_preferences.mjs';
+import { defaultPreferences } from './ui_preferences';
 let preferencesSnapshot = {preferences:{...structuredClone(defaultPreferences),locale:'en-US'},revision:0};
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const target = resolve(root, 'src-tauri/target');
@@ -17,11 +17,11 @@ const executable = resolve(target, 'debug/hissabeth');
 await mkdir(workspace, { recursive: true });
 for (const filename of ['endpoint.json', 'system.json']) await unlink(resolve(workspace, filename)).catch(() => {});
 if(process.argv.includes('--workspace-recovery')) await writeFile(resolve(workspace,'system.json'),'{ invalid startup project\n');
-let engine;
+let engine!: import('node:child_process').ChildProcess;
 async function startEngine() {
   engine = spawn(executable, ['--engine'], { env: { ...process.env, HISSABETH_DATA_DIR: workspace }, stdio: ['ignore', 'ignore', 'pipe'] });
   let errors = '';
-  engine.stderr.on('data', (chunk) => { errors += chunk; });
+  engine.stderr!.on('data', (chunk) => { errors += chunk; });
   for (let i = 0; i < 100; i++) {
     if (engine.exitCode !== null) throw new Error(errors);
     try { JSON.parse(await readFile(resolve(workspace, 'endpoint.json'), 'utf8')); return; } catch {}
@@ -31,10 +31,10 @@ async function startEngine() {
 }
 await startEngine();
 let id = 0;
-async function optical(name, args = {}) {
+async function optical(name: string, args: any = {}) {
   const endpoint = JSON.parse(await readFile(resolve(workspace, 'endpoint.json'), 'utf8'));
   const [host, port] = endpoint.address.split(':');
-  return new Promise((resolveResult, reject) => {
+  return new Promise<any>((resolveResult, reject) => {
     const socket = createConnection({ host, port: Number(port) });
     socket.setTimeout(15000);
     socket.on('timeout', () => { socket.destroy(); reject(new Error('Optical invocation timeout')); });
@@ -62,47 +62,47 @@ if(!process.argv.includes('--workspace-recovery')) {
 }
 const server = createServer(async (req, res) => {
   try {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
     if(pathname === '/favicon.ico'){res.writeHead(204).end();return;}
     const file = resolve(root, 'dist', pathname === '/' ? 'index.html' : pathname.slice(1));
     if (!file.startsWith(resolve(root, 'dist') + '/')) { res.writeHead(403).end(); return; }
     const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-    res.setHeader('Content-Type', mime[extname(file)] || 'application/octet-stream');
+    res.setHeader('Content-Type', mime[extname(file) as keyof typeof mime] || 'application/octet-stream');
     res.end(await readFile(file));
   } catch { res.writeHead(404).end(); }
 });
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
+await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
 const browser = await chromium.launch({ headless: true });
-const errors = [];
-let page;
+const errors: string[] = [];
+let page!: import('@playwright/test').Page;
 let holdUiReads = false;
 let failRefreshAfter = '';
 let failUiRead = false;
-let freezeAfterRevision = null;
+let freezeAfterRevision: number | null = null;
 let holdWriteReply = '';
 let writeReplyHeld = false;
-let releaseWriteReply = null;
-const heldReads = [];
+let releaseWriteReply: ((value?: unknown) => void) | null = null;
+const heldReads: ((value?: unknown) => void)[] = [];
 const uiCalls = new Map();
-const uiRequests = [];
-const uiResults = [];
-let analysisGate = null;
-let gatedAnalysis = null;
-let releaseGatedAnalysis = null;
+const uiRequests: any[] = [];
+const uiResults: any[] = [];
+let analysisGate: { stage: string; name: string } | null = null;
+let gatedAnalysis: { name: string; args: any } | null = null;
+let releaseGatedAnalysis: ((value?: unknown) => void) | null = null;
 let dispatchingUiReads = 0;
 function resumeAnalysis() {
   const resume = releaseGatedAnalysis;
   releaseGatedAnalysis = null;
   if (resume) resume();
 }
-async function gateAnalysis(stage, name, args) {
+async function gateAnalysis(stage: string, name: string, args: any) {
   if (analysisGate?.stage !== stage || analysisGate?.name !== name) return;
   analysisGate = null;
   gatedAnalysis = { name, args: structuredClone(args) };
   await new Promise((resume) => { releaseGatedAnalysis = resume; });
   gatedAnalysis = null;
 }
-const lastUiResult = (name) => uiResults.findLast((r) => r.name === name)?.result;
+const lastUiResult = (name: string) => uiResults.findLast((r) => r.name === name)?.result;
 function resumeUiReads() {
   holdUiReads = false;
   for (const resume of heldReads.splice(0)) resume();
@@ -117,7 +117,7 @@ try {
   page.setDefaultTimeout(10000);
   page.on('console', (message) => { if(message.type()==='error'){errors.push(message.text());console.error(message.text());} });
   page.on('pageerror', (e) => { errors.push(e.message); console.error('Browser error:', e.message); });
-  await page.exposeFunction('__opticalInvoke', async (command, args) => {
+  await page.exposeFunction('__opticalInvoke', async (command: string, args: any) => {
     if (command === 'optical_call') {
       if (args.name === 'system_get') {
         if (failUiRead) {
@@ -158,9 +158,12 @@ try {
     if (command === 'plugin:event|unlisten' || command === 'open_settings') return;
     if (command === 'detect_agents') return [];
     if (command === 'configure_agents') return [];
+    if (command === 'chat_runtime') return { node: '/node', agents: [] };
+    if (command === 'chat_history') return { conversations: [], activeId: null, activeConversationId: null };
+    if (command === 'chat_models') return [];
     throw new Error('Unexpected Tauri command: ' + command);
   });
-  await page.addInitScript(() => { globalThis.isTauri = true; let callbackId=0; window.__TAURI_INTERNALS__ = { invoke: (command, args) => window.__opticalInvoke(command, args),transformCallback:()=>++callbackId,unregisterCallback:()=>{} }; window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}}; });
+  await page.addInitScript(() => { globalThis.isTauri = true; let callbackId=0; window.__TAURI_INTERNALS__ = { invoke: (command: string, args: any) => window.__opticalInvoke(command, args),transformCallback:()=>++callbackId,unregisterCallback:()=>{} }; window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}}; });
   if(process.argv.includes('--project-exchange')) await page.addInitScript(()=>{
     const original=File.prototype.arrayBuffer;
     globalThis.__heldProjectFiles=[];globalThis.__holdProjectFiles=[];
@@ -170,7 +173,7 @@ try {
       return new Promise((resolve,reject)=>globalThis.__heldProjectFiles.push({name:file.name,release:()=>original.call(file).then(resolve,reject)}));
     };
   });
-  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.goto(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
   if(process.argv.includes('--workspace-recovery')) {
     await expect(page.locator('.header-actions').getByRole('status')).toContainText(/Workspace recovery/);
     await expect(page.locator('.header-actions .status-dot.offline')).toHaveCount(0);
@@ -197,6 +200,48 @@ try {
     assert.equal(JSON.parse(await page.getByRole('textbox',{name:'Project text',exact:true}).inputValue()).name,before.system.name);
     assert.deepEqual(errors,[]);
     console.log('PASS: latest formatted App project props/confirmation/cancel/export entry with current saved revision');
+  } else
+  if (process.argv.includes('--blank-paraxial')) {
+    await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
+    await page.getByRole('button',{name:'New system',exact:true}).click();
+    await page.getByRole('button',{name:'Create blank system',exact:true}).click();
+    await expect(page.locator('#ie-status')).toContainText('Created a blank system');
+    await expect(page.locator('.document-strip strong')).toHaveText('Untitled system');
+    const blank=await optical('system_get');
+    await expect.poll(()=>lastUiResult('paraxial')?.revision).toBe(blank.revision);
+    assert.equal(lastUiResult('paraxial').image_distance,null);
+    await page.getByRole('tab',{name:'Layout',exact:true}).click();
+    const metrics=page.locator('.metrics');
+    const opticalErrors=page.locator('main').getByRole('alert').filter({hasText:/\S/});
+    await expect(metrics).toBeVisible();
+    for(const name of ['Effective focal length','Back focal length','Working f-number']) {
+      await expect(metrics.locator('div').filter({has:page.getByText(name,{exact:true})}).locator('dd')).toContainText('—');
+    }
+    await expect(opticalErrors).toHaveCount(0);
+    await page.reload();
+    await expect(page.locator('.document-strip strong')).toHaveText('Untitled system');
+    await expect(metrics).toBeVisible();
+    await expect(opticalErrors).toHaveCount(0);
+    engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
+    await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
+    await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});await startEngine();
+    await expect(page.getByText('Engine connected',{exact:true})).toBeVisible();
+    await expect(metrics).toBeVisible();
+    assert.deepEqual((await optical('system_get')).system,blank.system);
+    await expect(opticalErrors).toHaveCount(0);
+    await page.getByRole('tab',{name:'Prescription',exact:true}).click();
+    await page.getByRole('textbox',{name:'Name',exact:true}).fill('Blank system edited');
+    await page.getByRole('spinbutton',{name:'Surface 1 radius',exact:true}).fill('50');
+    await page.getByRole('spinbutton',{name:'Surface 1 thickness',exact:true}).fill('100');
+    await page.getByLabel('Surface 1 material',{exact:true}).fill('N-BK7_SCHOTT');
+    await page.getByRole('button',{name:'Apply changes',exact:true}).click();
+    await expect.poll(async()=> (await optical('system_get')).system.name).toBe('Blank system edited');
+    await expect.poll(()=>lastUiResult('paraxial')?.efl).toBeGreaterThan(0);
+    await expect(opticalErrors).toHaveCount(0);
+    assert.equal(uiRequests.filter(r=>r.name==='project_new').length,1);
+    assert.deepEqual(errors,[]);
+    await page.screenshot({path:resolve(target,'blank-paraxial-edited.png'),fullPage:true});
+    console.log('PASS: actual blank creation, nullable first-order metrics without alerts, page refresh, saved blank broker restart, and normal surface/material edits with finite first-order results');
   } else
   if (process.argv.includes('--project-lifecycle')) {
     let current=await optical('system_get');
@@ -284,10 +329,10 @@ try {
     const downloadButton=page.getByRole('button',{name:'Download file',exact:true});
     const file=page.getByLabel('Open file',{exact:true});
     const status=page.locator('#ie-status');
-    async function holdFile(name){await page.evaluate(name=>globalThis.__holdProjectFiles.push(name),name);}
-    async function held(name){await expect.poll(()=>page.evaluate(name=>globalThis.__heldProjectFiles.some(x=>x.name===name),name)).toBe(true);}
-    async function releaseFile(name){await page.evaluate(name=>{const i=globalThis.__heldProjectFiles.findIndex(x=>x.name===name);globalThis.__heldProjectFiles.splice(i,1)[0].release();},name);await page.evaluate(()=>new Promise(requestAnimationFrame));}
-    async function pick(name,body){await file.setInputFiles({name,mimeType:'application/json',buffer:Buffer.isBuffer(body)?body:Buffer.from(body)});}
+    async function holdFile(name: string){await page.evaluate(name=>globalThis.__holdProjectFiles.push(name),name);}
+    async function held(name: string){await expect.poll(()=>page.evaluate(name=>globalThis.__heldProjectFiles.some(x=>x.name===name),name)).toBe(true);}
+    async function releaseFile(name: string){await page.evaluate(name=>{const i=globalThis.__heldProjectFiles.findIndex(x=>x.name===name);globalThis.__heldProjectFiles.splice(i,1)[0].release();},name);await page.evaluate(()=>new Promise(requestAnimationFrame));}
+    async function pick(name: string, body: any){await file.setInputFiles({name,mimeType:'application/json',buffer:Buffer.isBuffer(body)?body:Buffer.from(body)});}
     await text.fill('Original editable text');
     analysisGate={stage:'after',name:'project_export'};await exportButton.click();await expect.poll(()=>!!gatedAnalysis).toBe(true);
     await text.fill('Newer typed text');resumeAnalysis();await expect(exportButton).toBeEnabled();
@@ -381,7 +426,7 @@ try {
     tail.radius=0;tail.thickness=0;tail.interaction='dummy';tail.clear_aperture=false;
     fixture.surfaces.push(structuredClone(tail),structuredClone(tail),structuredClone(tail));
     fixture.surfaces[1].thickness=16.64;fixture.surfaces[4].thickness=30;
-    fixture.surfaces.forEach((r,i)=>{r.label=`physical-${i}`;});
+    fixture.surfaces.forEach((r: any,i: number)=>{r.label=`physical-${i}`;});
     fixture.surfaces[0].gap_solve={kind:'pickup',source:4,scale:.1,offset:2};
     fixture.surfaces[3].gap_solve={kind:'overall_length',first:3,last:5,value:30};
     const saved=await optical('system_set',{system:fixture,revision:current.revision});
@@ -527,7 +572,7 @@ try {
     const exchanged=await optical('system_set',{system:exchange,revision:saved.revision});
     await expect.poll(()=>lastUiResult('system_get')?.revision).toBe(exchanged.revision);
     const geopter=(await optical('project_export',{format:'geopter'})).text;
-    async function restartWith(bytes) {
+    async function restartWith(bytes: string | Buffer) {
       engine.kill('SIGTERM');await new Promise(r=>engine.once('exit',r));
       await expect(page.getByText('Engine offline',{exact:true})).toBeVisible();
       await writeFile(resolve(workspace,'system.json'),bytes);
@@ -695,7 +740,7 @@ try {
     const slice=page.getByRole('combobox',{name:'Field slice',exact:true});
     const samples=page.getByRole('spinbutton',{name:'Field samples',exact:true});
     const applySamples=page.getByRole('button',{name:'Apply samples',exact:true});
-    const setSamples=async value=>{await samples.fill(String(value));await applySamples.click();};
+    const setSamples=async (value: number)=>{await samples.fill(String(value));await applySamples.click();};
     await slice.selectOption('f1');
     await expect.poll(()=>lastUiResult('field_curvature')?.field_end).toEqual([3,4]);
     const requestsBeforeRaw=uiRequests.filter(r=>r.name==='field_curvature').length;
@@ -715,8 +760,8 @@ try {
     await setSamples(17);
     await expect.poll(()=>lastUiResult('field_curvature')?.samples).toBe(17);
     await expect(plot).toContainText('136 of 136');
-    let points=(await plot.locator('polyline').first().getAttribute('points')).split(' ').map(q=>q.split(',').map(Number));
-    assert.equal(points[0][1],300);assert.equal(points.at(-1)[1],18);
+    let points=(await plot.locator('polyline').first().getAttribute('points'))!.split(' ').map(q=>q.split(',').map(Number));
+    assert.equal(points[0][1],300);assert.equal(points.at(-1)![1],18);
     const range=page.getByRole('combobox',{name:'Horizontal range',exact:true});
     await range.selectOption('0.05');
     await expect(page.getByText(/lie outside the selected horizontal range and are clipped/)).toBeVisible();
@@ -742,9 +787,9 @@ try {
     await expect(page.getByText(/Showing the first 200 of/)).toBeVisible();
     assert.equal(await failures.locator('tbody tr').count(),200);
     const result=lastUiResult('field_curvature');
-    assert.ok(result.curves.some(c=>c.points.some(p=>p.sagittal.error)));
+    assert.ok(result.curves.some((c: any)=>c.points.some((p: any)=>p.sagittal.error)));
     for(const c of result.curves)for(const branch of ['sagittal','tangential']){
-      const valid=c.points.filter(p=>p[branch].shift!==null).length;
+      const valid=c.points.filter((p: any)=>p[branch].shift!==null).length;
       assert.ok(valid>0 && valid<257);
     }
     await page.screenshot({path:resolve(target,'curvature-clipping.png'),fullPage:true});
@@ -900,7 +945,7 @@ try {
     await page.getByRole('tab',{name:'Layout',exact:true}).click();
     const layout=page.getByRole('img',{name:/^Meridional ray layout/});
     await expect(layout.locator('polyline[stroke="#b5532f"]')).toBeVisible();
-    const arrowAngles=async()=>Promise.all((await layout.locator('polygon').all()).map(async a=>Number((await a.getAttribute('transform')).match(/rotate\(([^)]+)\)/)[1])));
+    const arrowAngles=async()=>Promise.all((await layout.locator('polygon').all()).map(async a=>Number((await a.getAttribute('transform'))!.match(/rotate\(([^)]+)\)/)![1])));
     await expect.poll(async()=>(await arrowAngles()).some(deg=>Math.cos(deg*Math.PI/180)<-.99)).toBe(true);
     await page.screenshot({path:resolve(target,'mirror-parabola-layout.png'),fullPage:true});
     // A virtual gap extrapolates opposite the physical ray direction; arrows must still point -z.
@@ -911,8 +956,8 @@ try {
     await expect.poll(()=>lastUiResult('layout')?.revision).toBe((await optical('system_get')).revision);
     await expect.poll(async()=>(await arrowAngles()).some(deg=>Math.cos(deg*Math.PI/180)<-.99)).toBe(true);
     const path=layout.locator('polyline[stroke-width="1.15"]').nth(3);
-    const points=(await path.getAttribute('points')).split(' ').map(p=>p.split(',').map(Number));
-    assert.ok(points.at(-1)[0]>points.at(-2)[0]);
+    const points=(await path.getAttribute('points'))!.split(' ').map(p=>p.split(',').map(Number));
+    assert.ok(points.at(-1)![0]>points.at(-2)![0]);
     await page.screenshot({path:resolve(target,'mirror-virtual-layout.png'),fullPage:true});
     await page.getByRole('tab',{name:'Prescription',exact:true}).click();
     await page.getByRole('checkbox',{name:'Object at infinity',exact:true}).uncheck();
@@ -982,8 +1027,8 @@ try {
     await optical('system_set',{system:saved.system,revision:saved.revision});
     await expect.poll(()=>lastUiResult('system_get')?.revision).toBeGreaterThan(saved.revision);
     await page.getByRole('tab',{name:'Prescription',exact:true}).click();
-    const endpoint=name=>page.locator('details.endpoint').filter({has:page.getByRole('heading',{name:`${name} surface`,exact:true})});
-    const openEndpoint=async name=>{const d=endpoint(name);if(await d.getAttribute('open')===null)await d.locator('summary').click();};
+    const endpoint=(name: string)=>page.locator('details.endpoint').filter({has:page.getByRole('heading',{name:`${name} surface`,exact:true})});
+    const openEndpoint=async (name: string)=>{const d=endpoint(name);if(await d.getAttribute('open')===null)await d.locator('summary').click();};
     await openEndpoint('Object');await openEndpoint('Image');
     await page.getByRole('spinbutton',{name:'Object surface radius',exact:true}).fill('50');
     await page.getByRole('spinbutton',{name:'Image surface radius',exact:true}).fill('20');
@@ -1003,11 +1048,11 @@ try {
     const layout=page.getByRole('img',{name:/^Meridional ray layout/});
     const paths=layout.locator('polyline[stroke-width="1.15"]');
     await expect(paths.first()).toBeVisible();
-    const beforeCount=(await paths.first().getAttribute('points')).split(' ').length;
+    const beforeCount=(await paths.first().getAttribute('points'))!.split(' ').length;
     await page.getByRole('checkbox',{name:/^Include object/}).check();
-    await expect.poll(async()=>(await paths.first().getAttribute('points')).split(' ').length).toBe(beforeCount+1);
+    await expect.poll(async()=>(await paths.first().getAttribute('points'))!.split(' ').length).toBe(beforeCount+1);
     const curve=layout.locator('polyline[stroke="#75989c"]').last();
-    const xs=(await curve.getAttribute('points')).split(' ').map(p=>Number(p.split(',')[0]));
+    const xs=(await curve.getAttribute('points'))!.split(' ').map(p=>Number(p.split(',')[0]));
     assert.ok(Math.max(...xs)-Math.min(...xs)>1e-4);
     await expect(layout).toContainText('curved image surface');
     await page.screenshot({path:resolve(target,'endpoint-layout.png'),fullPage:true});
@@ -1061,7 +1106,7 @@ try {
     await page.getByRole('spinbutton',{name:'Solve target',exact:true}).fill('5');
     await expect(page.getByRole('button',{name:'Install solve',exact:true})).toBeEnabled();
     await page.getByRole('button',{name:'Install solve',exact:true}).click();
-    const expectedGap=coefficient=>5-50+Math.sqrt(2491)-9/40-coefficient*81;
+    const expectedGap=(coefficient: number)=>5-50+Math.sqrt(2491)-9/40-coefficient*81;
     await expect.poll(async()=>(await optical('system_get')).system.surfaces[1].thickness).toBeCloseTo(expectedGap(.0001),10);
     await expect(page.getByRole('spinbutton',{name:/^Surface 2 thickness \(solved:/})).toHaveAttribute('readonly','');
     await page.getByRole('textbox',{name:'Image surface even asphere coefficients',exact:true}).fill('0.0002');
@@ -1091,7 +1136,7 @@ try {
     const recovered=(await optical('system_get')).system;
     assert.ok(Math.abs(recovered.surfaces[1].thickness-stable.system.surfaces[1].thickness)<1e-11);
     recovered.surfaces[1].thickness=stable.system.surfaces[1].thickness;
-    for(const [actual,expected] of [[recovered.object_surface,stable.system.object_surface],[recovered.image_surface,stable.system.image_surface],...recovered.surfaces.map((s,i)=>[s,stable.system.surfaces[i]])]){
+    for(const [actual,expected] of [[recovered.object_surface,stable.system.object_surface],[recovered.image_surface,stable.system.image_surface],...recovered.surfaces.map((s: any,i: number)=>[s,stable.system.surfaces[i]])]){
       assert.ok(Math.abs(actual.semi_diameter-expected.semi_diameter)<1e-11);
       actual.semi_diameter=expected.semi_diameter;
     }
@@ -1169,12 +1214,12 @@ try {
     const chart=page.getByRole('img',{name:/^Spherochromatism:/});
     await expect(chart).toBeVisible();
     const data=lastUiResult('spherochromatism');
-    const invalid=data.curves.flatMap(c=>c.points.filter(p=>p.error));
+    const invalid=data.curves.flatMap((c: any)=>c.points.filter((p: any)=>p.error));
     assert.ok(invalid.length>0);
-    assert.ok(data.curves.every(c=>c.points.some(p=>p.error)&&c.points.some(p=>p.focus!==null)));
+    assert.ok(data.curves.every((c: any)=>c.points.some((p: any)=>p.error)&&c.points.some((p: any)=>p.focus!==null)));
     await expect(page.locator('.problem-list tbody tr')).toHaveCount(invalid.length);
     for(let i=0;i<4;i++)await expect(page.locator('.problem-list tbody tr').filter({hasText:`${i+1}: ${data.curves[i].wavelength} nm`}).first()).toBeVisible();
-    const unique=new Set(invalid.map(p=>p.pupil));
+    const unique=new Set(invalid.map((p: any)=>p.pupil));
     await expect(chart.locator('path')).toHaveCount(unique.size);
     await expect(page.locator('.ledger tbody tr')).toHaveCount(4);
     await expect(chart.locator('polyline[stroke-dasharray="6 4"]')).toHaveCount(1);
@@ -1200,12 +1245,12 @@ try {
     await page.getByRole('button',{name:'Apply changes',exact:true}).click();
     await expect.poll(async()=>(await optical('system_get')).system.object_material).toBe('1.500000:60.000000');
     saved=await optical('system_get');
-    assert.deepEqual(saved.system.wavelengths.map(w=>w.color),rgba);
-    assert.deepEqual(saved.system.fields.map(f=>f.color),rgba.slice(0,2));
+    assert.deepEqual(saved.system.wavelengths.map((w: any)=>w.color),rgba);
+    assert.deepEqual(saved.system.fields.map((f: any)=>f.color),rgba.slice(0,2));
     const colorInput=page.getByLabel('Wavelength 1 color',{exact:true});
     await colorInput.evaluate(el=>el.dispatchEvent(new Event('input',{bubbles:true})));
     await expect(page.getByRole('button',{name:'Save system',exact:true})).toBeDisabled();
-    await colorInput.evaluate(el=>{el.value='#2468ac';el.dispatchEvent(new Event('input',{bubbles:true}));});
+    await colorInput.evaluate(el=>{(el as HTMLInputElement).value='#2468ac';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.getByRole('button',{name:'Apply changes',exact:true}).click();
     rgba[0]=[36/255,104/255,172/255,0];
     await expect.poll(async()=>(await optical('system_get')).system.wavelengths[0].color).toEqual(rgba[0]);
@@ -1220,11 +1265,11 @@ try {
     const mono=page.getByRole('img',{name:/^Spot diagram of/});
     await expect(mono).toBeVisible();
     await expect(page.locator('.legend[role="status"]')).toContainText('587.562');
-    await expect.poll(()=>mono.evaluate(el=>el.getContext('2d').fillStyle)).toBe('#e6b31a');
+    await expect.poll(()=>mono.evaluate(el=>(el as HTMLCanvasElement).getContext('2d')!.fillStyle)).toBe('#e6b31a');
     await page.getByRole('combobox',{name:'View',exact:true}).selectOption('all');
     await expect(page.getByRole('img',{name:/^Polychromatic spot diagram/})).toBeVisible();
     await expect(page.locator('.ledger tbody tr')).toHaveCount(3);
-    assert.deepEqual(lastUiResult('polychromatic_spot').failures.map(c=>c.color),rgba.slice(0,3));
+    assert.deepEqual(lastUiResult('polychromatic_spot').failures.map((c: any)=>c.color),rgba.slice(0,3));
     await page.getByRole('tab',{name:'Analysis',exact:true}).click();
     const selector=page.getByRole('combobox',{name:'Analysis',exact:true});
     await selector.selectOption('spherochromatism');
@@ -1234,11 +1279,11 @@ try {
     await expect(page.locator('.ledger tbody tr')).toHaveCount(4);
     const data=lastUiResult('spherochromatism');
     assert.equal(data.curves.length,4);
-    assert.deepEqual(data.curves.map(c=>c.color),rgba);
+    assert.deepEqual(data.curves.map((c: any)=>c.color),rgba);
     const lines=await sphero().locator('polyline').evaluateAll(els=>els.map(el=>({points:el.getAttribute('points'),stroke:el.getAttribute('stroke'),dash:el.getAttribute('stroke-dasharray')})));
     assert.equal(lines.length,4);
     assert.equal(lines[3].dash,'6 4');
-    const y=i=>Number(lines[i].points.split(' ')[0].split(',')[1]);
+    const y=(i: number)=>Number(lines[i].points!.split(' ')[0].split(',')[1]);
     assert.ok(Math.abs(y(0)-y(1))>1e-3);
     assert.equal(y(1),y(2));
     assert.ok(Math.abs(data.curves[0].points[0].focus-data.reference_focus)>1e-5);
@@ -1275,7 +1320,7 @@ try {
     await expect(sphero()).toBeVisible();
     saved=await optical('system_get');
     assert.equal(saved.system.object_label,'Submerged emitter');
-    assert.deepEqual(saved.system.wavelengths.map(w=>w.color),rgba);
+    assert.deepEqual(saved.system.wavelengths.map((w: any)=>w.color),rgba);
     await page.getByRole('tab',{name:'Import / Export',exact:true}).click();
     await page.getByRole('combobox',{name:'Format',exact:true}).selectOption('geopter');
     await page.getByRole('button',{name:'Export saved system',exact:true}).click();
@@ -1305,7 +1350,7 @@ try {
     const spotSvg = () => page.getByRole('img', {name:/^Spot diagram of/});
     const polySvg = () => page.getByRole('img', {name:/^Polychromatic spot diagram/});
     const geoSvg = () => page.getByRole('img', {name:/^Geometric MTF along/});
-    const setNumber = async (locator,value) => { await locator.fill(String(value)); await locator.press('Tab'); };
+    const setNumber = async (locator: import('@playwright/test').Locator, value: number) => { await locator.fill(String(value)); await locator.press('Tab'); };
     if (!process.argv.includes('--spectrum-maximum') && !process.argv.includes('--spot-aspect')) {
     await page.getByRole('tab',{name:'Prescription',exact:true}).click();
     const mapping=page.getByRole('combobox',{name:'Pupil ray mapping',exact:true});
@@ -1348,7 +1393,7 @@ try {
     const poly=lastUiResult('polychromatic_spot');
     assert.equal(poly.sampling.kind,'hexapolar');
     assert.equal(poly.sampled_rays,273);
-    assert.ok(Math.abs(poly.weights.reduce((a,b)=>a+b,0)-poly.transmitted_weight)<1e-12);
+    assert.ok(Math.abs(poly.weights.reduce((a: number,b: number)=>a+b,0)-poly.transmitted_weight)<1e-12);
     await page.getByRole('combobox',{name:'View',exact:true}).selectOption('single');
     await page.getByRole('combobox',{name:'Wavelength',exact:true}).selectOption('2');
     await expect(spotSvg()).toBeVisible();
@@ -1489,13 +1534,13 @@ try {
     let gridCount=0;
     for(let i=0;i<grid;i++)for(let j=0;j<grid;j++)if((2*i/(grid-1)-1)**2+(2*j/(grid-1)-1)**2<=1)gridCount++;
     await expect(polySvg()).toHaveAttribute('aria-label',new RegExp(`of ${waveCount*gridCount} transmitted rays`),{timeout:60000});
-    const pixels=await polySvg().evaluate(async(el)=>{await new Promise(requestAnimationFrame);const ctx=el.getContext('2d');return ctx.getImageData(0,0,el.width,el.height).data.reduce((n,v,i)=>n+(i%4===3&&v>0),0);});
+    const pixels=await polySvg().evaluate(async(el)=>{await new Promise(requestAnimationFrame);const canvas=el as HTMLCanvasElement;const ctx=canvas.getContext('2d')!;return ctx.getImageData(0,0,canvas.width,canvas.height).data.reduce((n: number,v: number,i: number)=>n+(i%4===3&&v>0?1:0),0);});
     assert.ok(pixels>1000);
     if(wide) {
       const picture=await polySvg().screenshot({path:resolve(target,'spectrum-spot-wide.png')});
       const bounds=await page.evaluate(async(base64)=>{
         const img=new Image();img.src='data:image/png;base64,'+base64;await img.decode();
-        const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const ctx=c.getContext('2d');ctx.drawImage(img,0,0);
+        const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const ctx=c.getContext('2d')!;ctx.drawImage(img,0,0);
         const pixels=ctx.getImageData(0,0,c.width,c.height).data;let x0=c.width,x1=0,y0=c.height,y1=0;
         for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++){const i=4*(y*c.width+x);if(pixels[i]>pixels[i+2]+50&&pixels[i+1]>pixels[i+2]+50&&pixels[i+3]>0){x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}}
         return {ratio:x1>x0&&y1>y0?(x1-x0)/(y1-y0):null,width:c.width,height:c.height};
@@ -1542,7 +1587,7 @@ try {
     await expect(page.getByRole('button',{name:'Auto vignetting',exact:true})).toBeDisabled();
     const updated = await optical('system_get');
     const expected = [.8,.4,1-Math.sqrt(3)/5,1-Math.sqrt(3)/5];
-    updated.system.fields[0].vignetting.forEach((v,i)=>assert.ok(Math.abs(v-expected[i])<2e-9));
+    updated.system.fields[0].vignetting.forEach((v: number,i: number)=>assert.ok(Math.abs(v-expected[i])<2e-9));
     assert.equal(uiCalls.get('vignetting_update'),1);
     resumeUiReads();
     await expect(pending).not.toBeVisible();

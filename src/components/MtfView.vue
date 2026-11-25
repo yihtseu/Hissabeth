@@ -9,8 +9,7 @@ import {
     type SpectralMode,
 } from '../sampling';
 import type { GeometricMtf, MtfAxis, OpticalSystem, PupilSampling, RunInfo } from '../types';
-import { fieldLabel } from '../validation';
-import RaySamplingControl from './RaySamplingControl.vue';
+import AnalysisToolbar from './AnalysisToolbar.vue';
 import SpectralLedger, { type LedgerRow } from './SpectralLedger.vue';
 
 const props = defineProps<{
@@ -54,10 +53,6 @@ function onAxis(e: Event): void {
     const v = (e.target as HTMLSelectElement).value;
     if (v === 'x' || v === 'y') emit('update:axis', v);
 }
-function onMode(e: Event): void {
-    const v = (e.target as HTMLSelectElement).value;
-    if (v === 'mono' || v === 'poly') emit('update:spectralMode', v);
-}
 const rows = computed<LedgerRow[]>(() =>
     (props.mtf?.components ?? []).map((c) => ({
         wavelength: c.wavelength,
@@ -82,71 +77,31 @@ function onMax(e: Event): void {
 
 <template>
     <section class="panel" aria-labelledby="mtf-title">
-        <div class="panel-head">
-            <h3 id="mtf-title">{{ tr('mtf.title') }}</h3>
-            <div class="controls">
-                <label
-                    >{{ tr('mtf.field') }}
-                    <select
-                        :value="fieldIndex"
-                        @change="
-                            emit(
-                                'update:fieldIndex',
-                                Number(($event.target as HTMLSelectElement).value),
-                            )
-                        "
-                    >
-                        <option v-for="(_, i) in system.fields" :key="i" :value="i">
-                            {{ fieldLabel(system, i) }}
-                        </option>
-                    </select>
-                </label>
-                <label
-                    >{{ tr('mtf.spectralMode') }}
-                    <select :value="spectralMode" @change="onMode">
-                        <option value="mono">{{ tr('mtf.mono') }}</option>
-                        <option value="poly">{{ tr('mtf.poly') }}</option>
-                    </select>
-                </label>
-                <label v-if="spectralMode === 'mono'"
-                    >{{ tr('mtf.wavelength') }}
-                    <select
-                        :value="wavelengthIndex"
-                        @change="
-                            emit(
-                                'update:wavelengthIndex',
-                                Number(($event.target as HTMLSelectElement).value),
-                            )
-                        "
-                    >
-                        <option v-for="(w, i) in system.wavelengths" :key="i" :value="i">
-                            {{ i + 1 }}: {{ w.value }} nm
-                        </option>
-                    </select>
-                </label>
-                <label :title="tr('mtf.axisTip')"
-                    >{{ tr('mtf.axis') }}
-                    <select :value="axis" @change="onAxis">
-                        <option value="y">{{ tr('mtf.axisY') }}</option>
-                        <option value="x">{{ tr('mtf.axisX') }}</option>
-                    </select>
-                </label>
-                <label :title="tr('mtf.maxFreqTip')"
-                    >{{ tr('mtf.maxFreq') }}
-                    <input
-                        type="number"
-                        max="10000"
-                        step="any"
-                        :value="maxFrequency"
-                        @change="onMax"
-                    />
-                </label>
-                <RaySamplingControl
-                    :model-value="sampling"
-                    @update:model-value="emit('update:sampling', $event)"
-                />
-            </div>
-        </div>
+        <AnalysisToolbar
+            title-id="mtf-title"
+            :title="tr('mtf.title')"
+            :system="system"
+            :field-index="fieldIndex"
+            :spectral-mode="spectralMode"
+            :wavelength-index="wavelengthIndex"
+            :sampling="sampling"
+            @update:field-index="emit('update:fieldIndex', $event)"
+            @update:wavelength-index="emit('update:wavelengthIndex', $event)"
+            @update:spectral-mode="emit('update:spectralMode', $event)"
+            @update:sampling="emit('update:sampling', $event)"
+        >
+            <label :title="tr('mtf.axisTip')"
+                >{{ tr('mtf.axis') }}
+                <select :value="axis" @change="onAxis">
+                    <option value="y">{{ tr('mtf.axisY') }}</option>
+                    <option value="x">{{ tr('mtf.axisX') }}</option>
+                </select>
+            </label>
+            <label :title="tr('mtf.maxFreqTip')"
+                >{{ tr('mtf.maxFreq') }}
+                <input type="number" max="10000" step="any" :value="maxFrequency" @change="onMax" />
+            </label>
+        </AnalysisToolbar>
         <svg v-if="mtf" viewBox="0 0 900 360" role="img" aria-labelledby="mtf-svg-title">
             <title id="mtf-svg-title">
                 {{ tr('fragments.geometricMtfAlongGlobal') }} {{ mtf.axis }},

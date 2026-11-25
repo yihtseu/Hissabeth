@@ -18,7 +18,7 @@ fn execute() -> Result<(), String> {
         let dir = hissabeth_lib::service::data_dir();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let engine = hissabeth_lib::service::Workspace::open(dir.join("system.json"))?;
-        hissabeth_lib::service::serve(std::sync::Arc::new(std::sync::Mutex::new(engine)))?;
+        hissabeth_lib::service::serve(std::sync::Arc::new(std::sync::RwLock::new(engine)))?;
         loop {
             std::thread::park()
         }
