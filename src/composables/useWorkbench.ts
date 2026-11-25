@@ -696,22 +696,19 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
 
     /** Live Sync debounce: one pending auto-commit at a time, re-armed on every relevant change. */
     let liveSyncTimer: ReturnType<typeof setTimeout> | undefined;
-    watch(
-        [dirty, problems, liveSync, online, stale, refreshPending, recovery, busy],
-        () => {
-            if (liveSyncTimer !== undefined) {
-                clearTimeout(liveSyncTimer);
-                liveSyncTimer = undefined;
-            }
-            if (!liveSync.value || !dirty.value || problems.value.length > 0) return;
-            if (!online.value || stale.value || refreshPending.value || recovery.value || busy.value)
-                return;
-            liveSyncTimer = setTimeout(() => {
-                liveSyncTimer = undefined;
-                void applyDraft();
-            }, 350);
-        },
-    );
+    watch([dirty, problems, liveSync, online, stale, refreshPending, recovery, busy], () => {
+        if (liveSyncTimer !== undefined) {
+            clearTimeout(liveSyncTimer);
+            liveSyncTimer = undefined;
+        }
+        if (!liveSync.value || !dirty.value || problems.value.length > 0) return;
+        if (!online.value || stale.value || refreshPending.value || recovery.value || busy.value)
+            return;
+        liveSyncTimer = setTimeout(() => {
+            liveSyncTimer = undefined;
+            void applyDraft();
+        }, 350);
+    });
 
     async function autofocus(): Promise<boolean> {
         if (recovery.value) return false;

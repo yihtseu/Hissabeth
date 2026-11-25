@@ -42,7 +42,7 @@ const rows = computed(() => {
         z += surface.thickness;
         if (surface.interaction === 'refract') material = surface.material;
         return {
-            draftIndex: props.savedToDraft ? props.savedToDraft[i] ?? null : i,
+            draftIndex: props.savedToDraft ? (props.savedToDraft[i] ?? null) : i,
             label: surface.label,
             interaction: surface.interaction,
             radius: surface.radius,
@@ -145,8 +145,10 @@ function toggleVariable(kind: 'radius' | 'thickness', surface: number): void {
                         :key="i"
                         :data-surface-row="s.draftIndex"
                         :class="{
-                            'row-hover': s.draftIndex !== null && hoveredSurfaceIndex === s.draftIndex,
-                            'row-selected': s.draftIndex !== null && selectedSurfaceIndex === s.draftIndex,
+                            'row-hover':
+                                s.draftIndex !== null && hoveredSurfaceIndex === s.draftIndex,
+                            'row-selected':
+                                s.draftIndex !== null && selectedSurfaceIndex === s.draftIndex,
                         }"
                         @mouseenter="hoverSurface(s.draftIndex)"
                         @mouseleave="hoverSurface(null)"

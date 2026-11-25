@@ -25,11 +25,21 @@ impl ProjectFiles {
             .unwrap_or_default()
     }
 
+    pub fn is_zmx(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zmx"))
+    }
+
     pub fn resolve(workspace_file: &Path, path: &str, save: bool) -> Result<PathBuf, String> {
+        const SAVE_ZMX: &str =
+            "Use project_export to write ZMX; project_save_as writes Hissabeth JSON";
         if path.trim().is_empty() {
             return Err("Project path is required".into());
         }
         let path = Path::new(path);
+        if save && Self::is_zmx(path) {
+            return Err(SAVE_ZMX.into());
+        }
         let mut resolved = if let Ok(relative) = path.strip_prefix("~") {
             std::env::home_dir()
                 .ok_or("Home directory is unavailable")?
@@ -59,6 +69,9 @@ impl ProjectFiles {
             Err(e) if save && e.kind() == std::io::ErrorKind::NotFound => resolved,
             Err(e) => return Err(e.to_string()),
         };
+        if save && Self::is_zmx(&target) {
+            return Err(SAVE_ZMX.into());
+        }
         let workspace_file = workspace_dir.join(workspace_file.file_name().unwrap());
         if [
             workspace_dir.join(PROJECT_META),

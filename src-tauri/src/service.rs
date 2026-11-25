@@ -212,9 +212,7 @@ impl Engine {
         let path = ProjectFiles::resolve(&self.path, path, false)?;
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let linked = !path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("zmx"));
+        let linked = !ProjectFiles::is_zmx(&path);
         let mut next: System = if linked {
             serde_json::from_str(&text).map_err(|e| format!("Invalid optical project: {e}"))?
         } else {
@@ -1280,6 +1278,13 @@ mod tests {
             json!({"path":"import.ZMX","revision":status["revision"]}),
         );
         assert_eq!(imported["linked"], false);
+        let save_zmx = dispatch(
+            &workspace,
+            "project_save_as",
+            json!({"path":"import.ZMX","revision":imported["revision"]}),
+            None,
+        );
+        assert!(save_zmx.unwrap_err().contains("project_export"));
         assert_eq!(call("project_list", json!({}))["active_file"], Value::Null);
         assert_eq!(std::fs::read_to_string(&zmx_path).unwrap(), zmx_text);
 
