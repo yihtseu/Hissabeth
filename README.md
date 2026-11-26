@@ -45,7 +45,6 @@ or the free-space bench. Analysis views run against the saved revision.
 
 Use native Hissabeth JSON to retain the entire project. Use ZMX or Geopter JSON
 for sequential exchange within the documented format limits.
-[Project exchange rules](docs/optical-model.md#project-exchange)
 
 ### Use an agent in the desktop
 
@@ -59,7 +58,6 @@ against the previous one. The desktop refreshes its saved views after MCP writes
 
 To connect an external Codex or Claude Code client, open
 **Tools → Agent connections** and select the installed clients to register.
-[Agent setup and ChatGPT sign-in](docs/workspace-and-agents.md#connect-agent-clients)
 
 ### Run without the desktop
 
@@ -86,7 +84,7 @@ For example, a client with an `mcpServers` configuration can use:
 
 Set the same `HISSABETH_DATA_DIR` in both processes to choose a workspace.
 From MCP, call `workspace_status` first and `system_get` before editing.
-Use the latest revision for every write. [MCP transport and broker](docs/workspace-and-agents.md#mcp-transport-and-broker)
+Use the latest revision for every write.
 
 ### Build the desktop application
 
@@ -97,13 +95,12 @@ bun run tauri build
 Tauri builds the frontend and agent bridge into `dist` and places native build
 outputs in `src-tauri/target` by default.
 
-## Documentation
+## Attribution
 
-| Document                                             | Topics                                                                                                                                   |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| [Optical model](docs/optical-model.md)               | Sequential prescriptions, coordinate breaks, ray and diffraction analyses, optimization, tolerancing, laser bench, and exchange formats. |
-| [Workspace and agents](docs/workspace-and-agents.md) | Desktop editing, project files, revision history, preferences, agent setup, MCP transport, and live exercises.                           |
-| [Verification and provenance](docs/verification.md)  | Historical verification records, Geopter attribution, and numerical comparisons.                                                         |
+The optical implementation draws on
+[heterophyllus/Geopter](https://github.com/heterophyllus/Geopter), commit
+`0edfbf52fcf0e3fc660e5ae33c354fd7a6be80d7`. Geopter is Copyright (C) 2021
+Hiiragi. Its GPL license is retained in [LICENSE.md](LICENSE.md).
 
 ## Development checks
 
