@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { usePreferredDark } from '@vueuse/core';
+import {
+    ArrowUp,
+    ChevronRight,
+    MessageSquare,
+    Plug,
+    Plus,
+    RefreshCw,
+    Square,
+    X,
+} from 'lucide-vue-next';
 import MarkdownRender from 'markstream-vue';
 import 'markstream-vue/index.css';
 import { tr } from '../i18n';
@@ -81,6 +91,24 @@ const starterPrompts = computed(() => [
     tr('chat.starterOptimize'),
     tr('chat.starterTolerance'),
 ]);
+const outcomeText = computed(() =>
+    chat.busy
+        ? tr(chat.stopping ? 'chat.stopping' : 'chat.running')
+        : chat.selected?.outcome === 'cancelled'
+          ? tr(isChatGPT.value ? 'chat.chatgptStopped' : 'chat.cancelled')
+          : chat.selected?.outcome === 'done'
+            ? tr('chat.done')
+            : '',
+);
+const outcomeTone = computed(() =>
+    chat.busy
+        ? 'running'
+        : chat.selected?.outcome === 'cancelled'
+          ? 'cancelled'
+          : chat.selected?.outcome === 'done'
+            ? 'done'
+            : '',
+);
 function keydown(event: KeyboardEvent): void {
     if (event.isComposing) return;
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -128,172 +156,264 @@ onMounted(async () => {
 
 <template>
     <section class="chat-panel panel" :aria-label="tr('chat.title')">
-        <div class="dock-heading">
-            {{ tr('chat.title')
-            }}<button :aria-label="tr('chat.close')" @click="emit('close')">×</button>
-        </div>
-        <div class="panel-head chat-head">
-            <label
-                >{{ tr('chat.provider') }}
-                <select
-                    v-model="chat.provider"
-                    :disabled="chat.busy || !!chat.accountAction"
-                    @change="chat.changeProvider()"
+        <header class="dock-heading chat-dock-heading">
+            <span class="chat-dock-title">
+                <MessageSquare :size="13" aria-hidden="true" />
+                <span>{{ tr('chat.title') }}</span>
+            </span>
+            <div class="chat-dock-actions">
+                <button
+                    type="button"
+                    class="chat-dock-btn"
+                    :disabled="chat.busy"
+                    :aria-label="tr('chat.new')"
+                    :title="tr('chat.new')"
+                    @click="chat.newConversation()"
                 >
-                    <option
-                        v-for="(label, provider) in chatProviderNames"
-                        :key="provider"
-                        :value="provider"
+                    <Plus :size="14" aria-hidden="true" />
+                </button>
+                <button
+                    type="button"
+                    class="chat-dock-btn"
+                    :aria-label="tr('chat.connections')"
+                    :title="tr('chat.connections')"
+                    @click="emit('settings')"
+                >
+                    <Plug :size="13" aria-hidden="true" />
+                </button>
+                <button
+                    type="button"
+                    class="chat-dock-btn"
+                    :aria-label="tr('chat.close')"
+                    :title="tr('chat.close')"
+                    @click="emit('close')"
+                >
+                    <X :size="14" aria-hidden="true" />
+                </button>
+            </div>
+        </header>
+
+        <div class="chat-config">
+            <div class="chat-config-row">
+                <div class="chat-field">
+                    <label for="chat-provider">{{ tr('chat.provider') }}</label>
+                    <select
+                        id="chat-provider"
+                        v-model="chat.provider"
+                        :disabled="chat.busy || !!chat.accountAction"
+                        @change="chat.changeProvider()"
                     >
-                        {{ label }}
-                    </option>
-                </select>
-            </label>
-            <label
-                >{{ tr('chat.model') }}
-                <select :value="modelChoice" :disabled="chat.busy" @change="chooseModel">
-                    <option value="">
-                        {{ tr(isChatGPT ? 'chat.chatgptChooseModel' : 'chat.defaultModel') }}
-                    </option>
-                    <option
-                        v-for="choice in chat.modelCatalog.models"
-                        :key="choice.id"
-                        :value="choice.id"
-                        :title="choice.description"
+                        <option
+                            v-for="(label, provider) in chatProviderNames"
+                            :key="provider"
+                            :value="provider"
+                        >
+                            {{ label }}
+                        </option>
+                    </select>
+                </div>
+                <div class="chat-field">
+                    <label for="chat-model">{{ tr('chat.model') }}</label>
+                    <select
+                        id="chat-model"
+                        :value="modelChoice"
+                        :disabled="chat.busy"
+                        @change="chooseModel"
                     >
-                        {{ choice.label }}
-                    </option>
-                    <option value="__custom__">{{ tr('chat.customModel') }}</option>
-                </select>
-            </label>
-            <label v-if="modelChoice === '__custom__'"
-                >{{ tr('chat.modelId') }}
+                        <option value="">
+                            {{ tr(isChatGPT ? 'chat.chatgptChooseModel' : 'chat.defaultModel') }}
+                        </option>
+                        <option
+                            v-for="choice in chat.modelCatalog.models"
+                            :key="choice.id"
+                            :value="choice.id"
+                            :title="choice.description"
+                        >
+                            {{ choice.label }}
+                        </option>
+                        <option value="__custom__">{{ tr('chat.customModel') }}</option>
+                    </select>
+                </div>
+                <button
+                    type="button"
+                    class="chat-refresh-btn"
+                    :disabled="
+                        chat.busy ||
+                        chat.modelCatalog.loading ||
+                        (isChatGPT && !chat.account?.sharing)
+                    "
+                    :aria-label="tr('chat.refreshModels')"
+                    :title="tr('chat.refreshModels')"
+                    @click="chat.loadModels(true)"
+                >
+                    <RefreshCw
+                        :size="13"
+                        :class="{ 'is-spinning': chat.modelCatalog.loading }"
+                        aria-hidden="true"
+                    />
+                </button>
+            </div>
+
+            <div v-if="modelChoice === '__custom__'" class="chat-field chat-custom-model">
+                <label for="chat-model-id">{{ tr('chat.modelId') }}</label>
                 <input
+                    id="chat-model-id"
                     :value="chat.model"
                     :disabled="chat.busy"
                     :placeholder="tr('chat.modelId')"
                     maxlength="256"
                     @change="chat.changeModel(($event.target as HTMLInputElement).value.trim())"
                 />
-            </label>
-            <button
-                :disabled="
-                    chat.busy || chat.modelCatalog.loading || (isChatGPT && !chat.account?.sharing)
-                "
-                @click="chat.loadModels(true)"
-            >
-                {{ tr('chat.refreshModels') }}
-            </button>
-            <button :disabled="chat.busy" @click="chat.newConversation()">
-                {{ tr('chat.new') }}
-            </button>
-            <button @click="emit('settings')">{{ tr('chat.connections') }}</button>
-        </div>
-        <div v-if="isChatGPT" class="chat-account">
-            <div class="chat-account-actions">
-                <button
-                    v-if="chat.account?.status !== 'connected'"
-                    class="chatgpt-sign-in"
-                    :class="{ dark: isDark }"
-                    :disabled="accountDisabled || !chat.runtime?.node"
-                    @click="chat.updateAccount('sign-in')"
-                >
-                    <img
-                        :src="isDark ? chatgptWhite : chatgptBlack"
-                        alt=""
-                        width="21"
-                        height="21"
-                    />
-                    {{ tr('chat.chatgptSignIn') }}
-                </button>
-                <template v-else>
-                    <span class="chat-account-identity">
+            </div>
+
+            <div v-if="isChatGPT" class="chat-account">
+                <div class="chat-account-actions">
+                    <button
+                        v-if="chat.account?.status !== 'connected'"
+                        type="button"
+                        class="chatgpt-sign-in"
+                        :class="{ dark: isDark }"
+                        :disabled="accountDisabled || !chat.runtime?.node"
+                        @click="chat.updateAccount('sign-in')"
+                    >
                         <img
                             :src="isDark ? chatgptWhite : chatgptBlack"
                             alt=""
-                            width="21"
-                            height="21"
+                            width="16"
+                            height="16"
                         />
-                        {{
-                            chat.account.identity?.email || chat.account.identity?.name || 'ChatGPT'
-                        }}
-                    </span>
-                    <button
-                        v-if="!chat.account.sharing"
-                        :disabled="accountDisabled"
-                        @click="chat.updateAccount('enable-plan')"
-                    >
-                        {{ tr('chat.chatgptEnablePlan') }}
+                        {{ tr('chat.chatgptSignIn') }}
                     </button>
-                    <button v-else @click="openUsage">{{ tr('chat.chatgptUsage') }}</button>
-                    <button :disabled="accountDisabled" @click="chat.updateAccount('disconnect')">
-                        {{ tr('chat.chatgptDisconnect') }}
-                    </button>
-                </template>
+                    <template v-else>
+                        <span class="chat-account-identity">
+                            <img
+                                :src="isDark ? chatgptWhite : chatgptBlack"
+                                alt=""
+                                width="16"
+                                height="16"
+                            />
+                            <span>{{
+                                chat.account.identity?.email ||
+                                chat.account.identity?.name ||
+                                'ChatGPT'
+                            }}</span>
+                        </span>
+                        <div class="chat-account-buttons">
+                            <button
+                                v-if="!chat.account.sharing"
+                                type="button"
+                                :disabled="accountDisabled"
+                                @click="chat.updateAccount('enable-plan')"
+                            >
+                                {{ tr('chat.chatgptEnablePlan') }}
+                            </button>
+                            <button v-else type="button" @click="openUsage">
+                                {{ tr('chat.chatgptUsage') }}
+                            </button>
+                            <button
+                                type="button"
+                                :disabled="accountDisabled"
+                                @click="chat.updateAccount('disconnect')"
+                            >
+                                {{ tr('chat.chatgptDisconnect') }}
+                            </button>
+                        </div>
+                    </template>
+                </div>
+                <p
+                    v-if="chat.accountAction === 'sign-in' || chat.accountAction === 'enable-plan'"
+                    class="chat-inline-note"
+                    role="status"
+                >
+                    {{ tr('chat.chatgptWaiting') }}
+                </p>
+                <p v-else-if="chat.accountError" class="chat-inline-note is-error" role="alert">
+                    {{ chat.accountError }}
+                </p>
+                <p v-else-if="chat.account?.sharing" class="chat-inline-note" role="status">
+                    {{ tr('chat.chatgptUsingPlan') }}
+                </p>
             </div>
+
+            <p v-if="chat.modelCatalog.loading" class="chat-model-status" role="status">
+                {{ tr('chat.loadingModels') }}
+            </p>
+            <p v-else-if="chat.modelCatalog.error" class="chat-model-status is-error" role="alert">
+                {{ tr('chat.modelsFailed') }} {{ chat.modelCatalog.error }}
+            </p>
             <p
-                v-if="chat.accountAction === 'sign-in' || chat.accountAction === 'enable-plan'"
+                v-else-if="chat.modelCatalog.loaded && !chat.modelCatalog.models.length"
+                class="chat-model-status"
                 role="status"
             >
-                {{ tr('chat.chatgptWaiting') }}
+                {{ tr(isChatGPT ? 'chat.chatgptNoModels' : 'chat.noModels') }}
             </p>
-            <p v-else-if="chat.accountError" role="alert">{{ chat.accountError }}</p>
-            <p v-else-if="chat.account?.sharing" role="status">{{ tr('chat.chatgptUsingPlan') }}</p>
         </div>
-        <p v-if="chat.modelCatalog.loading" class="chat-model-status" role="status">
-            {{ tr('chat.loadingModels') }}
-        </p>
-        <p v-else-if="chat.modelCatalog.error" class="chat-model-status" role="alert">
-            {{ tr('chat.modelsFailed') }} {{ chat.modelCatalog.error }}
-        </p>
-        <p
-            v-else-if="chat.modelCatalog.loaded && !chat.modelCatalog.models.length"
-            class="chat-model-status"
-            role="status"
-        >
-            {{ tr(isChatGPT ? 'chat.chatgptNoModels' : 'chat.noModels') }}
-        </p>
+
         <details class="chat-history" :aria-label="tr('chat.history')">
-            <summary>{{ tr('chat.history') }} ({{ chat.history.length }})</summary>
-            <p v-if="!chat.history.length" class="chat-history-empty">
-                {{ tr(chat.loaded ? 'chat.noHistory' : 'chat.loading') }}
-            </p>
-            <ul v-else>
-                <li v-for="record in chat.history" :key="record.id">
-                    <button
-                        :disabled="chat.busy"
-                        :aria-pressed="chat.selectedId === record.id"
-                        @click="chat.select(record.id)"
-                    >
-                        <span>{{ record.title }}</span
-                        ><small
-                            >{{ chatProviderNames[record.provider] }} ·
-                            {{ new Date(record.updatedAt).toLocaleString() }}</small
+            <summary class="chat-history-summary">
+                <ChevronRight :size="13" class="chat-chevron" aria-hidden="true" />
+                <span class="chat-history-label">{{ tr('chat.history') }}</span>
+                <span class="chat-history-count">{{ chat.history.length }}</span>
+            </summary>
+            <div class="chat-history-body">
+                <p v-if="!chat.history.length" class="chat-history-empty">
+                    {{ tr(chat.loaded ? 'chat.noHistory' : 'chat.loading') }}
+                </p>
+                <ul v-else>
+                    <li v-for="record in chat.history" :key="record.id">
+                        <button
+                            type="button"
+                            :disabled="chat.busy"
+                            :aria-pressed="chat.selectedId === record.id"
+                            @click="chat.select(record.id)"
                         >
-                    </button>
-                </li>
-            </ul>
+                            <span class="chat-history-title">{{ record.title }}</span>
+                            <small class="chat-history-meta">
+                                <span>{{ chatProviderNames[record.provider] }}</span>
+                                <span aria-hidden="true">·</span>
+                                <time>{{ new Date(record.updatedAt).toLocaleString() }}</time>
+                            </small>
+                        </button>
+                    </li>
+                </ul>
+            </div>
         </details>
-        <div v-if="chat.storageError" class="banner error" role="alert">
-            {{ chat.storageError }}
-        </div>
+
         <div
             v-if="
-                chat.runtime &&
-                (!chat.runtime.node ||
-                    (!isChatGPT &&
-                        !chat.runtime.agents.find((agent) => agent.name === chat.provider)
-                            ?.installed))
+                chat.storageError ||
+                (chat.runtime &&
+                    (!chat.runtime.node ||
+                        (!isChatGPT &&
+                            !chat.runtime.agents.find((agent) => agent.name === chat.provider)
+                                ?.installed))) ||
+                (dirty && !isChatGPT)
             "
-            class="banner warn"
-            role="status"
+            class="chat-banners"
         >
-            {{ tr(isChatGPT ? 'chat.chatgptRuntime' : 'chat.runtime')
-            }}<button @click="chat.detect()">{{ tr('chat.detect') }}</button>
+            <div v-if="chat.storageError" class="banner error" role="alert">
+                {{ chat.storageError }}
+            </div>
+            <div
+                v-if="
+                    chat.runtime &&
+                    (!chat.runtime.node ||
+                        (!isChatGPT &&
+                            !chat.runtime.agents.find((agent) => agent.name === chat.provider)
+                                ?.installed))
+                "
+                class="banner warn"
+                role="status"
+            >
+                <span>{{ tr(isChatGPT ? 'chat.chatgptRuntime' : 'chat.runtime') }}</span>
+                <button type="button" @click="chat.detect()">{{ tr('chat.detect') }}</button>
+            </div>
+            <div v-if="dirty && !isChatGPT" class="banner warn" role="status">
+                {{ tr('chat.dirty') }}
+            </div>
         </div>
-        <div v-if="dirty && !isChatGPT" class="banner warn" role="status">
-            {{ tr('chat.dirty') }}
-        </div>
+
         <div
             ref="feed"
             class="chat-feed"
@@ -320,10 +440,12 @@ onMounted(async () => {
                         :disabled="blocked || chat.busy"
                         @click="sendQuickPrompt(prompt)"
                     >
-                        {{ prompt }}
+                        <span class="starter-chip-text">{{ prompt }}</span>
+                        <ChevronRight :size="13" class="starter-chip-arrow" aria-hidden="true" />
                     </button>
                 </div>
             </div>
+
             <article
                 v-for="entry in entries"
                 :key="entry.id"
@@ -331,9 +453,18 @@ onMounted(async () => {
                 :class="entry.kind"
             >
                 <template v-if="entry.kind !== 'tool'">
-                    <strong>{{
-                        entry.kind === 'user' ? tr('chat.you') : chatProviderNames[chat.provider]
-                    }}</strong>
+                    <div class="chat-entry-head">
+                        <span
+                            v-if="entry.kind === 'text'"
+                            class="chat-role-dot"
+                            aria-hidden="true"
+                        />
+                        <strong class="chat-entry-role">{{
+                            entry.kind === 'user'
+                                ? tr('chat.you')
+                                : chatProviderNames[chat.provider]
+                        }}</strong>
+                    </div>
                     <MarkdownRender
                         v-if="entry.kind === 'text'"
                         class="chat-text"
@@ -344,65 +475,80 @@ onMounted(async () => {
                     />
                     <div v-else class="chat-text">{{ entry.text }}</div>
                 </template>
-                <details v-else>
-                    <summary>
-                        {{ entry.name }}
-                        <span>{{ tr(`chat.${entry.status || 'in_progress'}`) }}</span>
+                <details v-else class="chat-tool">
+                    <summary class="chat-tool-summary">
+                        <ChevronRight :size="12" class="chat-chevron" aria-hidden="true" />
+                        <code class="chat-tool-name">{{ entry.name }}</code>
+                        <span
+                            class="chat-tool-status"
+                            :class="`is-${entry.status || 'in_progress'}`"
+                        >
+                            {{ tr(`chat.${entry.status || 'in_progress'}`) }}
+                        </span>
                     </summary>
-                    <pre>{{ entry.detail }}</pre>
+                    <pre class="chat-tool-detail">{{ entry.detail }}</pre>
                 </details>
             </article>
         </div>
-        <div v-if="chat.error" class="banner error" role="alert">
-            {{ chat.error }}
-        </div>
-        <p class="chat-outcome" role="status">
-            {{
-                chat.busy
-                    ? tr(chat.stopping ? 'chat.stopping' : 'chat.running')
-                    : chat.selected?.outcome === 'cancelled'
-                      ? tr(isChatGPT ? 'chat.chatgptStopped' : 'chat.cancelled')
-                      : chat.selected?.outcome === 'done'
-                        ? tr('chat.done')
-                        : ''
-            }}
-        </p>
-        <form class="chat-composer" @submit.prevent="send">
-            <label class="sr-only" for="agent-message">{{ tr('chat.message') }}</label>
-            <textarea
-                id="agent-message"
-                ref="composer"
-                v-model="chat.draft"
-                :placeholder="tr(isChatGPT ? 'chat.chatgptPlaceholder' : 'chat.placeholder')"
-                rows="3"
-                maxlength="16000"
-                @keydown="keydown"
-            />
-            <div class="chat-actions">
-                <small>{{ tr('chat.keys') }}</small>
-                <button
-                    v-if="chat.busy"
-                    type="button"
-                    :disabled="chat.stopping"
-                    @click="chat.cancel()"
-                >
-                    {{ tr('chat.stop') }}
-                </button>
-                <button
-                    v-else
-                    type="submit"
-                    class="primary"
-                    :disabled="blocked || !chat.draft.trim()"
-                >
-                    {{ tr('chat.send') }}
-                </button>
+
+        <footer class="chat-footer">
+            <div v-if="chat.error" class="banner error chat-footer-banner" role="alert">
+                {{ chat.error }}
             </div>
-        </form>
+            <p
+                v-show="outcomeText"
+                class="chat-outcome"
+                :class="outcomeTone && `is-${outcomeTone}`"
+                role="status"
+            >
+                <span class="chat-outcome-dot" aria-hidden="true" />
+                <span>{{ outcomeText }}</span>
+            </p>
+            <form class="chat-composer" @submit.prevent="send">
+                <label class="sr-only" for="agent-message">{{ tr('chat.message') }}</label>
+                <div class="composer-box">
+                    <textarea
+                        id="agent-message"
+                        ref="composer"
+                        v-model="chat.draft"
+                        :placeholder="
+                            tr(isChatGPT ? 'chat.chatgptPlaceholder' : 'chat.placeholder')
+                        "
+                        rows="3"
+                        maxlength="16000"
+                        @keydown="keydown"
+                    />
+                    <div class="chat-actions">
+                        <small class="chat-keys">{{ tr('chat.keys') }}</small>
+                        <button
+                            v-if="chat.busy"
+                            type="button"
+                            class="chat-stop-btn"
+                            :disabled="chat.stopping"
+                            @click="chat.cancel()"
+                        >
+                            <Square :size="11" aria-hidden="true" />
+                            {{ tr('chat.stop') }}
+                        </button>
+                        <button
+                            v-else
+                            type="submit"
+                            class="primary chat-send-btn"
+                            :disabled="blocked || !chat.draft.trim()"
+                        >
+                            <ArrowUp :size="13" aria-hidden="true" />
+                            {{ tr('chat.send') }}
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </footer>
     </section>
 </template>
 
 <style scoped>
 .chat-panel {
+    --chat-pad: 14px;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -412,91 +558,168 @@ onMounted(async () => {
     border: 0;
     border-left: 1px solid var(--border);
     border-radius: 0;
+    box-shadow: none;
+    background: var(--panel);
 }
-.chat-history {
-    border-bottom: 1px solid var(--border);
-    padding: 10px 12px;
-    flex: none;
-}
-.chat-history summary {
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 0;
-    user-select: none;
-}
-.chat-history ul {
-    list-style: none;
-    margin: 6px 0 0;
-    padding: 0;
-    max-height: 150px;
-    overflow: auto;
-}
-.chat-history li + li {
-    margin-top: 3px;
-}
-.chat-history button {
-    display: flex;
-    width: 100%;
-    align-items: flex-start;
-    flex-direction: column;
-    text-align: left;
-    padding: 5px 7px;
-    border: 1px solid transparent;
-}
-.chat-history button[aria-pressed='true'] {
-    border-color: var(--accent);
-    background: var(--hover);
-}
-.chat-history button span {
-    width: 100%;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.chat-history small,
-.chat-history-empty {
-    color: var(--muted);
-    font-size: 11px;
-    margin: 0;
-}
-.chat-head {
-    justify-content: flex-start;
-    padding: 10px 14px;
-}
-.chat-head label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.chat-head select {
-    max-width: 200px;
-    min-width: 0;
-}
-.chat-account {
-    padding: 4px 14px 10px;
-    flex: none;
-}
-.chat-account p {
-    margin: 6px 0 0;
-    overflow-wrap: anywhere;
-}
-.chat-account-actions,
-.chat-account-identity,
-.chatgpt-sign-in {
-    display: flex;
-    align-items: center;
+
+/* ---- dock header -------------------------------------------------------- */
+.chat-dock-heading {
+    padding: 0 8px 0 var(--chat-pad);
     gap: 8px;
 }
+.chat-dock-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text);
+    font-weight: 600;
+}
+.chat-dock-title svg {
+    width: 13px;
+    height: 13px;
+    color: var(--muted);
+    flex: none;
+}
+.chat-dock-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+}
+.chat-dock-btn {
+    width: 24px;
+    height: 24px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted);
+}
+.chat-dock-btn:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
+}
+.chat-dock-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ---- agent & model config strip ----------------------------------------- */
+.chat-config {
+    flex: none;
+    padding: 8px var(--chat-pad);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.chat-config-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.78fr) minmax(0, 1.4fr) auto;
+    gap: 8px;
+    align-items: end;
+}
+.chat-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+.chat-field label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--muted);
+    line-height: 1.2;
+}
+.chat-field select,
+.chat-field input {
+    width: 100%;
+    min-width: 0;
+    height: 26px;
+    min-height: 26px;
+    padding: 2px 7px;
+    font-size: 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+}
+.chat-custom-model input {
+    font-family: var(--font-mono);
+}
+.chat-refresh-btn {
+    width: 26px;
+    height: 26px;
+    min-height: 26px;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--muted);
+    flex: none;
+}
+.chat-refresh-btn:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--hover);
+}
+.chat-refresh-btn svg {
+    width: 13px;
+    height: 13px;
+}
+.is-spinning {
+    animation: chat-spin 0.9s linear infinite;
+}
+@keyframes chat-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---- chatgpt account & model status ------------------------------------- */
+.chat-account {
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
 .chat-account-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     flex-wrap: wrap;
 }
 .chat-account-identity {
-    overflow-wrap: anywhere;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
+    font-size: 12px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
+.chat-account-buttons {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.chat-account-buttons button {
+    min-height: 24px;
+    padding: 2px 8px;
+    font-size: 11px;
 }
 .chatgpt-sign-in {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 26px;
+    padding: 3px 10px;
+    font-size: 12px;
     background: #fff;
     color: #0d0d0d;
     border-color: #0d0d0d;
@@ -506,51 +729,181 @@ onMounted(async () => {
     color: #fff;
     border-color: #fff;
 }
+.chat-inline-note,
 .chat-model-status {
-    margin: 6px 14px;
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
     color: var(--muted);
     overflow-wrap: anywhere;
 }
-.chat-head input {
-    width: 130px;
-    min-width: 0;
+.chat-inline-note.is-error,
+.chat-model-status.is-error {
+    color: var(--danger);
 }
-.chat-context {
-    margin: 10px 14px;
+
+/* ---- collapsible history ------------------------------------------------ */
+.chat-history {
+    flex: none;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+}
+.chat-history-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px var(--chat-pad);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    font-size: 12px;
+    font-weight: 550;
     color: var(--muted);
 }
-.chat-panel .banner {
-    margin: 0 14px 8px;
+.chat-history-summary::-webkit-details-marker {
+    display: none;
 }
+.chat-history-summary:hover {
+    color: var(--text);
+    background: var(--surface);
+}
+.chat-chevron {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    color: var(--muted);
+    transition: transform 0.14s ease;
+}
+details[open] > summary .chat-chevron {
+    transform: rotate(90deg);
+}
+.chat-history-label {
+    flex: 1;
+    min-width: 0;
+}
+.chat-history-count {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    padding: 0 6px;
+    line-height: 17px;
+    border-radius: 99px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+}
+.chat-history-body {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    padding: 6px;
+}
+.chat-history-empty {
+    margin: 0;
+    padding: 6px 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+.chat-history ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 164px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.chat-history li button {
+    display: flex;
+    width: 100%;
+    min-height: 0;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+    text-align: left;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    font-weight: 400;
+}
+.chat-history li button:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: transparent;
+}
+.chat-history li button[aria-pressed='true'] {
+    background: var(--accent-soft);
+    border-color: transparent;
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+.chat-history-title {
+    width: 100%;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chat-history-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- banners ------------------------------------------------------------ */
+.chat-banners {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px var(--chat-pad) 0;
+}
+.chat-panel .banner {
+    margin: 0;
+    padding: 7px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    gap: 8px;
+    justify-content: space-between;
+}
+.chat-panel .banner button {
+    min-height: 24px;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+/* ---- transcript feed ---------------------------------------------------- */
 .chat-feed {
     flex: 1;
-    overflow: auto;
     min-height: 70px;
-    padding: 0 14px;
+    overflow-y: auto;
+    padding: 12px var(--chat-pad);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
     overscroll-behavior: contain;
 }
-.chat-entry {
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
-}
-.chat-entry.user {
-    background: var(--surface);
-    padding: 10px 12px;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    margin: 8px 0;
-}
+
+/* ---- empty state -------------------------------------------------------- */
 .chat-empty-state {
-    padding: 12px 0;
+    padding: 4px 0;
 }
 .chat-empty-state .empty {
-    padding: 6px 0 4px;
+    padding: 0;
+    margin: 0 0 4px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.45;
     color: var(--text);
-    font-weight: 500;
 }
 .chat-empty-state .chat-context {
-    margin: 0 0 12px;
+    margin: 0 0 14px;
     font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
 }
 .starter-chips {
     display: flex;
@@ -558,83 +911,359 @@ onMounted(async () => {
     gap: 6px;
 }
 .starter-chip {
+    width: 100%;
+    min-height: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
     text-align: left;
-    justify-content: flex-start;
-    padding: 8px 10px;
+    padding: 9px 11px;
     font-size: 12px;
     line-height: 1.45;
+    font-weight: 450;
     border-radius: var(--radius);
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
-    font-weight: 450;
+}
+.starter-chip-text {
+    flex: 1;
+    min-width: 0;
+}
+.starter-chip-arrow {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    margin-top: 2px;
+    color: var(--muted);
+    opacity: 0.6;
+    transition:
+        transform 0.12s ease,
+        opacity 0.12s ease,
+        color 0.12s ease;
 }
 .starter-chip:hover:not(:disabled) {
     border-color: var(--accent);
     background: var(--accent-soft);
+    color: var(--text);
+}
+.starter-chip:hover:not(:disabled) .starter-chip-arrow {
     color: var(--accent);
+    opacity: 1;
+    transform: translateX(2px);
+}
+
+/* ---- chat entries ------------------------------------------------------- */
+.chat-entry {
+    min-width: 0;
+}
+.chat-entry-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+.chat-role-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+}
+.chat-entry-role {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    line-height: 1.2;
+}
+.chat-entry.user {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 9px 12px;
+}
+.chat-entry.text {
+    padding: 2px 0;
 }
 .chat-text {
     overflow-wrap: anywhere;
-    line-height: 1.65;
-    margin-top: 5px;
+    font-size: var(--ui-font-size);
+    line-height: 1.6;
+    color: var(--text);
     user-select: text;
 }
 div.chat-text {
     white-space: pre-wrap;
 }
+
+/* ---- normalized markstream-vue typography ------------------------------- */
 .chat-text.markstream-vue {
+    font-size: var(--ui-font-size);
+    line-height: 1.6;
+    background: transparent;
+    color: var(--text);
+}
+.chat-text.markstream-vue :deep(> :first-child) {
+    margin-top: 0;
+}
+.chat-text.markstream-vue :deep(> :last-child) {
+    margin-bottom: 0;
+}
+.chat-text.markstream-vue :deep(p) {
+    margin: 0 0 8px;
     font-size: inherit;
+    line-height: 1.6;
+}
+.chat-text.markstream-vue :deep(h1) {
+    font-size: 15px;
+    font-weight: 650;
+    line-height: 1.35;
+    margin: 12px 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+.chat-text.markstream-vue :deep(h2) {
+    font-size: 14px;
+    font-weight: 650;
+    line-height: 1.35;
+    margin: 10px 0 5px;
+}
+.chat-text.markstream-vue :deep(h3),
+.chat-text.markstream-vue :deep(h4) {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+    margin: 8px 0 4px;
+}
+.chat-text.markstream-vue :deep(ul),
+.chat-text.markstream-vue :deep(ol) {
+    margin: 4px 0 8px;
+    padding-left: 18px;
+}
+.chat-text.markstream-vue :deep(li) {
+    margin: 2px 0;
+    line-height: 1.55;
+}
+.chat-text.markstream-vue :deep(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+.chat-text.markstream-vue :deep(pre) {
+    margin: 8px 0;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-x: auto;
+}
+.chat-text.markstream-vue :deep(pre code) {
+    padding: 0;
+    border: 0;
     background: transparent;
 }
-.chat-entry summary {
-    cursor: pointer;
-    overflow-wrap: anywhere;
-}
-.chat-entry summary span {
+.chat-text.markstream-vue :deep(blockquote) {
+    margin: 8px 0;
+    padding: 2px 0 2px 10px;
+    border-left: 2px solid var(--border-strong);
     color: var(--muted);
-    margin-left: 8px;
 }
-.chat-entry pre {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    max-height: 220px;
-    overflow: auto;
+.chat-text.markstream-vue :deep(hr) {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 10px 0;
+}
+.chat-text.markstream-vue :deep(table) {
+    width: 100%;
+    font-size: 12px;
+    margin: 8px 0;
+    border-collapse: collapse;
+}
+.chat-text.markstream-vue :deep(th),
+.chat-text.markstream-vue :deep(td) {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+}
+
+/* ---- tool activity card ------------------------------------------------- */
+.chat-tool {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+.chat-tool-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
     font-size: 12px;
 }
-.chat-composer {
-    border-top: 1px solid var(--border);
-    padding: 10px 14px;
+.chat-tool-summary::-webkit-details-marker {
+    display: none;
 }
-.chat-composer textarea {
+.chat-tool-summary:hover {
+    background: var(--hover);
+}
+.chat-tool-name {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+.chat-tool-status {
+    flex: none;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 6px;
+    border-radius: 99px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+}
+.chat-tool-status.is-completed {
+    color: var(--positive);
+}
+.chat-tool-status.is-in_progress {
+    color: var(--warning);
+}
+.chat-tool-status.is-failed {
+    color: var(--danger);
+}
+.chat-tool-detail {
+    margin: 0;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 200px;
+    overflow: auto;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--muted);
+}
+
+/* ---- footer & unified composer ------------------------------------------ */
+.chat-footer {
+    flex: none;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    padding: 8px var(--chat-pad) 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.chat-outcome {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--muted);
+}
+.chat-outcome-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex: none;
+}
+.chat-outcome.is-running .chat-outcome-dot {
+    background: var(--warning);
+}
+.chat-outcome.is-done .chat-outcome-dot {
+    background: var(--positive);
+}
+.chat-outcome.is-cancelled .chat-outcome-dot {
+    background: var(--muted);
+}
+.composer-box {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    transition:
+        border-color 0.12s ease,
+        box-shadow 0.12s ease,
+        background-color 0.12s ease;
+}
+.composer-box:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+    background: var(--panel);
+}
+.composer-box textarea {
     display: block;
     width: 100%;
-    resize: vertical;
+    resize: none;
     max-height: 180px;
-    min-height: 70px;
-    background: var(--surface);
+    min-height: 58px;
+    background: transparent;
     color: var(--text);
-    border: 1px solid var(--border);
-    padding: 8px;
+    border: 0;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 9px 11px 4px;
+    line-height: 1.5;
+    outline: none;
+}
+.composer-box textarea:focus-visible {
+    outline: none;
 }
 .chat-actions {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
     justify-content: space-between;
-    margin-top: 8px;
+    padding: 4px 8px 7px 11px;
 }
-.chat-actions small,
-.chat-outcome {
+.chat-keys {
+    font-size: 11px;
     color: var(--muted);
+    line-height: 1.3;
+    min-width: 0;
 }
-.chat-outcome {
-    min-height: 18px;
-    margin: 6px 14px;
+.chat-send-btn,
+.chat-stop-btn {
+    flex: none;
+    min-height: 26px;
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: var(--radius-sm);
 }
-@media (max-width: 700px) {
-    .chat-head input {
-        width: 120px;
+.chat-send-btn svg,
+.chat-stop-btn svg {
+    width: 12px;
+    height: 12px;
+}
+.chat-stop-btn {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--danger-bg);
+}
+.chat-stop-btn:hover:not(:disabled) {
+    background: var(--danger);
+    color: #fff;
+    border-color: var(--danger);
+}
+
+@media (max-width: 420px) {
+    .chat-config-row {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     }
 }
 </style>

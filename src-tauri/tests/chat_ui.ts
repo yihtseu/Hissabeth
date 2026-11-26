@@ -116,6 +116,12 @@ try {
     await page.goto(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
     const composer = page.getByRole('textbox', { name: 'Message', exact: true });
     const send = page.getByRole('button', { name: 'Send', exact: true });
+    const ensureHistoryOpen = async () => {
+        const details = page.locator('details.chat-history');
+        if ((await details.getAttribute('open')) === null) {
+            await details.locator('> summary').click();
+        }
+    };
     if (process.argv.includes('--models-only')) {
         const picker = page.getByRole('combobox', { name: 'Model', exact: true });
         const provider = page.getByRole('combobox', { name: 'Agent', exact: true });
@@ -132,6 +138,7 @@ try {
         await expect(page.locator('.chat-history button')).toHaveCount(1);
         await send.click(); await page.evaluate(() => window.__emit({kind:'done'}));
         assert.equal(await page.evaluate(() => window.__chatRequests.at(-1).conversationId),null);
+        await ensureHistoryOpen();
         await page.locator('.chat-history button').filter({hasText:'Selected Codex model'}).click();
         await expect(picker).toHaveValue('codex-fixture-b');
         await page.evaluate(() => { window.__holdModels=true; });
@@ -158,6 +165,7 @@ try {
         await page.getByRole('button',{name:'Refresh models',exact:true}).click();
         await expect(page.getByRole('alert').filter({hasText:'Fixture catalog error'})).toHaveCount(0);
         await page.reload();
+        await ensureHistoryOpen();
         await page.locator('.chat-history button').filter({hasText:'Selected Claude model'}).click();
         await expect(picker).toHaveValue('claude-fixture-b');
         await expect(provider).toHaveValue('claude');
@@ -193,6 +201,7 @@ try {
     await send.click();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Stopped.' })).toBeVisible();
+    await ensureHistoryOpen();
     await page.locator('.chat-history button').filter({hasText:'Inspect the saved project'}).click();
     await expect(composer).toHaveValue('Preserve this draft');
     await expect(page.locator('.chat-entry.text')).toHaveCount(1);
@@ -225,6 +234,7 @@ try {
     await page.evaluate(() => window.__emit({ kind: 'done' }));
     await page.reload();
     await expect(page.locator('.chat-history button')).toHaveCount(3);
+    await ensureHistoryOpen();
     await page.locator('.chat-history button').filter({hasText:'Inspect the saved project'}).click();
     await expect(page.locator('.chat-entry.text')).toContainText('Saved revision 3');
     await expect(page.getByRole('combobox', {name:'Agent',exact:true})).toHaveValue('codex');
