@@ -19,6 +19,14 @@ jobs:
             - uses: actions/checkout@v7
               with:
                   persist-credentials: false
+            - name: Fetch optical project test fixtures
+              uses: actions/checkout@v7
+              with:
+                  repository: heterophyllus/Geopter
+                  ref: 0edfbf52fcf0e3fc660e5ae33c354fd7a6be80d7
+                  path: reference/upstream
+                  sparse-checkout: example
+                  persist-credentials: false
             - uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
               with:
