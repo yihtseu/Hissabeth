@@ -39,6 +39,8 @@ pub enum AssertionKind {
     EqualOpl,
     Colinear,
     Dispersion,
+    Parity,
+    ImageRotation,
 }
 
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,7 @@ pub enum AssertionUnit {
     Mrad,
     Fs,
     Rad,
+    Count,
 }
 impl AssertionUnit {
     pub(crate) fn convert_mm(self, value: f64) -> f64 {
@@ -72,6 +75,7 @@ impl AssertionUnit {
             Self::Mrad => "mrad",
             Self::Fs => "fs",
             Self::Rad => "rad",
+            Self::Count => "",
         }
     }
 }
@@ -80,8 +84,13 @@ impl AssertionUnit {
 #[serde(deny_unknown_fields)]
 pub struct Assertion {
     pub id: String,
+    /// `parity` (unit `count`, target 0 even or 1 odd) checks the reflection
+    /// count of a branch listed twice, or the parity difference of two branches;
+    /// `image_rotation` is the first branch's signed image rotation relative to the
+    /// second about their shared exit direction (rad or mrad).
     pub kind: AssertionKind,
-    /// Two distinct branch IDs. Equal OPL takes the first branch minus the second.
+    /// Two distinct branch IDs (the same ID twice for an absolute `parity`).
+    /// Equal OPL takes the first branch minus the second.
     pub branches: [String; 2],
     pub target: f64,
     pub unit: AssertionUnit,
@@ -94,6 +103,59 @@ pub struct Assertion {
     /// Dispersion only: compared quantity (`phase` in rad, `group_delay` in fs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<DispersionQuantity>,
+}
+
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayCheckKind {
+    /// Matrix element B (mm) of the object-to-image matrix: 0 for an imaging relay.
+    Conjugate,
+    /// Matrix element A: the transverse magnification of a conjugate relay.
+    Magnification,
+    /// Matrix element C (1/mm): 0 for an afocal relay.
+    Afocal,
+    /// Largest deviation (mm) of object→first = f1, first→second = f1 + f2 and
+    /// second→image = f2 for exactly two thin powered elements.
+    #[serde(rename = "strict_4f")]
+    Strict4f,
+}
+
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayCheck {
+    pub kind: RelayCheckKind,
+    /// Magnification only; the other checks always target 0.
+    #[serde(default)]
+    pub target: f64,
+    #[schemars(range(min = 0.0))]
+    pub tolerance: f64,
+}
+
+/// Paraxial ABCD relay along one branch, from an object plane before the
+/// branch's starting element to an image plane after its end element.
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relay {
+    pub id: String,
+    pub branch: String,
+    /// Object plane distance before the branch's starting element (mm, in air).
+    #[serde(default)]
+    #[schemars(range(min = -1e6, max = 1e6))]
+    pub object_distance_mm: f64,
+    /// Image plane distance after the branch's end element (mm, in air).
+    #[serde(default)]
+    #[schemars(range(min = -1e6, max = 1e6))]
+    pub image_distance_mm: f64,
+    /// Element (or source) on the branch whose plane is the aperture stop.
+    /// Defaults to the first powered element.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pupil_stop: Option<String>,
+    /// Element on the branch, at or after the stop, that the conjugate pupil is
+    /// measured from. Defaults to the branch's end element.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pupil_target: Option<String>,
+    #[schemars(length(min = 1, max = 8))]
+    pub checks: Vec<RelayCheck>,
 }
 
 type Edge<'a> = (&'a str, &'a str);
@@ -145,7 +207,7 @@ impl Branch {
 
 impl Bench {
     pub(super) fn nominal_paths(&self) -> Result<NominalPaths<'_>, String> {
-        if self.branches.len() > 128 || self.assertions.len() > 128 || self.folds.len() > 64 {
+        if self.branches.len() > 128 || self.assertions.len() > 128 || self.folds.len() > 64 || self.relays.len() > 32 {
             return Err("Bench branch, fold or assertion budget exceeded".into());
         }
         let mut edges = Connections::new();
@@ -219,12 +281,17 @@ impl Bench {
             };
             if !(1..=64).contains(&assertion.id.len())
                 || !assertions.insert(&assertion.id)
-                || a.id == b.id
+                || (a.id == b.id && assertion.kind != AssertionKind::Parity)
                 || !assertion.target.is_finite()
                 || !assertion.tolerance.is_finite()
                 || assertion.tolerance < 0.
             {
                 return Err(format!("Invalid assertion {}", assertion.id));
+            }
+            if assertion.kind == AssertionKind::Parity
+                && !(matches!(assertion.unit, AssertionUnit::Count) && (assertion.target == 0. || assertion.target == 1.))
+            {
+                return Err(format!("Parity assertion {} needs unit count and target 0 or 1", assertion.id));
             }
             let dispersion = assertion.kind == AssertionKind::Dispersion;
             if dispersion != assertion.band_nm.is_some() || dispersion != assertion.quantity.is_some() {
@@ -261,12 +328,40 @@ impl Bench {
                         AssertionUnit::Mm | AssertionUnit::Um | AssertionUnit::Mrad
                     )
                 }
+                AssertionKind::Parity => true,
+                AssertionKind::ImageRotation => matches!(assertion.unit, AssertionUnit::Rad | AssertionUnit::Mrad),
             };
             if !valid {
                 return Err(format!(
                     "Invalid unit or comparison endpoints in assertion {}",
                     assertion.id
                 ));
+            }
+        }
+        let mut relays = HashSet::new();
+        for relay in &self.relays {
+            let finite = |x: f64| x.is_finite() && x.abs() <= 1e6;
+            if !(1..=64).contains(&relay.id.len())
+                || !relays.insert(&relay.id)
+                || !by_id.contains_key(&relay.branch)
+                || !finite(relay.object_distance_mm)
+                || !finite(relay.image_distance_mm)
+                || !(1..=8).contains(&relay.checks.len())
+                || relay
+                    .checks
+                    .iter()
+                    .any(|c| {
+                        !c.target.is_finite()
+                            || (c.kind != RelayCheckKind::Magnification && c.target != 0.)
+                            || !c.tolerance.is_finite()
+                            || c.tolerance < 0.
+                    })
+                || [&relay.pupil_stop, &relay.pupil_target]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| !self.elements.iter().any(|e| &e.id == id) && !self.sources.iter().any(|s| &s.id == id))
+            {
+                return Err(format!("Invalid relay {}", relay.id));
             }
         }
         Ok(NominalPaths { routes, folds, inputs })

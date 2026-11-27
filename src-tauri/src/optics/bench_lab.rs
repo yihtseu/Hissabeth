@@ -21,6 +21,8 @@ use std::{
 mod alignment_solver;
 #[path = "bench_layout.rs"]
 mod layout;
+#[path = "bench_relay.rs"]
+mod relay;
 use alignment_solver::{AimResidual, Combiner, Separation, measure};
 
 const FORK_REACH: f64 = 22.;
@@ -1483,6 +1485,11 @@ struct LabReadings {
     zones: Vec<layout::ZoneReading>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     folds: Vec<layout::FoldReading>,
+    /// Reflection count, parity and handedness at the end of each complete branch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    handedness: Vec<relay::HandednessReading>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    relays: Vec<relay::RelayReading>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1553,6 +1560,17 @@ enum AssertionValue {
     Opl(f64),
     Colinear(Separation),
     Dispersion(DispersionValue),
+    Parity(ParityValue),
+    /// Image rotation, rad internally and in the assertion unit when reported.
+    Rotation(f64),
+}
+
+#[derive(Clone, schemars::JsonSchema, Serialize)]
+struct ParityValue {
+    /// Reflections along the first and second branch.
+    reflections: [u32; 2],
+    /// Their difference modulo 2.
+    parity: u32,
 }
 
 #[derive(Clone, schemars::JsonSchema, Serialize)]
@@ -1572,6 +1590,11 @@ impl AssertionValue {
         match self {
             Self::Opl(value) => unit.convert_mm(*value),
             Self::Dispersion(value) => value.difference,
+            Self::Parity(value) => f64::from(value.parity),
+            Self::Rotation(rad) => match unit {
+                AssertionUnit::Mrad => rad * 1000.,
+                _ => *rad,
+            },
             Self::Colinear(separation) => match unit {
                 AssertionUnit::Mrad => separation.angle_mrad,
                 _ => unit.convert_mm(separation.position_mm),
@@ -1798,12 +1821,26 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
                 AssertionKind::Colinear => colinear(trace, bench, [first, second], [pa, pb])
                     .map(AssertionValue::Colinear),
                 AssertionKind::Dispersion => dispersion(system, a, [pa, pb], &second.to).map(AssertionValue::Dispersion),
+                AssertionKind::Parity => relay::parity(bench, trace, [pa, pb], &second.to).map(|reflections| {
+                    let parity = if first.id == second.id { reflections[0] } else { reflections[0].abs_diff(reflections[1]) } % 2;
+                    AssertionValue::Parity(ParityValue { reflections, parity })
+                }),
+                AssertionKind::ImageRotation => relay::rotation(bench, trace, [pa, pb], &second.to).map(AssertionValue::Rotation),
             }
         });
         let measured = compared.as_ref().ok();
-        let residual = measured.map(|value| value.in_unit(a.unit) - a.target);
+        let residual = measured.map(|value| match value {
+            // Angles compare modulo a full turn.
+            AssertionValue::Rotation(_) => {
+                let full = AssertionValue::Rotation(TAU).in_unit(a.unit);
+                let r = (value.in_unit(a.unit) - a.target).rem_euclid(full);
+                if r > full / 2. { r - full } else { r }
+            }
+            _ => value.in_unit(a.unit) - a.target,
+        });
         let value = measured.map(|value| match value {
             AssertionValue::Opl(_) => AssertionValue::Opl(value.in_unit(a.unit)),
+            AssertionValue::Rotation(_) => AssertionValue::Rotation(value.in_unit(a.unit)),
             _ => value.clone(),
         });
         let bound = match measured {
@@ -1856,6 +1893,8 @@ fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
         periscopes: periscope_readings(bench, system, trace),
         zones: layout::zones(bench),
         folds: layout::folds(trace),
+        handedness: relay::handedness(bench, trace),
+        relays: relay::relays(bench, system, trace),
     }
 }
 
@@ -2071,6 +2110,27 @@ fn lab_report(
             }
         };
         issues.push(issue("error", code, target, None, message));
+    }
+    for reading in &readings.relays {
+        for check in reading.checks.iter().filter(|check| !check.passed) {
+            let message = match (&check.interruption, check.residual) {
+                (Some(at), _) => format!("relay {} {:?}: {} at {}", reading.id, check.kind, at.reason, at.element),
+                (None, Some(residual)) => format!(
+                    "relay {} {:?}: residual {residual} exceeds tolerance {}",
+                    reading.id, check.kind, check.tolerance
+                ),
+                (None, None) => format!("relay {} {:?}: no value", reading.id, check.kind),
+            };
+            issues.push(issue("error", "relay_check", None, None, message));
+        }
+        // An explicit pupil that cannot be resolved fails the relay even when
+        // its matrix checks pass.
+        if let Some(at) = &reading.interruption
+            && reading.checks.iter().all(|check| check.interruption.is_none())
+        {
+            let detail = at.detail.as_deref().unwrap_or_default();
+            issues.push(issue("error", "relay_pupil", None, None, format!("relay {}: {} {detail}", reading.id, at.reason)));
+        }
     }
     let count = |severity| {
         issues
@@ -2377,6 +2437,8 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
             AssertionKind::EqualOpl => "ΔOPL",
             AssertionKind::Colinear => "Colinearity",
             AssertionKind::Dispersion => "Dispersion",
+            AssertionKind::Parity => "Parity",
+            AssertionKind::ImageRotation => "Image rotation",
         };
         let mut lines = vec![
             format!("{title} · {} · {}", result.assertion, result.status.as_str()),
@@ -2392,6 +2454,10 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
             Some(AssertionValue::Dispersion(value)) => lines.push(format!(
                 "Δ {} {unit} @ {} nm", reading_number(value.difference), reading_number(value.wavelength_nm),
             )),
+            Some(AssertionValue::Parity(value)) => lines.push(format!(
+                "Reflections {} / {} · parity {}", value.reflections[0], value.reflections[1], value.parity,
+            )),
+            Some(AssertionValue::Rotation(value)) => lines.push(format!("Rotation {} {unit}", reading_number(*value))),
             None => {}
         }
         lines.push(format!(
@@ -2993,7 +3059,7 @@ pub(crate) fn export_blueprint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optics::bench::{HeightLayer, Periscope, Zone, ZoneRect};
+    use crate::optics::bench::{HeightLayer, Periscope, Region, RegionShape, Relay, RelayCheck, RelayCheckKind, Zone, ZoneRect, rotate};
     #[test]
     fn unexpected_hit_on_a_region_plate_is_reported_not_an_internal_error() {
         let mut bench = template("three_arm").unwrap();
@@ -3407,6 +3473,17 @@ mod tests {
                 .find(|s| s.flight.as_ref().is_some_and(|f| f.from_element == "BS1" && f.from_port == "transmitted"))
                 .unwrap();
             assert!((exit.to[1] - exit.from[1]).abs() < 1e-9);
+            // Refraction through the glass is not a reflection, and the internal
+            // bounce off a back coating counts once, like a front one.
+            let reference = template("mach_zehnder").unwrap();
+            let bare = reference.trace(&system).unwrap();
+            for (path, plain) in [a, b].into_iter().zip(&bare.branches) {
+                let glass = relay::frame(&bench, &trace, path).unwrap();
+                let air = relay::frame(&reference, &bare, &plain.paths[0]).unwrap();
+                assert_eq!(glass.reflections, air.reflections, "{face:?}");
+                assert_eq!(glass.handedness(), air.handedness());
+                assert!(relay::image_rotation(&glass, &air).abs() < 1e-9);
+            }
         }
     }
 
@@ -4292,6 +4369,337 @@ mod tests {
 
     fn aimed(id: &str, hardware: Hardware, position: V3) -> Element {
         Element { rotation: None, ..mount_element(id, hardware, position, [1., 0., 0.]) }
+    }
+
+    fn relay_bench(sources: &[(&str, V3, V3)], elements: Vec<Element>, edges: &[(&str, &str, &str)]) -> Bench {
+        let mut bench = layered_bench(elements, edges);
+        let template = bench.sources[0].clone();
+        bench.sources = sources
+            .iter()
+            .map(|&(id, position, direction)| bench::Source { id: id.into(), position, direction, ..template.clone() })
+            .collect();
+        bench
+    }
+
+    fn route(id: &str, from: &str, to: &str) -> Branch {
+        Branch { id: id.into(), from: Port::new(from, "out"), to: Port::new(to, "in"), via: vec![] }
+    }
+
+    fn mirror(id: &str, at: V3, incoming: V3, outgoing: V3) -> Element {
+        mount_element(id, MIRROR, at, sub(outgoing, incoming))
+    }
+
+    #[test]
+    fn three_and_four_in_plane_reflections_have_opposite_handedness() {
+        let system = System::default();
+        let (x, y, nx, ny) = ([1., 0., 0.], [0., 1., 0.], [-1., 0., 0.], [0., -1., 0.]);
+        let mut bench = relay_bench(
+            &[("S1", [100., 100., 100.], x), ("S2", [100., 300., 100.], x)],
+            vec![
+                mirror("M1", [200., 100., 100.], x, y),
+                mirror("M2", [200., 200., 100.], y, nx),
+                mirror("M3", [150., 200., 100.], nx, ny),
+                mount_element("D1", DETECTOR, [150., 150., 100.], ny),
+                mirror("M4", [200., 300., 100.], x, y),
+                mirror("M5", [200., 400., 100.], y, nx),
+                mirror("M6", [150., 400., 100.], nx, ny),
+                mirror("M7", [150., 350., 100.], ny, x),
+                mount_element("D2", DETECTOR, [250., 350., 100.], x),
+            ],
+            &[
+                ("S1", "out", "M1"), ("M1", "reflected", "M2"), ("M2", "reflected", "M3"), ("M3", "reflected", "D1"),
+                ("S2", "out", "M4"), ("M4", "reflected", "M5"), ("M5", "reflected", "M6"), ("M6", "reflected", "M7"),
+                ("M7", "reflected", "D2"),
+            ],
+        );
+        bench.branches = vec![route("three", "S1", "D1"), route("four", "S2", "D2")];
+        bench.assertions = vec![Assertion {
+            id: "parity".into(),
+            kind: AssertionKind::Parity,
+            branches: ["three".into(), "four".into()],
+            target: 1.,
+            unit: AssertionUnit::Count,
+            tolerance: 0.,
+            band_nm: None,
+            quantity: None,
+        }];
+        let check = lab_check(&bench, &system).unwrap();
+        let readings = check["handedness"].as_array().unwrap();
+        let by = |id: &str| readings.iter().find(|r| r["branch"] == id).unwrap();
+        assert_eq!(by("three")["reflections"], 3);
+        assert_eq!(by("three")["parity"], 1);
+        assert_eq!(by("four")["reflections"], 4);
+        assert_eq!(by("four")["parity"], 0);
+        assert_eq!(by("three")["handedness"], -1);
+        assert_eq!(by("four")["handedness"], 1);
+        let result = &check["assertions"][0];
+        assert_eq!(result["status"], "pass", "{result}");
+        assert_eq!(result["value"]["reflections"], json!([3, 4]));
+        // Opposite handedness leaves no rotation between the two images: an
+        // unreflected beam leaving along −y like the three-mirror branch.
+        let mirrors = ["M4", "M5", "M6", "M7", "D2"];
+        bench.elements.retain(|e| !mirrors.contains(&e.id.as_str()));
+        bench.connections.retain(|c| c.from != "S2" && !mirrors.contains(&c.from.as_str()));
+        bench.elements.push(mount_element("D2", DETECTOR, [400., 200., 100.], ny));
+        bench.connections.push(Connection { from: "S2".into(), port: "out".into(), to: "D2".into() });
+        bench.sources[1].position = [400., 300., 100.];
+        bench.sources[1].direction = ny;
+        bench.assertions[0].kind = AssertionKind::ImageRotation;
+        bench.assertions[0].unit = AssertionUnit::Rad;
+        bench.assertions[0].target = 0.;
+        let check = lab_check(&bench, &system).unwrap();
+        let result = &check["assertions"][0];
+        assert_eq!(result["status"], "unreachable");
+        assert_eq!(result["break"]["reason"], "opposite_handedness");
+    }
+
+    #[test]
+    fn tilted_facet_reflection_mirrors_the_image_and_sets_absolute_parity() {
+        let system = System::default();
+        let x = [1., 0., 0.];
+        // A facet at 60° to the mirror plane: the turn keeps the ray's sign along
+        // the element axis, so only the facet normal identifies the reflection.
+        let (c, s) = (0.5, 3f64.sqrt() / 2.);
+        let mut m = mount_element("M", MIRROR, [200., 100., 100.], [-1., 0., 0.]);
+        m.regions = vec![Region {
+            port: "F".into(),
+            shape: RegionShape::Rect { center: [0., 0.], size: [50., 50.] },
+            transmittance: 1.,
+            normal: Some([c, s, 0.]),
+        }];
+        let n = rotate([c, s, 0.], m.rotation());
+        let out = sub(x, scale(n, 2. * dot(x, n)));
+        let axis = rotate(x, m.rotation());
+        assert!(dot(x, axis) * dot(out, axis) > 0.);
+        let detector = mount_element("D", DETECTOR, add([200., 100., 100.], scale(out, 150.)), out);
+        let mut bench = relay_bench(
+            &[("S1", [100., 100., 100.], x)],
+            vec![m, Element { mount: None, ..detector }],
+            &[("S1", "out", "M"), ("M", "F", "D")],
+        );
+        bench.branches = vec![route("one", "S1", "D")];
+        let parity = |target| Assertion {
+            id: "odd".into(),
+            kind: AssertionKind::Parity,
+            branches: ["one".into(), "one".into()],
+            target,
+            unit: AssertionUnit::Count,
+            tolerance: 0.,
+            band_nm: None,
+            quantity: None,
+        };
+        bench.assertions = vec![parity(1.)];
+        let check = lab_check(&bench, &system).unwrap();
+        let reading = &check["handedness"][0];
+        assert_eq!(reading["reflections"], 1, "{reading}");
+        assert_eq!(reading["handedness"], -1);
+        let result = &check["assertions"][0];
+        assert_eq!(result["status"], "pass", "{result}");
+        assert_eq!(result["value"]["parity"], 1);
+        // The same branch expected even fails.
+        bench.assertions = vec![parity(0.)];
+        assert_eq!(lab_check(&bench, &system).unwrap()["assertions"][0]["status"], "fail");
+        // Other kinds still need two distinct branches.
+        bench.assertions[0].kind = AssertionKind::ImageRotation;
+        bench.assertions[0].unit = AssertionUnit::Rad;
+        assert!(lab_check(&bench, &system).is_err());
+    }
+
+    #[test]
+    fn out_of_plane_periscope_rotates_the_image_a_quarter_turn() {
+        let system = System::default();
+        let (x, y, z) = ([1., 0., 0.], [0., 1., 0.], [0., 0., 1.]);
+        let mut bench = relay_bench(
+            &[("S1", [100., 100., 100.], x), ("S2", [300., 100., 100.], y)],
+            vec![
+                mirror("M1", [200., 100., 100.], x, z),
+                // Upper mirrors without posts, which would stand in the vertical leg.
+                Element { mount: None, ..mirror("M2", [200., 100., 200.], z, y) },
+                mount_element("D1", DETECTOR, [200., 250., 200.], y),
+                mirror("M3", [300., 200., 100.], y, z),
+                Element { mount: None, ..mirror("M4", [300., 200., 200.], z, y) },
+                mount_element("D2", DETECTOR, [300., 300., 200.], y),
+            ],
+            &[
+                ("S1", "out", "M1"), ("M1", "reflected", "M2"), ("M2", "reflected", "D1"),
+                ("S2", "out", "M3"), ("M3", "reflected", "M4"), ("M4", "reflected", "D2"),
+            ],
+        );
+        bench.branches = vec![route("turned", "S1", "D1"), route("straight", "S2", "D2")];
+        let rotation = |target: f64, unit: AssertionUnit| Assertion {
+            id: format!("rotation_{}", unit.symbol()),
+            kind: AssertionKind::ImageRotation,
+            branches: ["turned".into(), "straight".into()],
+            target,
+            unit,
+            tolerance: 1e-9,
+            band_nm: None,
+            quantity: None,
+        };
+        bench.assertions = vec![rotation(PI / 2., AssertionUnit::Rad), rotation(PI / 2. * 1000. - 1e6 * TAU, AssertionUnit::Mrad)];
+        let check = lab_check(&bench, &system).unwrap();
+        for result in check["assertions"].as_array().unwrap() {
+            assert_eq!(result["status"], "pass", "{result}");
+        }
+        assert!((check["assertions"][0]["value"].as_f64().unwrap() - PI / 2.).abs() < 1e-9);
+        assert!((check["assertions"][1]["value"].as_f64().unwrap() - PI * 500.).abs() < 1e-6);
+        let readings = check["handedness"].as_array().unwrap();
+        assert!(readings.iter().all(|r| r["reflections"] == 2 && r["handedness"] == 1));
+        // The quarter turn is signed: the straight periscope sees the turned one at −90°.
+        bench.assertions = vec![Assertion { branches: ["straight".into(), "turned".into()], ..rotation(-PI / 2., AssertionUnit::Rad) }];
+        assert_eq!(lab_check(&bench, &system).unwrap()["assertions"][0]["status"], "pass");
+    }
+
+    #[test]
+    fn lens_group_relay_uses_the_prescription_matrix_once() {
+        let system = System::default();
+        let mut group = Element { kind: Kind::LensGroup, rotation: Some([0.; 3]), mount: None, ..mount_element("G", LENS, [200., 100., 100.], [1., 0., 0.]) };
+        group.reflectance = 0.;
+        group.transmittance = 1.;
+        group.aperture = 10.;
+        group.body_radius = 12.;
+        let mut bench = relay_bench(
+            &[("S1", [100., 100., 100.], [1., 0., 0.])],
+            vec![group, mount_element("D", DETECTOR, [300., 100., 100.], [1., 0., 0.])],
+            &[("S1", "out", "G"), ("G", "out", "D")],
+        );
+        bench.sources[0].rings = 0;
+        bench.sources[0].beam_radius = 0.;
+        bench.branches = vec![route("relay", "S1", "D")];
+        bench.relays = vec![Relay {
+            id: "group".into(),
+            branch: "relay".into(),
+            object_distance_mm: 5.,
+            image_distance_mm: 7.,
+            pupil_stop: None,
+            pupil_target: None,
+            checks: vec![RelayCheck { kind: RelayCheckKind::Strict4f, target: 0., tolerance: 1. }],
+        }];
+        let lab = lab_check(&bench, &system).unwrap();
+        let reading = &lab["relays"][0];
+        assert!(reading.get("break").is_none(), "{reading}");
+        let w = bench.sources[0].wavelength;
+        let last = system.surfaces.len() - 1;
+        let (group_matrix, _) = system.matrix(w, 0, system.surfaces.len()).unwrap();
+        let thickness: f64 = system.surfaces[..last].iter().map(|s| s.thickness).sum();
+        let mut object = Matrix::identity();
+        object.transfer(105., 1.);
+        let mut expected = relay::compose(group_matrix, object);
+        expected.transfer(100. - thickness + 7., 1.);
+        let abcd: Vec<f64> = reading["abcd"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        for (value, wanted) in abcd.iter().zip([expected.a, expected.b, expected.c, expected.d]) {
+            assert!((value - wanted).abs() < 1e-9 * wanted.abs().max(1.), "{abcd:?} vs {expected:?}");
+        }
+        assert_eq!(reading["powered"].as_array().unwrap().len(), 1);
+        assert!((reading["powered"][0]["focal_mm"].as_f64().unwrap() + 1. / group_matrix.c).abs() < 1e-9);
+        assert_eq!(reading["checks"][0]["break"]["reason"], "strict_4f_needs_two_thin_elements");
+    }
+
+    #[test]
+    fn four_f_relay_reads_its_matrix_spacings_and_pupil_image() {
+        let system = System::default();
+        let lens = |id: &str, x: f64, focal: f64| Element {
+            focal_length: focal,
+            ..mount_element(id, LENS, [x, 100., 100.], [1., 0., 0.])
+        };
+        let mut bench = relay_bench(
+            &[("S1", [100., 100., 100.], [1., 0., 0.])],
+            vec![lens("L1", 200., 100.), lens("L2", 500., 200.), mount_element("D", DETECTOR, [700., 100., 100.], [1., 0., 0.])],
+            &[("S1", "out", "L1"), ("L1", "out", "L2"), ("L2", "out", "D")],
+        );
+        bench.branches = vec![route("relay", "S1", "D")];
+        let check = |kind, target| RelayCheck { kind, target, tolerance: 1e-9 };
+        bench.relays = vec![Relay {
+            id: "4f".into(),
+            branch: "relay".into(),
+            object_distance_mm: 0.,
+            image_distance_mm: 0.,
+            pupil_stop: None,
+            pupil_target: None,
+            checks: vec![
+                check(RelayCheckKind::Conjugate, 0.),
+                check(RelayCheckKind::Magnification, -2.),
+                check(RelayCheckKind::Afocal, 0.),
+                check(RelayCheckKind::Strict4f, 0.),
+            ],
+        }];
+        let lab = lab_check(&bench, &system).unwrap();
+        let reading = &lab["relays"][0];
+        let abcd: Vec<f64> = reading["abcd"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        for (value, expected) in abcd.iter().zip([-2., 0., 0., -0.5]) {
+            assert!((value - expected).abs() < 1e-12, "{abcd:?}");
+        }
+        assert!(reading["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true), "{reading}");
+        // L1's plane images 600 mm past L2 (1/v = 1/200 − 1/300), 400 mm past D.
+        assert!((reading["pupil_image_mm"].as_f64().unwrap() - 400.).abs() < 1e-9);
+        assert!(!lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_check"));
+        // A 1 mm spacing error between the lenses.
+        bench.elements[1].position[0] += 1.;
+        let lab = lab_check(&bench, &system).unwrap();
+        let strict = &lab["relays"][0]["checks"][3];
+        assert_eq!(strict["passed"], false);
+        assert!((strict["value"].as_f64().unwrap() - 1.).abs() < 1e-9, "{strict}");
+        let deviations: Vec<f64> = strict["deviations_mm"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        for (value, expected) in deviations.iter().zip([0., 1., -1.]) {
+            assert!((value - expected).abs() < 1e-9, "{deviations:?}");
+        }
+        // L1 → image now 600 − 401 + 1/(1/200 − 1/301) analytically.
+        let v = 1. / (1. / 200. - 1. / 301.);
+        assert!((lab["relays"][0]["pupil_image_mm"].as_f64().unwrap() - (v - 199.)).abs() < 1e-9);
+        assert!(lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_check"));
+        bench.elements[1].position[0] -= 1.;
+        // An aperture at the object plane (the source, 100 mm before L1) is
+        // imaged onto D: matrix [−2, 0; 0, −0.5] from it, so 0 mm past D.
+        bench.relays[0].pupil_stop = Some("S1".into());
+        let lab = lab_check(&bench, &system).unwrap();
+        let reading = &lab["relays"][0];
+        assert_eq!(reading["pupil_stop"], "S1");
+        assert_eq!(reading["pupil_target"], "D");
+        assert!(reading["pupil_image_mm"].as_f64().unwrap().abs() < 1e-9, "{reading}");
+        // Measured from L2 instead: its image lies f2 = 200 mm past L2.
+        bench.relays[0].pupil_target = Some("L2".into());
+        let lab = lab_check(&bench, &system).unwrap();
+        assert!((lab["relays"][0]["pupil_image_mm"].as_f64().unwrap() - 200.).abs() < 1e-9);
+        // A target upstream of the stop has no forward conjugate.
+        bench.relays[0].pupil_stop = Some("L2".into());
+        bench.relays[0].pupil_target = Some("L1".into());
+        let lab = lab_check(&bench, &system).unwrap();
+        assert_eq!(lab["relays"][0]["break"]["reason"], "pupil_undefined");
+        assert!(lab["relays"][0]["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true));
+        assert_eq!(lab["passed"], false);
+        assert!(lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_pupil"));
+        assert!(super::check(&bench, &system).unwrap().require_pass().is_err());
+        bench.relays[0].pupil_stop = None;
+        bench.relays[0].pupil_target = None;
+        // Ending the branch at L2 with the image plane 200 mm past it still
+        // applies L2: T(200)·L(200)·T(300)·L(100)·T(100) = [−2, 0; 0, −0.5].
+        let mut ending = bench.clone();
+        ending.branches[0].to = Port::new("L2", "in");
+        ending.relays[0].image_distance_mm = 200.;
+        let lab = lab_check(&ending, &system).unwrap();
+        let reading = &lab["relays"][0];
+        let abcd: Vec<f64> = reading["abcd"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        for (value, expected) in abcd.iter().zip([-2., 0., 0., -0.5]) {
+            assert!((value - expected).abs() < 1e-12, "{abcd:?}");
+        }
+        assert_eq!(reading["powered"].as_array().unwrap().len(), 2);
+        assert!(reading["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true), "{reading}");
+        // Only magnification takes a target: B, C and the 4f spacings are always 0.
+        for kind in [RelayCheckKind::Conjugate, RelayCheckKind::Afocal, RelayCheckKind::Strict4f] {
+            let mut shifted = bench.clone();
+            shifted.relays[0].checks = vec![check(kind, 1.)];
+            assert!(lab_check(&shifted, &system).is_err(), "{kind:?}");
+        }
+        // Three powered elements cannot be a strict 4f.
+        bench.elements.push(lens("L3", 600., 50.));
+        bench.connections.retain(|c| c.from != "L2");
+        bench.connections.push(Connection { from: "L2".into(), port: "out".into(), to: "L3".into() });
+        bench.connections.push(Connection { from: "L3".into(), port: "out".into(), to: "D".into() });
+        let lab = lab_check(&bench, &system).unwrap();
+        assert_eq!(lab["relays"][0]["checks"][3]["break"]["reason"], "strict_4f_needs_two_thin_elements");
+        // An unknown branch is rejected at validation.
+        bench.relays[0].branch = "missing".into();
+        assert!(lab_check(&bench, &system).is_err());
     }
 
     #[test]

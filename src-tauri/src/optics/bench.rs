@@ -12,7 +12,8 @@ use std::{
 #[path = "bench_paths.rs"]
 mod paths;
 pub use paths::{
-    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, DispersionQuantity, GlassPass, Port,
+    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, DispersionQuantity, GlassPass, Port, Relay,
+    RelayCheck, RelayCheckKind,
 };
 pub(super) use paths::BranchPath;
 pub(crate) use paths::PathBreak;
@@ -63,6 +64,10 @@ pub struct Bench {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 64))]
     pub folds: Vec<Branch>,
+    /// Paraxial ABCD relays checked along branches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 32))]
+    pub relays: Vec<Relay>,
     #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -557,6 +562,19 @@ fn slab_path(
 impl Element {
     pub(crate) fn rotation(&self) -> V3 {
         self.rotation.expect("bench pose was validated")
+    }
+    /// World normals of the surfaces light leaving `port` can have met: the
+    /// port's facet normal, the element plane and a substrate's back face.
+    pub(crate) fn surface_normals(&self, port: &str) -> Vec<V3> {
+        let r = self.rotation();
+        let facet = self.regions.iter().find(|g| g.port == port).and_then(|g| g.normal);
+        let back = self.substrate.as_ref().map(|s| slab_faces(self, s)[1].normal);
+        facet
+            .and_then(|n| unit(rotate(n, r)).ok())
+            .into_iter()
+            .chain([rotate([1., 0., 0.], r)])
+            .chain(back)
+            .collect()
     }
     /// Output ports: the region ports when regions are defined, else the kind's ports.
     pub(crate) fn ports(&self) -> Vec<&str> {
@@ -2996,6 +3014,7 @@ pub fn example() -> Bench {
         periscopes: vec![],
         zones: vec![],
         folds: vec![],
+        relays: vec![],
         max_interactions: 32,
         min_power: 1e-8,
     }

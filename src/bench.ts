@@ -165,10 +165,11 @@ export interface BenchBranch {
     /** Ordered output selections at intermediate elements with multiple nominal continuations. */
     via?: BenchPort[];
 }
-export type BenchAssertionUnit = 'mm' | 'um' | 'mrad' | 'fs' | 'rad';
+export type BenchAssertionUnit = 'mm' | 'um' | 'mrad' | 'fs' | 'rad' | 'count';
 export interface BenchAssertion {
     id: string;
-    kind: 'equal_opl' | 'colinear' | 'dispersion';
+    /** parity: reflection count modulo 2 of a branch listed twice, or the parity difference of two branches (unit count, target 0 or 1); image_rotation: signed rotation of the first branch's image relative to the second (rad or mrad). */
+    kind: 'equal_opl' | 'colinear' | 'dispersion' | 'parity' | 'image_rotation';
     /** Two distinct branch IDs. Equal OPL takes the first branch minus the second. */
     branches: [string, string];
     target: number;
@@ -198,8 +199,25 @@ export interface Bench {
     zones?: BenchZone[];
     /** Folded sections, measured along the trace like branches. */
     folds?: BenchBranch[];
+    /** Paraxial ABCD relays checked along branches. */
+    relays?: BenchRelay[];
     max_interactions: number;
     min_power: number;
+}
+export type BenchRelayCheckKind = 'conjugate' | 'magnification' | 'afocal' | 'strict_4f';
+export interface BenchRelay {
+    id: string;
+    branch: string;
+    /** Object plane before the branch's starting element (mm). */
+    object_distance_mm?: number;
+    /** Image plane after the branch's end element (mm). */
+    image_distance_mm?: number;
+    /** Aperture stop element (or source) on the branch; defaults to the first powered element. */
+    pupil_stop?: string;
+    /** Element at or after the stop the conjugate pupil is measured from; defaults to the branch end. */
+    pupil_target?: string;
+    /** `target` is used by magnification only; the other checks always target 0. */
+    checks: { kind: BenchRelayCheckKind; target?: number; tolerance: number }[];
 }
 export interface BenchLayer {
     id: string;
@@ -381,12 +399,49 @@ export interface BenchAssertionResult {
     branches: [string, string];
     /** Input endpoint of the second arm, at the comparison element. */
     at: BenchPort;
-    value: number | BenchSeparation | BenchDispersion | null;
+    value: number | BenchSeparation | BenchDispersion | BenchParity | null;
     unit: BenchAssertionUnit;
     target: number;
     tolerance: number;
     residual: number | null;
     status: 'pass' | 'fail' | 'unreachable';
+    break?: BenchPathBreak;
+}
+export interface BenchParity {
+    reflections: [number, number];
+    parity: number;
+}
+export interface BenchHandednessReading {
+    branch: string;
+    reflections: number;
+    parity: number;
+    /** +1 unmirrored, −1 mirrored. */
+    handedness: 1 | -1;
+    direction: Vec3;
+    basis: [Vec3, Vec3];
+}
+export interface BenchRelayReading {
+    id: string;
+    branch: string;
+    wavelength_nm: number | null;
+    /** [A, B (mm), C (1/mm), D]. */
+    abcd: [number, number, number, number] | null;
+    powered: { element: string; focal_mm: number; distance_mm: number }[];
+    image_gap_mm: number | null;
+    pupil_stop: string | null;
+    pupil_target: string | null;
+    /** Image of the stop plane measured from the target element (reduced mm, downstream positive). */
+    pupil_image_mm: number | null;
+    checks: {
+        kind: BenchRelayCheckKind;
+        value: number | null;
+        target: number;
+        tolerance: number;
+        residual: number | null;
+        passed: boolean;
+        deviations_mm?: [number, number, number];
+        break?: BenchPathBreak;
+    }[];
     break?: BenchPathBreak;
 }
 export interface BenchGlassPass {
@@ -468,6 +523,8 @@ export interface BenchLabCheck {
     periscopes?: BenchPeriscopeReading[];
     zones?: BenchZoneReading[];
     folds?: BenchFoldReading[];
+    handedness?: BenchHandednessReading[];
+    relays?: BenchRelayReading[];
     gaussian: { segments: BenchGaussianSegment[]; hits: BenchGaussianHit[]; units: 'mm' };
     recommended_beam_dumps: {
         branch: string;
@@ -727,8 +784,14 @@ export function benchProblems(value: unknown): string[] {
                 b.assertions.some(
                     (a) =>
                         typeof a.id !== 'string' ||
-                        !['equal_opl', 'colinear', 'dispersion'].includes(a.kind) ||
-                        !['mm', 'um', 'mrad', 'fs', 'rad'].includes(a.unit) ||
+                        ![
+                            'equal_opl',
+                            'colinear',
+                            'dispersion',
+                            'parity',
+                            'image_rotation',
+                        ].includes(a.kind) ||
+                        !['mm', 'um', 'mrad', 'fs', 'rad', 'count'].includes(a.unit) ||
                         (a.band_nm != null &&
                             (!Array.isArray(a.band_nm) ||
                                 a.band_nm.length !== 2 ||
@@ -740,6 +803,34 @@ export function benchProblems(value: unknown): string[] {
                         !Array.isArray(a.branches) ||
                         a.branches.length !== 2 ||
                         a.branches.some((branch) => typeof branch !== 'string'),
+                ))
+        )
+            throw Error();
+        if (
+            b.relays !== undefined &&
+            (!Array.isArray(b.relays) ||
+                b.relays.some(
+                    (r) =>
+                        typeof r.id !== 'string' ||
+                        typeof r.branch !== 'string' ||
+                        (r.object_distance_mm !== undefined &&
+                            !Number.isFinite(r.object_distance_mm)) ||
+                        (r.image_distance_mm !== undefined &&
+                            !Number.isFinite(r.image_distance_mm)) ||
+                        (r.pupil_stop !== undefined && typeof r.pupil_stop !== 'string') ||
+                        (r.pupil_target !== undefined && typeof r.pupil_target !== 'string') ||
+                        !Array.isArray(r.checks) ||
+                        r.checks.some(
+                            (c) =>
+                                !['conjugate', 'magnification', 'afocal', 'strict_4f'].includes(
+                                    c.kind,
+                                ) ||
+                                (c.target !== undefined &&
+                                    (!Number.isFinite(c.target) ||
+                                        (c.kind !== 'magnification' && c.target !== 0))) ||
+                                !Number.isFinite(c.tolerance) ||
+                                c.tolerance < 0,
+                        ),
                 ))
         )
             throw Error();

@@ -337,12 +337,17 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                             </span>
                             <span class="note">{{ result.branches.join(' / ') }}</span>
                             <span v-if="typeof result.value === 'number'">
-                                ΔOPL {{ reading(result.value) }}
+                                {{ result.kind === 'image_rotation' ? 'θ' : 'ΔOPL' }}
+                                {{ reading(result.value) }}
                                 {{ result.unit === 'um' ? 'µm' : result.unit }}
                             </span>
                             <span v-else-if="result.value && 'difference' in result.value">
                                 Δ {{ reading(result.value.difference) }} {{ result.unit }} @
                                 {{ reading(result.value.wavelength_nm) }} nm
+                            </span>
+                            <span v-else-if="result.value && 'parity' in result.value">
+                                {{ result.value.reflections.join(' / ') }} ·
+                                {{ result.value.parity }}
                             </span>
                             <span v-else-if="result.value">
                                 Δr {{ reading(result.value.position_mm) }} mm · Δθ
@@ -376,6 +381,81 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                             <small v-else class="assertion-detail note"
                                 >{{ result.at.element }} / {{ result.at.port }}</small
                             >
+                        </li>
+                    </ul>
+                </div>
+
+                <div
+                    v-if="labCheck.handedness?.length || labCheck.relays?.length"
+                    class="lab-section"
+                >
+                    <h4>{{ tr('benchLab.readings.optics') }}</h4>
+                    <ul class="lab-readings">
+                        <li
+                            v-for="hand in labCheck.handedness ?? []"
+                            :key="`hand:${hand.branch}`"
+                            :data-handedness-reading="hand.branch"
+                        >
+                            {{
+                                tr('benchLab.readings.handedness', {
+                                    branch: hand.branch,
+                                    count: hand.reflections,
+                                    hand: tr(
+                                        hand.handedness < 0
+                                            ? 'benchLab.readings.mirrored'
+                                            : 'benchLab.readings.upright',
+                                    ),
+                                })
+                            }}
+                        </li>
+                        <li
+                            v-for="relay in labCheck.relays ?? []"
+                            :key="`relay:${relay.id}`"
+                            :data-relay-reading="relay.id"
+                            :class="{ 'failed-assertion': relay.checks.some((c) => !c.passed) }"
+                        >
+                            <b>{{
+                                tr('benchLab.readings.relay', {
+                                    id: relay.id,
+                                    branch: relay.branch,
+                                })
+                            }}</b>
+                            <span v-if="relay.abcd"
+                                >A {{ reading(relay.abcd[0]) }} · B {{ reading(relay.abcd[1]) }} mm
+                                · C {{ reading(relay.abcd[2]) }} /mm · D
+                                {{ reading(relay.abcd[3]) }}</span
+                            >
+                            <span v-if="relay.pupil_image_mm !== null" class="note">{{
+                                tr('benchLab.readings.pupilImage', {
+                                    stop: relay.pupil_stop ?? '',
+                                    target: relay.pupil_target ?? '',
+                                    value: reading(relay.pupil_image_mm),
+                                })
+                            }}</span>
+                            <span
+                                v-for="check in relay.checks"
+                                :key="check.kind"
+                                :class="['badge', check.passed ? 'badge-ok' : 'badge-bad']"
+                                >{{ check.kind }}
+                                <template v-if="check.value !== null">{{
+                                    reading(check.value)
+                                }}</template></span
+                            >
+                            <span
+                                v-for="check in relay.checks.filter((c) => c.deviations_mm)"
+                                :key="`dev:${check.kind}`"
+                                class="note"
+                                >{{
+                                    tr('benchLab.readings.deviations', {
+                                        values: (check.deviations_mm ?? [])
+                                            .map((v) => reading(v))
+                                            .join(' / '),
+                                    })
+                                }}</span
+                            >
+                            <span v-if="relay.break" class="note">{{
+                                interruption(relay.break)
+                            }}</span>
                         </li>
                     </ul>
                 </div>
