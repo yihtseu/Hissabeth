@@ -88,6 +88,8 @@ export interface BenchElement {
     substrate?: BenchSubstrate | null;
     /** Scalar phase on transmitted outputs: exactly one of radians or waves. */
     phase?: BenchPhasePlate | null;
+    /** Height layer ID. Its height fixes Z, except on periscope mirrors. */
+    layer?: string | null;
 }
 export interface BenchSubstrate {
     material: string;
@@ -188,8 +190,36 @@ export interface Bench {
     stages?: BenchStage[];
     branches?: BenchBranch[];
     assertions?: BenchAssertion[];
+    /** Named beam heights (table-frame Z, mm). */
+    layers?: BenchLayer[];
+    /** Mirror pairs carrying the beam between heights through a vertical leg. */
+    periscopes?: BenchPeriscope[];
+    /** Table areas in table-frame XY (mm). */
+    zones?: BenchZone[];
+    /** Folded sections, measured along the trace like branches. */
+    folds?: BenchBranch[];
     max_interactions: number;
     min_power: number;
+}
+export interface BenchLayer {
+    id: string;
+    height_mm: number;
+}
+export interface BenchPeriscope {
+    id: string;
+    /** Lower mirror: turns the beam vertical. */
+    lower: string;
+    /** Upper mirror directly above: turns it back to horizontal. */
+    upper: string;
+}
+/** Exactly one of polygon_mm and rect. */
+export interface BenchZone {
+    id: string;
+    label?: string;
+    polygon_mm?: [number, number][] | null;
+    rect?: { min: [number, number]; max: [number, number] } | null;
+    /** Elements that must lie inside; when empty, the elements centred inside. */
+    members?: string[];
 }
 export type BenchInput = Omit<Bench, 'elements'> & { elements: BenchElementInput[] };
 
@@ -250,6 +280,7 @@ export interface BenchTrace {
     saved: boolean;
     segments: BenchSegment[];
     branches: BenchBranchReport[];
+    folds?: BenchBranchReport[];
     stage_poses?: Record<string, BenchStagePose>;
     terminations: {
         source: string;
@@ -382,6 +413,36 @@ export interface BenchAimResidual {
     angle_mrad: number | null;
     break?: BenchPathBreak;
 }
+export interface BenchPeriscopeReading {
+    id: string;
+    exit_height_mm: number | null;
+    exit_direction: Vec3 | null;
+    /** Smallest gap between the two legs and another element's body disc or mount (mm). */
+    min_clearance_mm: number | null;
+    nearest_element: string | null;
+    /** Elements within the source's beam radius of a leg. */
+    conflicts: string[];
+    break?: BenchPathBreak;
+}
+export interface BenchZoneReading {
+    id: string;
+    label: string;
+    area_mm2: number;
+    bounds_mm: [[number, number], [number, number]];
+    members: string[];
+    out_of_bounds: string[];
+}
+export interface BenchFoldReading {
+    id: string;
+    paths: {
+        source: string;
+        wavelength_nm: number;
+        length_mm: number;
+        opl_mm: number;
+        break?: BenchPathBreak;
+    }[];
+    break?: BenchPathBreak;
+}
 export interface BenchLabCheck {
     revision: number;
     saved: boolean;
@@ -404,6 +465,9 @@ export interface BenchLabCheck {
         break?: BenchPathBreak;
     }[];
     assertions: BenchAssertionResult[];
+    periscopes?: BenchPeriscopeReading[];
+    zones?: BenchZoneReading[];
+    folds?: BenchFoldReading[];
     gaussian: { segments: BenchGaussianSegment[]; hits: BenchGaussianHit[]; units: 'mm' };
     recommended_beam_dumps: {
         branch: string;

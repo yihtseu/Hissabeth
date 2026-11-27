@@ -135,6 +135,7 @@ interface ToolMap {
             warnings: string[];
             conflicts: import('./bench').BenchPort[];
             residuals: import('./bench').BenchAimResidual[];
+            periscopes?: import('./bench').BenchPeriscopeReading[];
             applied: boolean;
             revision?: number;
         };

@@ -19,6 +19,8 @@ use std::{
 
 #[path = "bench_alignment.rs"]
 mod alignment_solver;
+#[path = "bench_layout.rs"]
+mod layout;
 use alignment_solver::{AimResidual, Combiner, Separation, measure};
 
 const FORK_REACH: f64 = 22.;
@@ -406,6 +408,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         regions: vec![],
         substrate: None,
         phase: None,
+        layer: None,
     }
 }
 
@@ -680,6 +683,9 @@ pub(crate) struct AimResult {
     warnings: Vec<String>,
     conflicts: Vec<Port>,
     residuals: Vec<AimResidual>,
+    /// Beam clearance of each periscope on the aimed bench.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    periscopes: Vec<layout::PeriscopeReading>,
 }
 
 pub(crate) fn aim(
@@ -712,6 +718,7 @@ pub(crate) fn aim(
             element.position[2] = z;
         }
     }
+    place_layers(&mut scene, &stage_members);
     let indices: HashMap<_, _> = scene
         .elements
         .iter()
@@ -802,8 +809,52 @@ pub(crate) fn aim(
         }
     }
     scene.validate_draft()?;
-    let (conflicts, residuals) =
+    let (mut conflicts, residuals) =
         alignment_solver::align(&mut scene, &bench, system, &combiners, &adjustable)?;
+    // Stage members keep their stage pose, so one off its layer height cannot be
+    // aimed onto the layer: refuse instead of returning a bench that fails to trace.
+    // Periscope mirrors are exempt from their layer height, as in validation.
+    let mirrors: HashSet<&String> = scene.periscopes.iter().flat_map(|p| [&p.lower, &p.upper]).collect();
+    for e in scene.elements.iter().filter(|e| stage_members.contains(&e.id) && !mirrors.contains(&e.id)) {
+        if let Some(height) = scene.layer_height(e)
+            && (e.position[2] - height).abs() > 1e-9
+        {
+            warnings.push(format!(
+                "{}: stage member sits at Z = {} mm, off layer {} at {height} mm",
+                e.id,
+                e.position[2],
+                e.layer.as_deref().unwrap_or_default()
+            ));
+            conflicts.push(Port::new(&e.id, "layer"));
+        }
+    }
+    // A periscope must rise vertically and leave level onto its target.
+    let mut periscopes = vec![];
+    if conflicts.is_empty() && !scene.periscopes.is_empty() {
+        match center_trace(&scene, system) {
+            Ok(trace) => match scene.trace(system) {
+                Ok(full) => periscopes = layout::periscopes(&scene, system, &trace, &full),
+                Err(error) => {
+                    warnings.push(format!("periscope geometry not traced: {error}"));
+                    for p in &scene.periscopes {
+                        conflicts.push(Port::new(&p.upper, "reflected"));
+                    }
+                }
+            },
+            Err(error) => {
+                warnings.push(format!("periscope geometry not traced: {error}"));
+                for p in &scene.periscopes {
+                    conflicts.push(Port::new(&p.upper, "reflected"));
+                }
+            }
+        }
+        for reading in &periscopes {
+            if let Some(stop) = &reading.interruption {
+                warnings.push(format!("periscope {}: {} at {}", reading.id, stop.reason, stop.element));
+                conflicts.push(Port::new(&stop.element, &stop.port));
+            }
+        }
+    }
     let ok = conflicts.is_empty();
     let mut adjusted_elements = vec![];
     if ok {
@@ -822,7 +873,59 @@ pub(crate) fn aim(
         warnings,
         conflicts,
         residuals,
+        periscopes,
     })
+}
+
+/// Holds layered elements at their layer height and stands each periscope's upper
+/// mirror directly above its lower mirror. A periscope mirror without a layer
+/// takes the height of the beam it exchanges with the rest of the bench: the
+/// lower mirror its upstream neighbour's, the upper mirror its downstream one's.
+fn place_layers(scene: &mut Bench, fixed: &HashSet<&String>) {
+    let mirrors: HashSet<String> = scene.periscopes.iter()
+        .flat_map(|p| [p.lower.clone(), p.upper.clone()])
+        .collect();
+    let heights: Vec<_> = scene.elements.iter().map(|e| scene.layer_height(e)).collect();
+    for (e, height) in scene.elements.iter_mut().zip(heights) {
+        if let Some(z) = height
+            && !fixed.contains(&e.id)
+            && !mirrors.contains(&e.id)
+        {
+            e.position[2] = z;
+        }
+    }
+    let position = |scene: &Bench, id: &str| {
+        scene.elements.iter().map(|e| (&e.id, e.position))
+            .chain(scene.sources.iter().map(|s| (&s.id, s.position)))
+            .find(|(i, _)| *i == id)
+            .map(|(_, p)| p)
+    };
+    for p in scene.periscopes.clone() {
+        let (Some(lo), Some(up)) = (
+            scene.elements.iter().position(|e| e.id == p.lower),
+            scene.elements.iter().position(|e| e.id == p.upper),
+        ) else {
+            continue;
+        };
+        let upstream = scene.connections.iter()
+            .find(|c| c.to == p.lower)
+            .and_then(|c| position(scene, &c.from));
+        let downstream = scene.connections.iter()
+            .find(|c| c.from == p.upper && c.port == "reflected")
+            .and_then(|c| position(scene, &c.to));
+        if !fixed.contains(&p.lower)
+            && let Some(z) = scene.layer_height(&scene.elements[lo]).or(upstream.map(|u| u[2]))
+        {
+            scene.elements[lo].position[2] = z;
+        }
+        if !fixed.contains(&p.upper) {
+            let base = scene.elements[lo].position;
+            let z = scene.layer_height(&scene.elements[up])
+                .or(downstream.map(|d| d[2]))
+                .unwrap_or(scene.elements[up].position[2]);
+            scene.elements[up].position = [base[0], base[1], z];
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -923,6 +1026,14 @@ impl Envelope<'_> {
             units: "mm",
         }
     }
+}
+
+/// Periscope readings off the bench's centre rays (see [`layout::periscopes`]).
+fn periscope_readings(bench: &Bench, system: &System, full: &Trace) -> Vec<layout::PeriscopeReading> {
+    if bench.periscopes.is_empty() {
+        return vec![];
+    }
+    center_trace(bench, system).map(|trace| layout::periscopes(bench, system, &trace, full)).unwrap_or_default()
 }
 
 fn center_trace(bench: &Bench, system: &System) -> Result<Trace, String> {
@@ -1366,6 +1477,12 @@ struct LabReadings {
     stages: Vec<StageReading>,
     branches: Vec<BranchReading>,
     assertions: Vec<AssertionResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    periscopes: Vec<layout::PeriscopeReading>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    zones: Vec<layout::ZoneReading>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folds: Vec<layout::FoldReading>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -1736,6 +1853,9 @@ fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
             interruption: report.interruption.clone(),
         }).collect(),
         assertions: check_assertions(bench, system, trace),
+        periscopes: periscope_readings(bench, system, trace),
+        zones: layout::zones(bench),
+        folds: layout::folds(trace),
     }
 }
 
@@ -1846,6 +1966,37 @@ fn lab_report(
             None,
             warning.into(),
         ));
+    }
+    for zone in layout::zones(bench) {
+        for id in &zone.out_of_bounds {
+            issues.push(issue(
+                "error",
+                "zone_bounds",
+                Some(id),
+                None,
+                format!("{id}: footprint extends outside zone {}", zone.id),
+            ));
+        }
+    }
+    for periscope in periscope_readings(bench, system, trace) {
+        if let Some(stop) = &periscope.interruption {
+            issues.push(issue(
+                "error",
+                "periscope_geometry",
+                Some(&stop.element),
+                None,
+                format!("periscope {}: {} at {}", periscope.id, stop.reason, stop.element),
+            ));
+        }
+        for id in &periscope.conflicts {
+            issues.push(issue(
+                "error",
+                "periscope_clearance",
+                Some(id),
+                None,
+                format!("{id}: within the beam radius of periscope {}", periscope.id),
+            ));
+        }
     }
     for source in &bench.sources {
         let p = sub(source.position, bench.origin);
@@ -2842,6 +2993,7 @@ pub(crate) fn export_blueprint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::optics::bench::{HeightLayer, Periscope, Zone, ZoneRect};
     #[test]
     fn unexpected_hit_on_a_region_plate_is_reported_not_an_internal_error() {
         let mut bench = template("three_arm").unwrap();
@@ -4123,5 +4275,404 @@ mod tests {
             assert!(sop.contains(&format!("## {section}")));
         }
         assert!(sop.contains("1. [ ] **S1**."));
+    }
+
+    fn layered_bench(elements: Vec<Element>, edges: &[(&str, &str, &str)]) -> Bench {
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.branches.clear();
+        bench.elements = elements;
+        bench.connections = edges.iter().map(|&(from, port, to)| Connection {
+            from: from.into(),
+            port: port.into(),
+            to: to.into(),
+        }).collect();
+        bench
+    }
+
+    fn aimed(id: &str, hardware: Hardware, position: V3) -> Element {
+        Element { rotation: None, ..mount_element(id, hardware, position, [1., 0., 0.]) }
+    }
+
+    #[test]
+    fn periscope_raises_the_beam_between_layers_with_exact_clearance() {
+        let system = System::default();
+        let on = |mut e: Element, layer: &str| {
+            e.layer = Some(layer.into());
+            e
+        };
+        let d = 20.;
+        let mut bench = layered_bench(
+            vec![
+                on(aimed("PL", MIRROR, [300., 200., 60.]), "H1"),
+                on(aimed("PU", MIRROR, [310., 215., 100.]), "H2"),
+                on(mount_element("D", DETECTOR, [500., 200., 100.], [1., 0., 0.]), "H2"),
+                on(mount_element("O", DETECTOR, [300. + d, 200., 90.], [1., 0., 0.]), "H1"),
+            ],
+            &[("S1", "out", "PL"), ("PL", "reflected", "PU"), ("PU", "reflected", "D")],
+        );
+        bench.layers = vec![
+            HeightLayer { id: "H1".into(), height_mm: 75. },
+            HeightLayer { id: "H2".into(), height_mm: 145. },
+        ];
+        bench.periscopes = vec![Periscope { id: "P".into(), lower: "PL".into(), upper: "PU".into() }];
+        let result = aim(&bench, false, None, &system).unwrap();
+        assert!(result.ok, "{:?} {:?}", result.conflicts, result.warnings);
+        let placed = |id: &str| result.bench.elements.iter().find(|e| e.id == id).unwrap().position;
+        assert_eq!(placed("PL"), [300., 200., 75.]);
+        assert_eq!(placed("PU"), [300., 200., 145.]);
+        assert_eq!(placed("D")[2], 145.);
+        assert_eq!(placed("O")[2], 75.);
+        let reading = &result.periscopes[0];
+        assert!(reading.interruption.is_none());
+        assert!((reading.exit_height_mm.unwrap() - 145.).abs() < 1e-9);
+        let direction = reading.exit_direction.unwrap();
+        assert!((direction[0] - 1.).abs() < 1e-9 && direction[1].abs() < 1e-9 && direction[2].abs() < 1e-9);
+        // O faces +x 20 mm from the vertical leg: its body disc is 20 mm away;
+        // its 25 mm mount box (top at 75 − 18 mm) is 7.5 mm out and 18 mm below
+        // the leg's foot, which is nearer.
+        let table = result.bench.origin[2];
+        let mount_gap = (d - 12.5_f64).hypot(75. - (75. - 18. - table) - table);
+        assert!(mount_gap < d);
+        // The receiver D's optical face is exempt, but its mount (top 18 mm below the
+        // exit beam where it lands) still counts, and is nearer than O.
+        assert!((reading.min_clearance_mm.unwrap() - 18.).abs() < 1e-9, "{:?}", reading.min_clearance_mm);
+        assert_eq!(reading.nearest_element.as_deref(), Some("D"));
+        assert!(reading.conflicts.is_empty());
+        let trace = result.bench.trace(&system).unwrap();
+        let mut bare = result.bench.clone();
+        bare.elements[2].mount = None;
+        let without_d = &layout::periscopes(&bare, &system, &center_trace(&bare, &system).unwrap(), &bare.trace(&system).unwrap())[0];
+        assert!((without_d.min_clearance_mm.unwrap() - mount_gap).abs() < 1e-9, "{:?}", without_d.min_clearance_mm);
+        assert_eq!(without_d.nearest_element.as_deref(), Some("O"));
+        let detected = trace.terminations.iter().find(|t| t.reason == "detected").unwrap();
+        assert_eq!(detected.element.as_deref(), Some("D"));
+        // Within the 0.7 mm beam radius of the vertical leg: a conflict.
+        let mut close = result.bench.clone();
+        close.elements[3].position[0] = 300.3;
+        let readings = layout::periscopes(&close, &system, &center_trace(&close, &system).unwrap(), &close.trace(&system).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 0.3).abs() < 1e-9);
+        assert_eq!(readings[0].conflicts, ["O"]);
+        let check = lab_check(&close, &system).unwrap();
+        assert!(check["issues"].as_array().unwrap().iter().any(|i| i["code"] == "periscope_clearance"));
+        // A mount standing in the exit leg blocks it: reported, and counted at zero gap.
+        let mut blocked = result.bench.clone();
+        blocked.elements.push(mount_element("B", DETECTOR, [400., 200., 200.], [1., 0., 0.]));
+        let readings = layout::periscopes(&blocked, &system, &center_trace(&blocked, &system).unwrap(), &blocked.trace(&system).unwrap());
+        let stop = readings[0].interruption.as_ref().unwrap();
+        assert_eq!((stop.element.as_str(), stop.reason.as_str()), ("PU", "periscope_leg_blocked"));
+        assert!(readings[0].conflicts.contains(&"B".to_string()), "{:?}", readings[0].conflicts);
+        // Solid bodies: a 10 mm slab facing +y whose front face is 10.5 mm beside the
+        // exit leg reaches to 0.5 mm of it (a disc model would say 10.5 mm).
+        let mut slab = result.bench.clone();
+        let mut b = plate("B", [400., 210.5, 145.], [0., 1., 0.], 10.);
+        (b.mount, b.body_radius) = (None, 18.);
+        slab.elements.push(b);
+        let readings = layout::periscopes(&slab, &system, &center_trace(&slab, &system).unwrap(), &slab.trace(&system).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 0.5).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert_eq!(readings[0].conflicts, ["B"]);
+        // Review counterexample: a slab across the exit leg whose back face the tracer
+        // strikes first is touching it, even though its front face is 10 mm on.
+        let mut across = result.bench.clone();
+        let mut b = plate("B", [400., 200., 150.], [1., 0., 0.], 10.);
+        (b.mount, b.body_radius) = (None, 18.);
+        across.elements.push(b);
+        let readings = layout::periscopes(&across, &system, &center_trace(&across, &system).unwrap(), &across.trace(&system).unwrap());
+        assert_eq!(readings[0].min_clearance_mm, Some(0.));
+        assert!(readings[0].conflicts.contains(&"B".to_string()), "{:?}", readings[0].conflicts);
+        // Every source's legs count, whatever order the sources are listed in: O 3 mm
+        // from the vertical leg clears S1's 0.7 mm beam but not S2's 4 mm one.
+        let mut two = result.bench.clone();
+        two.elements[3].position[0] = 303.;
+        let mut wide = two.sources[0].clone();
+        (wide.id, wide.beam_radius) = ("S2".into(), 4.);
+        two.sources.push(wide);
+        two.connections.push(Connection { from: "S2".into(), port: "out".into(), to: "PL".into() });
+        for order in [false, true] {
+            if order {
+                two.sources.reverse();
+            }
+            let readings = layout::periscopes(&two, &system, &center_trace(&two, &system).unwrap(), &two.trace(&system).unwrap());
+            assert_eq!(readings[0].conflicts, ["O"], "reversed: {order}");
+            assert!((readings[0].min_clearance_mm.unwrap() - 3.).abs() < 1e-9);
+        }
+        // A wedge is its exact slab, not the cylinder around its thick edge (review 3):
+        // 20 mm, 45°, facing +y; the exit axis is at local x = −38.5, z = 18.
+        let mut wedged = result.bench.clone();
+        let mut b = plate("B", [400., 238.5, 127.], [0., 1., 0.], 20.);
+        (b.mount, b.body_radius) = (None, 18.);
+        b.substrate.as_mut().unwrap().wedge_deg = Some(45.);
+        wedged.elements.push(b);
+        let readings = layout::periscopes(&wedged, &system, &center_trace(&wedged, &system).unwrap(), &wedged.trace(&system).unwrap());
+        let exact = 18.5_f64.hypot(18.) - 18.;
+        let b_gap = {
+            let mut alone = wedged.clone();
+            alone.elements.retain(|e| ["PL", "PU", "B"].contains(&e.id.as_str()));
+            alone.connections.retain(|c| c.to != "D");
+            let trace = center_trace(&wedged, &system).unwrap();
+            layout::periscopes(&alone, &system, &trace, &wedged.trace(&system).unwrap())[0].min_clearance_mm.unwrap()
+        };
+        assert!((b_gap - exact).abs() < 1e-9, "{b_gap} vs {exact}");
+        assert!(!readings[0].conflicts.contains(&"B".to_string()));
+        // One source split into two arms that both ride the periscope: the second arm
+        // (y = 203) passes 0.5 mm from O, the first (y = 200) 3.5 mm.
+        let mut split = result.bench.clone();
+        let source_z = split.sources[0].position[2];
+        let mut bs = mount_element("BS", SPLITTER, [200., 200., source_z], [-1., 1., 0.]);
+        let mut turn = mount_element("M", MIRROR, [200., 203., source_z], [1., -1., 0.]);
+        for e in [&mut bs, &mut turn] {
+            (e.mount, e.body_radius, e.aperture) = (None, 1., 1.);
+        }
+        split.elements.extend([bs, turn]);
+        let o = &mut split.elements[3];
+        (o.mount, o.body_radius, o.layer, o.position) = (None, 18., None, [300., 203.5, 110.]);
+        o.rotation = Some(normal_rotation([0., 1., 0.]));
+        split.connections.retain(|c| c.to != "PL");
+        split.connections.extend([
+            Connection { from: "S1".into(), port: "out".into(), to: "BS".into() },
+            Connection { from: "BS".into(), port: "transmitted".into(), to: "PL".into() },
+            Connection { from: "BS".into(), port: "reflected".into(), to: "M".into() },
+            Connection { from: "M".into(), port: "reflected".into(), to: "PL".into() },
+        ]);
+        let readings = layout::periscopes(&split, &system, &center_trace(&split, &system).unwrap(), &split.trace(&system).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 0.5).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert_eq!(readings[0].conflicts, ["O"]);
+        // A lens group's air gap is free (review 4): flat glass pieces at axial
+        // [0, 5] and [95, 100] mm facing +y from y = 150; the exit axis is at 50.
+        let mut grouped = result.bench.clone();
+        let mut g = mount_element("G", MIRROR, [400., 150., 145.], [0., 1., 0.]);
+        (g.kind, g.mount, g.body_radius, g.reflectance) = (Kind::LensGroup, None, 18., 0.);
+        grouped.elements.push(g);
+        let prescription = System {
+            surfaces: [(5., "N-BK7_SCHOTT"), (90., "AIR"), (5., "N-BK7_SCHOTT"), (50., "AIR")]
+                .map(|(thickness, material)| super::super::Surface::sphere(0., thickness, material, 18.))
+                .into(),
+            ..System::default()
+        };
+        let readings = layout::periscopes(&grouped, &prescription, &center_trace(&grouped, &prescription).unwrap(), &grouped.trace(&prescription).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 18.).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert!(!readings[0].conflicts.contains(&"G".to_string()));
+        let mut alone = grouped.clone();
+        alone.elements.retain(|e| ["PL", "PU", "G"].contains(&e.id.as_str()));
+        let g_gap = layout::periscopes(&alone, &prescription, &center_trace(&grouped, &prescription).unwrap(), &grouped.trace(&prescription).unwrap())[0]
+            .min_clearance_mm.unwrap();
+        assert!((g_gap - 45.).abs() < 1e-9, "{g_gap}");
+        // An unlit region's zero-power probe rides the periscope too (review 4): only
+        // the lit arm (y = 200, 3.5 mm from O) counts, not the dark one at y = 203.
+        let mut masked = result.bench.clone();
+        let mut a = mount_element("A", MASK, [200., 200., source_z], [1., 0., 0.]);
+        (a.mount, a.body_radius, a.aperture) = (None, 6., 6.);
+        a.regions = [("C", 0.), ("R", 3.)].map(|(port, y)| Region {
+            port: port.into(),
+            shape: RegionShape::Circle { center: [y, 0.], radius: 1. },
+            transmittance: 1.,
+            normal: None,
+        }).into();
+        masked.elements.push(a);
+        let o = &mut masked.elements[3];
+        (o.mount, o.body_radius, o.layer, o.position) = (None, 18., None, [300., 203.5, 110.]);
+        o.rotation = Some(normal_rotation([0., 1., 0.]));
+        masked.connections.retain(|c| c.to != "PL");
+        masked.connections.extend([
+            Connection { from: "S1".into(), port: "out".into(), to: "A".into() },
+            Connection { from: "A".into(), port: "C".into(), to: "PL".into() },
+            Connection { from: "A".into(), port: "R".into(), to: "PL".into() },
+        ]);
+        let trace = center_trace(&masked, &system).unwrap();
+        assert!(trace.segments.iter().any(|s| s.power == 0. && s.flight.as_ref().is_some_and(|f| f.from_element == "PL")));
+        let readings = layout::periscopes(&masked, &system, &trace, &masked.trace(&system).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 3.5).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert!(readings[0].conflicts.is_empty(), "{:?}", readings[0].conflicts);
+        // Review 5: a 3 mm beam whose first ring (y = +3) lights R. R's centre ray is
+        // a zero-power probe in the centre trace, but its beam carries power in the
+        // full trace, so its leg at y = 203 counts: 0.5 mm from O.
+        let mut ringed = masked.clone();
+        (ringed.sources[0].beam_radius, ringed.sources[0].rings) = (3., 1);
+        let readings = layout::periscopes(&ringed, &system, &center_trace(&ringed, &system).unwrap(), &ringed.trace(&system).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 0.5).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert_eq!(readings[0].conflicts, ["O"]);
+        // Review 5: curved glass is its real shape. A plano-convex group (R = +20,
+        // 15 mm BK7) facing +y from (400, 199, 128): the exit axis is at local
+        // x = 1, z = 17, and its nearest glass is on the sphere, √(19² + 17²) − 20 away.
+        let mut convex = result.bench.clone();
+        let mut g = mount_element("G", MIRROR, [400., 199., 128.], [0., 1., 0.]);
+        (g.kind, g.mount, g.body_radius, g.aperture, g.reflectance) = (Kind::LensGroup, None, 18., 18., 0.);
+        convex.elements.push(g);
+        let lens = System {
+            surfaces: vec![
+                super::super::Surface::sphere(20., 15., "N-BK7_SCHOTT", 18.),
+                super::super::Surface::sphere(0., 50., "AIR", 18.),
+            ],
+            ..System::default()
+        };
+        let mut alone = convex.clone();
+        alone.elements.retain(|e| ["PL", "PU", "G"].contains(&e.id.as_str()));
+        let readings = layout::periscopes(&alone, &lens, &center_trace(&convex, &lens).unwrap(), &convex.trace(&lens).unwrap());
+        let exact = 19_f64.hypot(17.) - 20.;
+        assert!((readings[0].min_clearance_mm.unwrap() - exact).abs() < 1e-9, "{:?} vs {exact}", readings[0].min_clearance_mm);
+        assert!(readings[0].conflicts.is_empty());
+        // Review 6: glass that is not a solid of revolution. A cylindrical first
+        // face (toroid with flat revolution) bulging along local z only, at
+        // (400, 200.5, 145) facing +y: the exit axis runs at local x = −0.5, z = 0,
+        // and all glass has x ≥ 0 with the vertex (0, 0, 0) on it, so 0.5 mm away,
+        // inside the 0.7 mm beam.
+        let mut cylinder = result.bench.clone();
+        let mut g = mount_element("G", MIRROR, [400., 200.5, 145.], [0., 1., 0.]);
+        (g.kind, g.mount, g.body_radius, g.aperture, g.reflectance) = (Kind::LensGroup, None, 18., 18., 0.);
+        cylinder.elements.push(g);
+        let mut front = super::super::Surface::sphere(20., 15., "N-BK7_SCHOTT", 18.);
+        front.toroid = Some(super::super::Toroid { revolution: 0., even_y: vec![] });
+        let lens = System {
+            surfaces: vec![front, super::super::Surface::sphere(0., 50., "AIR", 18.)],
+            ..System::default()
+        };
+        let readings = layout::periscopes(&cylinder, &lens, &center_trace(&cylinder, &lens).unwrap(), &cylinder.trace(&lens).unwrap());
+        assert!((readings[0].min_clearance_mm.unwrap() - 0.5).abs() < 1e-9, "{:?}", readings[0].min_clearance_mm);
+        assert!(readings[0].conflicts.contains(&"G".to_string()), "{:?}", readings[0].conflicts);
+        // Review 7: a cylindrical face of radius 10 on an 18 mm body ends at |z| = 10,
+        // so the glass has flat side walls there; the exit axis at local z = −10.5
+        // passes 0.5 mm from one. Such glass is not measured: the reading says so,
+        // and names G as a conflict (auto-aim turns the interruption into a conflict).
+        let mut walled = result.bench.clone();
+        let mut g = mount_element("G", MIRROR, [280., 200., 155.5], [1., 0., 0.]);
+        (g.kind, g.mount, g.body_radius, g.aperture, g.reflectance) = (Kind::LensGroup, None, 18., 9., 0.);
+        walled.elements.push(g);
+        let mut front = super::super::Surface::sphere(10., 300., "N-BK7_SCHOTT", 9.);
+        front.toroid = Some(super::super::Toroid { revolution: 0., even_y: vec![] });
+        let lens = System {
+            surfaces: vec![front, super::super::Surface::sphere(0., 50., "AIR", 9.)],
+            ..System::default()
+        };
+        let readings = layout::periscopes(&walled, &lens, &center_trace(&walled, &lens).unwrap(), &walled.trace(&lens).unwrap());
+        let stop = readings[0].interruption.as_ref().unwrap();
+        assert_eq!((stop.element.as_str(), stop.reason.as_str()), ("G", "periscope_clearance_unresolved"));
+        assert!(readings[0].conflicts.contains(&"G".to_string()), "{:?}", readings[0].conflicts);
+        // A periscope mirror on a stage keeps its layer exemption.
+        let mut staged_mirror = result.bench.clone();
+        let pu = staged_mirror.elements[1].clone();
+        staged_mirror.elements[1].layer = Some("H1".into());
+        staged_mirror.stages.push(Stage {
+            id: "st".into(),
+            members: vec!["PU".into()],
+            reference_pose: [("PU".to_string(), StagePose { position: pu.position, rotation: pu.rotation() })].into(),
+            axis: [1., 0., 0.],
+            travel: [-5., 5.],
+            position_mm: 0.,
+            pzt: None,
+        });
+        let kept = aim(&staged_mirror, false, None, &system).unwrap();
+        assert!(kept.ok, "{:?} {:?}", kept.conflicts, kept.warnings);
+        // A stage member off its layer height cannot be aimed onto it: refused.
+        let mut staged = bench.clone();
+        staged.stages.push(Stage {
+            id: "st".into(),
+            members: vec!["D".into()],
+            reference_pose: [("D".to_string(), StagePose { position: [500., 200., 100.], rotation: [0., 0., 0.] })].into(),
+            axis: [1., 0., 0.],
+            travel: [-5., 5.],
+            position_mm: 0.,
+            pzt: None,
+        });
+        let refused = aim(&staged, false, None, &system).unwrap();
+        assert!(!refused.ok);
+        assert!(refused.conflicts.contains(&Port::new("D", "layer")), "{:?}", refused.conflicts);
+        // A target on the lower layer would leave the upper mirror tilted down: refused.
+        let mut tilted = bench.clone();
+        tilted.elements[2].layer = Some("H1".into());
+        let refused = aim(&tilted, false, None, &system).unwrap();
+        assert!(!refused.ok);
+        assert!(refused.conflicts.contains(&Port::new("PU", "reflected")), "{:?}", refused.conflicts);
+        assert_eq!(refused.periscopes[0].interruption.as_ref().unwrap().reason, "periscope_exit_not_level");
+        // A layered element off its layer height fails validation.
+        let mut off = result.bench.clone();
+        off.elements[2].position[2] = 140.;
+        assert!(off.validate().unwrap_err().contains("layer H2"));
+        let mut broken = result.bench.clone();
+        broken.periscopes[0].upper = "D".into();
+        assert!(broken.validate().unwrap_err().contains("Invalid periscope"));
+    }
+
+    #[test]
+    fn fold_length_follows_the_four_mirror_trace() {
+        let system = System::default();
+        let points = [[300., 200., 75.], [300., 320., 75.], [420., 320., 75.], [420., 200., 75.], [600., 200., 75.]];
+        let mut bench = layered_bench(
+            vec![
+                aimed("M1", MIRROR, points[0]),
+                aimed("M2", MIRROR, points[1]),
+                aimed("M3", MIRROR, points[2]),
+                aimed("M4", MIRROR, points[3]),
+                mount_element("D", DETECTOR, points[4], [1., 0., 0.]),
+            ],
+            &[
+                ("S1", "out", "M1"),
+                ("M1", "reflected", "M2"),
+                ("M2", "reflected", "M3"),
+                ("M3", "reflected", "M4"),
+                ("M4", "reflected", "D"),
+            ],
+        );
+        bench.folds = vec![Branch {
+            id: "delay".into(),
+            from: Port::new("M1", "reflected"),
+            to: Port::new("D", "in"),
+            via: vec![],
+        }];
+        let result = aim(&bench, false, None, &system).unwrap();
+        assert!(result.ok, "{:?}", result.conflicts);
+        let expected: f64 = points.windows(2).map(|w| norm(sub(w[1], w[0]))).sum();
+        let trace = result.bench.trace(&system).unwrap();
+        let path = &trace.folds[0].paths[0];
+        assert!(path.interruption.is_none(), "{:?}", path.interruption);
+        assert!((path.length_mm - expected).abs() < 1e-9, "{} vs {expected}", path.length_mm);
+        let check = lab_check(&result.bench, &system).unwrap();
+        let fold = &check["folds"][0];
+        assert_eq!(fold["id"], "delay");
+        assert!((fold["paths"][0]["length_mm"].as_f64().unwrap() - expected).abs() < 1e-9);
+        let mut repeated = result.bench.clone();
+        repeated.folds.push(repeated.folds[0].clone());
+        assert!(repeated.validate().unwrap_err().contains("repeated fold"));
+        let mut wrong_port = result.bench.clone();
+        wrong_port.folds[0].to.port = "b".into();
+        assert!(wrong_port.validate().unwrap_err().contains("arrives at input D / in"));
+    }
+
+    #[test]
+    fn zone_reports_area_and_members_outside_it() {
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.zones = vec![
+            Zone {
+                id: "arms".into(),
+                label: "Interferometer arms".into(),
+                polygon_mm: None,
+                rect: Some(ZoneRect { min: [200., 150.], max: [500., 400.] }),
+                members: vec!["BS1".into(), "M1".into()],
+            },
+            Zone {
+                id: "detect".into(),
+                label: String::new(),
+                polygon_mm: Some(vec![[600., 350.], [700., 350.], [700., 450.], [600., 450.]]),
+                rect: None,
+                members: vec![],
+            },
+        ];
+        let zones = layout::zones(&bench);
+        assert_eq!(zones[0].area_mm2, 300. * 250.);
+        assert_eq!(zones[0].bounds_mm, [[200., 150.], [500., 400.]]);
+        // M1 sits on the top edge (y = 400): half its mount base is outside.
+        assert_eq!(zones[0].out_of_bounds, ["M1"]);
+        assert_eq!(zones[1].members, ["D1"]);
+        assert!(zones[1].out_of_bounds.is_empty());
+        let check = lab_check(&bench, &system).unwrap();
+        let issues = check["issues"].as_array().unwrap();
+        assert!(issues.iter().any(|i| i["code"] == "zone_bounds" && i["element_id"] == "M1"));
+        assert_eq!(check["zones"][1]["members"][0], "D1");
+        let mut crossed = bench.clone();
+        crossed.zones[1].polygon_mm = Some(vec![[600., 350.], [700., 450.], [700., 350.], [600., 450.]]);
+        assert!(crossed.validate().unwrap_err().contains("Invalid zone"));
+        let mut unknown = bench.clone();
+        unknown.zones[0].members.push("nope".into());
+        assert!(unknown.validate().unwrap_err().contains("Invalid zone"));
     }
 }

@@ -90,6 +90,62 @@ const entity = computed(() => allEntities.value.find((e) => e.id === selected.va
 const selectedStage = computed(() =>
     scene.value?.stages?.find((stage) => stage.members.includes(selected.value)),
 );
+/** Height-layer filter: elements on other layers are dimmed. */
+const layerFilter = ref('');
+const periscopeMirrors = computed(
+    () => new Set((scene.value?.periscopes ?? []).flatMap((p) => [p.lower, p.upper])),
+);
+/** A layered element's Z follows its layer, except on periscope mirrors. */
+const zLocked = computed(() => {
+    const e = entity.value;
+    return !!e && 'kind' in e && !!e.layer && !periscopeMirrors.value.has(e.id);
+});
+function setLayer(e: BenchElement, id: string) {
+    e.layer = id || null;
+    const layer = scene.value?.layers?.find((l) => l.id === id);
+    if (layer && !periscopeMirrors.value.has(e.id)) e.position[2] = layer.height_mm;
+    schedulePreview();
+}
+/** Zone outlines on the table surface. */
+const zoneOutlines = computed(() => {
+    const b = scene.value;
+    if (!b) return [];
+    const z = b.origin[2];
+    return (b.zones ?? []).map((zone) => {
+        const pts: [number, number][] =
+            zone.polygon_mm ??
+            (zone.rect
+                ? [
+                      zone.rect.min,
+                      [zone.rect.max[0], zone.rect.min[1]],
+                      zone.rect.max,
+                      [zone.rect.min[0], zone.rect.max[1]],
+                  ]
+                : []);
+        const ring = pts.map(([x, y]) => [x, y, z] as Vec3);
+        const c = pts.reduce(
+            (a, p) => [a[0] + p[0] / pts.length, a[1] + p[1] / pts.length],
+            [0, 0],
+        );
+        return {
+            id: zone.id,
+            label: zone.label || zone.id,
+            points: path([...ring, ...ring.slice(0, 1)]),
+            center: project([c[0], c[1], z]),
+            outside: labCheck.value?.zones?.find((r) => r.id === zone.id)?.out_of_bounds.length,
+        };
+    });
+});
+/** Vertical periscope legs between paired mirrors. */
+const periscopeLegs = computed(() => {
+    const b = scene.value;
+    if (!b) return [];
+    return (b.periscopes ?? []).flatMap((p) => {
+        const lo = b.elements.find((e) => e.id === p.lower);
+        const hi = b.elements.find((e) => e.id === p.upper);
+        return lo && hi ? [{ id: p.id, points: path([lo.position, hi.position]) }] : [];
+    });
+});
 /** Referenced sequential prescription summary for the selected lens group. */
 const groupSummary = computed(() => {
     const e = entity.value;
@@ -1143,6 +1199,27 @@ defineExpose({ saveBench, discardBench });
                             :points="path(line)"
                             class="bench-gridline"
                         />
+                        <g
+                            v-for="zone in zoneOutlines"
+                            :key="'zone' + zone.id"
+                            class="bench-zone"
+                            :class="{ flagged: zone.outside }"
+                            :data-zone="zone.id"
+                        >
+                            <polyline :points="zone.points" />
+                            <text :x="zone.center[0]" :y="zone.center[1]" text-anchor="middle">
+                                {{ zone.label }}
+                            </text>
+                        </g>
+                        <polyline
+                            v-for="leg in periscopeLegs"
+                            :key="'periscope' + leg.id"
+                            :points="leg.points"
+                            class="bench-periscope"
+                            :data-periscope="leg.id"
+                        >
+                            <title>{{ tr('benchLab.readings.periscope', { id: leg.id }) }}</title>
+                        </polyline>
                         <!-- Gaussian 1/e² beam envelope polygons -->
                         <polygon
                             v-for="(poly, gi) in gaussianPolygons"
@@ -1194,6 +1271,7 @@ defineExpose({ saveBench, discardBench });
                             :class="{
                                 chosen: selected === e.id,
                                 flagged: problemIds.has(e.id),
+                                dimmed: !!layerFilter && e.layer !== layerFilter,
                             }"
                             role="button"
                             tabindex="0"
@@ -1274,6 +1352,15 @@ defineExpose({ saveBench, discardBench });
                             {{ tr('bench.balance') }} <b>{{ fixed(trace.balance_error) }}</b>
                         </span>
                     </div>
+                    <label v-if="scene?.layers?.length" class="bench-branch">
+                        {{ tr('bench.layer') }}
+                        <select v-model="layerFilter">
+                            <option value="">{{ tr('bench.allLayers') }}</option>
+                            <option v-for="l in scene.layers" :key="l.id" :value="l.id">
+                                {{ l.id }} · {{ l.height_mm }} mm
+                            </option>
+                        </select>
+                    </label>
                     <label v-if="trace" class="bench-branch">
                         {{ tr('bench.branch') }}
                         <select v-model="branch">
@@ -1343,7 +1430,8 @@ defineExpose({ saveBench, discardBench });
                             <input
                                 type="number"
                                 step="1"
-                                :readonly="!!selectedStage"
+                                :readonly="!!selectedStage || zLocked"
+                                :title="zLocked ? tr('bench.zFromLayer') : undefined"
                                 :value="entity.position[2]"
                                 @change="
                                     entity.position[2] = Number(
@@ -1363,6 +1451,21 @@ defineExpose({ saveBench, discardBench });
                         </button>
 
                         <template v-if="'kind' in entity">
+                            <label v-if="scene?.layers?.length">
+                                {{ tr('bench.layer') }}
+                                <select
+                                    :value="entity.layer ?? ''"
+                                    :disabled="!!selectedStage"
+                                    @change="
+                                        setLayer(entity, ($event.target as HTMLSelectElement).value)
+                                    "
+                                >
+                                    <option value="">—</option>
+                                    <option v-for="l in scene.layers" :key="l.id" :value="l.id">
+                                        {{ l.id }} · {{ l.height_mm }} mm
+                                    </option>
+                                </select>
+                            </label>
                             <label>
                                 {{ tr('bench.kind') }}
                                 <span>{{ tr('bench.kinds.' + entity.kind) }}</span>
@@ -1918,6 +2021,27 @@ defineExpose({ saveBench, discardBench });
 }
 .bench-dump-hint {
     cursor: pointer;
+}
+.bench-object.dimmed {
+    opacity: 0.25;
+}
+.bench-zone polyline {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+}
+.bench-zone.flagged polyline {
+    stroke: var(--danger);
+}
+.bench-zone text {
+    fill: var(--muted);
+    font-size: 12px;
+}
+.bench-periscope {
+    stroke: var(--warning);
+    stroke-width: 3;
+    stroke-dasharray: 3 3;
 }
 .bench-dump-hint circle {
     fill: var(--warning-bg);

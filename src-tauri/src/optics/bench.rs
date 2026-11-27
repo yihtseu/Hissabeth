@@ -47,10 +47,81 @@ pub struct Bench {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 128))]
     pub assertions: Vec<Assertion>,
+    /// Named beam heights. An element on a layer is held at its height.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub layers: Vec<HeightLayer>,
+    /// Mirror pairs carrying the beam between heights through a vertical leg.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 32))]
+    pub periscopes: Vec<Periscope>,
+    /// Table areas grouping elements, in table-frame XY (mm, same frame as positions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 32))]
+    pub zones: Vec<Zone>,
+    /// Folded sections from an output port to an input port, measured along the trace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 64))]
+    pub folds: Vec<Branch>,
     #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub min_power: f64,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeightLayer {
+    pub id: String,
+    /// Beam height above the table origin plane, in table-frame Z (mm).
+    #[schemars(range(min = 1e-9, max = 1e6))]
+    pub height_mm: f64,
+}
+/// The lower mirror turns the beam vertical; the upper mirror, directly above it,
+/// turns it back to horizontal toward its reflected connection.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Periscope {
+    pub id: String,
+    pub lower: String,
+    pub upper: String,
+}
+/// Give exactly one of `polygon_mm` and `rect`.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Zone {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    /// Simple polygon vertices [x, y] in table-frame mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 3, max = 64))]
+    pub polygon_mm: Option<Vec<[f64; 2]>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<ZoneRect>,
+    /// Elements that must lie inside. When empty, the elements centred inside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 128))]
+    pub members: Vec<String>,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneRect {
+    /// Corner [x, y] with the smaller coordinates (mm).
+    pub min: [f64; 2],
+    /// Corner [x, y] with the larger coordinates (mm).
+    pub max: [f64; 2],
+}
+impl Zone {
+    /// Outline vertices in table-frame XY.
+    pub(crate) fn outline(&self) -> Vec<[f64; 2]> {
+        match (&self.polygon_mm, self.rect) {
+            (Some(points), _) => points.clone(),
+            (None, Some(ZoneRect { min, max })) => {
+                vec![min, [max[0], min[1]], max, [min[0], max[1]]]
+            }
+            (None, None) => vec![],
+        }
+    }
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +246,9 @@ pub struct Element {
     /// Scalar phase added to the element's transmitted outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<PhasePlate>,
+    /// Height layer. Its height fixes the element's Z, except on periscope mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -246,6 +320,9 @@ struct ElementInput {
     /// Scalar phase added to the element's transmitted outputs.
     #[serde(default)]
     phase: Option<PhasePlate>,
+    /// Height layer. Its height fixes the element's Z, except on periscope mirrors.
+    #[serde(default)]
+    layer: Option<String>,
 }
 
 impl From<ElementInput> for Element {
@@ -285,6 +362,7 @@ impl From<ElementInput> for Element {
             regions: input.regions,
             substrate: input.substrate,
             phase: input.phase,
+            layer: input.layer,
         }
     }
 }
@@ -841,6 +919,22 @@ impl Bench {
         if !unresolved.is_empty() {
             return Err(format!("Unresolved bench rotations: {}", unresolved.join(", ")));
         }
+        let periscope_mirrors: HashSet<&str> = self.periscopes.iter()
+            .flat_map(|p| [p.lower.as_str(), p.upper.as_str()])
+            .collect();
+        for e in &self.elements {
+            if let Some(height) = self.layer_height(e)
+                && !periscope_mirrors.contains(e.id.as_str())
+                && (e.position[2] - height).abs() > 1e-9
+            {
+                return Err(format!(
+                    "{} is on layer {} at {height} mm but sits at Z = {} mm; run auto-aim or move it to the layer height",
+                    e.id,
+                    e.layer.as_deref().unwrap_or_default(),
+                    e.position[2]
+                ));
+            }
+        }
         Ok(paths)
     }
 
@@ -1072,8 +1166,151 @@ impl Bench {
                 ));
             }
         }
+        self.validate_layout()?;
         self.nominal_paths()
     }
+
+    pub(crate) fn layer_height(&self, e: &Element) -> Option<f64> {
+        let id = e.layer.as_deref()?;
+        self.layers.iter().find(|l| l.id == id).map(|l| l.height_mm)
+    }
+
+    /// Layers, periscopes and zones: identifiers, references and shapes.
+    fn validate_layout(&self) -> Result<(), String> {
+        let element = |id: &str| self.elements.iter().find(|e| e.id == id);
+        let mut ids = HashSet::new();
+        for l in &self.layers {
+            if !(1..=64).contains(&l.id.len())
+                || !ids.insert(&l.id)
+                || !(l.height_mm.is_finite() && l.height_mm > 0. && l.height_mm <= 1e6)
+            {
+                return Err(format!("Invalid or repeated layer: {}", l.id));
+            }
+        }
+        if self.layers.len() > 16 || self.periscopes.len() > 32 || self.zones.len() > 32 {
+            return Err("Bench layer, periscope or zone budget exceeded".into());
+        }
+        for e in &self.elements {
+            if let Some(layer) = &e.layer
+                && !ids.contains(layer)
+            {
+                return Err(format!("{} names unknown layer {layer}", e.id));
+            }
+        }
+        let mut ids = HashSet::new();
+        let mut mirrors = HashSet::new();
+        for p in &self.periscopes {
+            let valid = (1..=64).contains(&p.id.len())
+                && ids.insert(&p.id)
+                && p.lower != p.upper
+                && mirrors.insert(&p.lower)
+                && mirrors.insert(&p.upper)
+                && [&p.lower, &p.upper].iter().all(|id| {
+                    element(id).is_some_and(|e| e.kind == Kind::Mirror && e.regions.is_empty())
+                })
+                && self.connections.iter().any(|c| {
+                    c.from == p.lower && c.port == "reflected" && c.to == p.upper
+                });
+            if !valid {
+                return Err(format!(
+                    "Invalid periscope {}: it needs a unique ID and two distinct plane mirrors without regions, used by no other periscope, with the lower mirror's reflected output connected to the upper mirror",
+                    p.id
+                ));
+            }
+        }
+        let mut ids = HashSet::new();
+        for z in &self.zones {
+            let outline = z.outline();
+            let valid = (1..=64).contains(&z.id.len())
+                && ids.insert(&z.id)
+                && z.label.len() <= 256
+                && z.polygon_mm.is_some() != z.rect.is_some()
+                && z.rect.is_none_or(|r| r.min[0] < r.max[0] && r.min[1] < r.max[1])
+                && z.members.len() <= 128
+                && z.members.iter().all(|m| element(m).is_some())
+                && (3..=64).contains(&outline.len())
+                && outline.iter().flatten().all(|v| v.is_finite() && v.abs() <= 1e6)
+                && polygon_area(&outline) > 1e-9
+                && simple_polygon(&outline);
+            if !valid {
+                return Err(format!(
+                    "Invalid zone {}: give a unique ID and exactly one of polygon_mm (3–64 vertices of a simple polygon) or rect (min below max), with known member elements",
+                    z.id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Unsigned area of a polygon (shoelace).
+pub(crate) fn polygon_area(points: &[[f64; 2]]) -> f64 {
+    let n = points.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (points[i], points[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f64>()
+        .abs()
+        / 2.
+}
+
+/// No two non-adjacent edges touch.
+fn simple_polygon(points: &[[f64; 2]]) -> bool {
+    let n = points.len();
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
+    let on = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+        p[0] >= a[0].min(b[0]) && p[0] <= a[0].max(b[0]) && p[1] >= a[1].min(b[1]) && p[1] <= a[1].max(b[1])
+    };
+    let touch = |a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]| {
+        let (d1, d2) = (cross(c, d, a), cross(c, d, b));
+        let (d3, d4) = (cross(a, b, c), cross(a, b, d));
+        segments_cross(a, b, c, d)
+            || (d1 == 0. && on(c, d, a))
+            || (d2 == 0. && on(c, d, b))
+            || (d3 == 0. && on(a, b, c))
+            || (d4 == 0. && on(a, b, d))
+    };
+    (0..n).all(|i| {
+        (i + 1..n).all(|j| {
+            let adjacent = j == i + 1 || (i == 0 && j == n - 1);
+            adjacent
+                || !touch(points[i], points[(i + 1) % n], points[j], points[(j + 1) % n])
+        })
+    })
+}
+
+/// Segments ab and cd cross at a point interior to both.
+fn segments_cross(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let cross = |o: [f64; 2], p: [f64; 2], q: [f64; 2]| {
+        (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+    };
+    cross(c, d, a) * cross(c, d, b) < 0. && cross(a, b, c) * cross(a, b, d) < 0.
+}
+
+/// Point inside a polygon (even-odd rule); boundary points count as inside.
+pub(crate) fn inside_polygon(points: &[[f64; 2]], p: [f64; 2]) -> bool {
+    let n = points.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (points[i], points[(i + 1) % n]);
+        let cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        if cross == 0.
+            && p[0] >= a[0].min(b[0])
+            && p[0] <= a[0].max(b[0])
+            && p[1] >= a[1].min(b[1])
+            && p[1] <= a[1].max(b[1])
+        {
+            return true;
+        }
+        if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Segment {
@@ -1130,6 +1367,9 @@ pub struct DetectorMap {
 pub struct Trace {
     pub segments: Vec<Segment>,
     pub branches: Vec<BranchReport>,
+    /// Bench folds, measured along the trace like branches.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folds: Vec<BranchReport>,
     /// Table-frame poses used by this trace, keyed by stage member ID.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_poses: BTreeMap<String, StagePose>,
@@ -1581,7 +1821,11 @@ impl Bench {
             if let Some((distance, face)) = Self::surface_hit(e, system, position, direction, true) {
                 take(distance, false, face);
             }
-            if let Some(distance) = mount_hit(e, position, direction, self.origin[2]) {
+            // A periscope's upper mirror shares the lower mirror's post: its own
+            // mount box would stand in the vertical leg.
+            if !self.periscopes.iter().any(|p| p.upper == e.id)
+                && let Some(distance) = mount_hit(e, position, direction, self.origin[2])
+            {
                 take(distance, true, None);
             }
         }
@@ -1759,7 +2003,7 @@ impl Bench {
         }
         // A path is lit only where its own incoming beam (same source and upstream
         // route) put sampled power through each region port it leaves.
-        for path in out.branches.iter_mut().flat_map(|b| b.paths.iter_mut()) {
+        for path in out.branches.iter_mut().chain(out.folds.iter_mut()).flat_map(|b| b.paths.iter_mut()) {
             if path.interruption.is_some() {
                 continue;
             }
@@ -1793,6 +2037,7 @@ impl Bench {
         let mut out = Trace {
             segments: vec![],
             branches: vec![],
+            folds: vec![],
             stage_poses: BTreeMap::new(),
             terminations: vec![],
             power: Ledger::default(),
@@ -1863,7 +2108,7 @@ impl Bench {
                         port: Port::new(&s.id, "out"),
                         previous: None,
                         arrival: None,
-                        nominal: i == 0 && (mode != TraceMode::Physical || !self.branches.is_empty()),
+                        nominal: i == 0 && (mode != TraceMode::Physical || !self.branches.is_empty() || !self.folds.is_empty()),
                         phase: 0.,
                     },
                     air,
@@ -2443,6 +2688,7 @@ impl Bench {
             }
         }
         out.branches = paths.reports(self, &nominal, &out.segments);
+        out.folds = paths.fold_reports(self, &nominal, &out.segments);
         if mode == TraceMode::Physical {
             self.report_region_power(&mut out, &region_power);
         }
@@ -2511,7 +2757,10 @@ impl Bench {
         }).collect();
         for (i, a) in self.elements.iter().enumerate() {
             for b in &self.elements[i + 1..] {
-                if let (Some(ma), Some(mb)) = (&a.mount, &b.mount) {
+                let shared_post = self.periscopes.iter().any(|p| {
+                    (p.lower == a.id && p.upper == b.id) || (p.lower == b.id && p.upper == a.id)
+                });
+                if let (Some(ma), Some(mb), false) = (&a.mount, &b.mount, shared_post) {
                     // Separating-axis test for upright, yaw-rotated rectangular bases.
                     let overlap = [
                         a.rotation()[2],
@@ -2684,6 +2933,7 @@ pub fn example() -> Bench {
         regions: vec![],
         substrate: None,
         phase: None,
+        layer: None,
     };
     Bench {
         name: "Split laser experiment".into(),
@@ -2742,6 +2992,10 @@ pub fn example() -> Bench {
         stages: vec![],
         branches: vec![],
         assertions: vec![],
+        layers: vec![],
+        periscopes: vec![],
+        zones: vec![],
+        folds: vec![],
         max_interactions: 32,
         min_power: 1e-8,
     }
@@ -3695,6 +3949,11 @@ mod tests {
         );
         // The geometric probe still measures the arm from the hole centre to D_R.
         close(path.length_mm, 300.);
+        // A fold over the dark arm is unlit too.
+        let mut folded = shifted.clone();
+        folded.folds = vec![folded.branches.iter().find(|b| b.id == "R").unwrap().clone()];
+        let fold = &folded.trace(&system).unwrap().folds[0];
+        assert_eq!(fold.paths[0].interruption.as_ref().map(|b| b.reason.as_str()), Some("not_illuminated"));
         for id in ["L", "C"] {
             let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
             assert!(

@@ -380,6 +380,89 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                     </ul>
                 </div>
 
+                <div
+                    v-if="
+                        labCheck.periscopes?.length ||
+                        labCheck.folds?.length ||
+                        labCheck.zones?.length
+                    "
+                    class="lab-section"
+                >
+                    <h4>{{ tr('benchLab.readings.layout') }}</h4>
+                    <ul class="lab-readings">
+                        <li
+                            v-for="periscope in labCheck.periscopes ?? []"
+                            :key="`periscope:${periscope.id}`"
+                            :data-periscope-reading="periscope.id"
+                            :class="{ 'failed-assertion': periscope.conflicts.length > 0 }"
+                        >
+                            <b>{{ tr('benchLab.readings.periscope', { id: periscope.id }) }}</b>
+                            <span v-if="periscope.exit_height_mm !== null">{{
+                                tr('benchLab.readings.exitHeight', {
+                                    value: reading(periscope.exit_height_mm),
+                                })
+                            }}</span>
+                            <span v-if="periscope.min_clearance_mm !== null">{{
+                                tr('benchLab.readings.clearance', {
+                                    value: reading(periscope.min_clearance_mm),
+                                    element: periscope.nearest_element ?? '',
+                                })
+                            }}</span>
+                            <span v-if="periscope.conflicts.length" class="badge badge-bad">{{
+                                tr('benchLab.readings.conflicts', {
+                                    elements: periscope.conflicts.join(', '),
+                                })
+                            }}</span>
+                            <span v-if="periscope.break" class="note">{{
+                                interruption(periscope.break)
+                            }}</span>
+                        </li>
+                        <li
+                            v-for="fold in labCheck.folds ?? []"
+                            :key="`fold:${fold.id}`"
+                            :data-fold-reading="fold.id"
+                        >
+                            <b>{{ tr('benchLab.readings.fold', { id: fold.id }) }}</b>
+                            <span v-if="fold.break" class="note">
+                                {{ tr('benchLab.readings.unavailable') }} ·
+                                {{ interruption(fold.break) }}
+                            </span>
+                            <span v-for="(path, index) in fold.paths" :key="index">
+                                <span v-if="fold.paths.length > 1" class="note"
+                                    >{{ path.source }} · {{ path.wavelength_nm }} nm ·
+                                </span>
+                                {{
+                                    tr('benchLab.readings.length', {
+                                        value: reading(path.length_mm),
+                                    })
+                                }}
+                                <span v-if="path.break" class="note">
+                                    · {{ interruption(path.break) }}</span
+                                >
+                            </span>
+                        </li>
+                        <li
+                            v-for="zone in labCheck.zones ?? []"
+                            :key="`zone:${zone.id}`"
+                            :data-zone-reading="zone.id"
+                            :class="{ 'failed-assertion': zone.out_of_bounds.length > 0 }"
+                        >
+                            <b>{{ zone.label || zone.id }}</b>
+                            <span>{{
+                                tr('benchLab.readings.zoneArea', {
+                                    value: reading(zone.area_mm2 / 100),
+                                    count: zone.members.length,
+                                })
+                            }}</span>
+                            <span v-if="zone.out_of_bounds.length" class="badge badge-bad">{{
+                                tr('benchLab.readings.outOfZone', {
+                                    elements: zone.out_of_bounds.join(', '),
+                                })
+                            }}</span>
+                        </li>
+                    </ul>
+                </div>
+
                 <dl class="metrics">
                     <div>
                         <dt>{{ tr('benchLab.readiness') }}</dt>

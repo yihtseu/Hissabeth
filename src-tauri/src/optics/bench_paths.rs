@@ -101,6 +101,8 @@ type Connections<'a> = HashMap<&'a str, Vec<Edge<'a>>>;
 
 pub(in crate::optics) struct NominalPaths<'a> {
     routes: Vec<(&'a Branch, Vec<Edge<'a>>)>,
+    /// Fold routes: measured like branches, but their endpoints name no inputs.
+    folds: Vec<(&'a Branch, Vec<Edge<'a>>)>,
     inputs: HashMap<Edge<'a>, &'a str>,
 }
 
@@ -143,8 +145,8 @@ impl Branch {
 
 impl Bench {
     pub(super) fn nominal_paths(&self) -> Result<NominalPaths<'_>, String> {
-        if self.branches.len() > 128 || self.assertions.len() > 128 {
-            return Err("Bench branch or assertion budget exceeded".into());
+        if self.branches.len() > 128 || self.assertions.len() > 128 || self.folds.len() > 64 {
+            return Err("Bench branch, fold or assertion budget exceeded".into());
         }
         let mut edges = Connections::new();
         for c in &self.connections {
@@ -181,6 +183,27 @@ impl Bench {
                 ));
             }
             routes.push((branch, route));
+        }
+        let mut fold_ids = HashSet::new();
+        let mut folds = Vec::new();
+        for fold in &self.folds {
+            if !(1..=64).contains(&fold.id.len()) || !fold_ids.insert(&fold.id) {
+                return Err(format!("Invalid or repeated fold ID: {}", fold.id));
+            }
+            if !(1..=64).contains(&fold.to.port.len()) || fold.via.len() > 128 {
+                return Err(format!("Invalid endpoint or intermediate ports: {}", fold.id));
+            }
+            let route = fold.route(&edges)?;
+            // A fold names the input its route actually arrives at: a branch-declared
+            // input, otherwise the generic "in".
+            let arrival = inputs.get(route.last().unwrap()).copied().unwrap_or("in");
+            if fold.to.port != arrival {
+                return Err(format!(
+                    "Fold {} arrives at input {} / {arrival}, not {}",
+                    fold.id, fold.to.element, fold.to.port
+                ));
+            }
+            folds.push((fold, route));
         }
         let mut assertions = HashSet::new();
         for assertion in &self.assertions {
@@ -246,7 +269,7 @@ impl Bench {
                 ));
             }
         }
-        Ok(NominalPaths { routes, inputs })
+        Ok(NominalPaths { routes, folds, inputs })
     }
 }
 
@@ -462,11 +485,28 @@ impl PathIndex {
         nominal: &NominalPaths<'_>,
         segments: &[Segment],
     ) -> Vec<BranchReport> {
+        self.route_reports(bench, &nominal.routes, segments)
+    }
+
+    pub(super) fn fold_reports(
+        &self,
+        bench: &Bench,
+        nominal: &NominalPaths<'_>,
+        segments: &[Segment],
+    ) -> Vec<BranchReport> {
+        self.route_reports(bench, &nominal.folds, segments)
+    }
+
+    fn route_reports(
+        &self,
+        bench: &Bench,
+        routes: &[(&Branch, Vec<Edge<'_>>)],
+        segments: &[Segment],
+    ) -> Vec<BranchReport> {
         let stage_by_member: HashMap<_, _> = bench.stages.iter().flat_map(|stage| {
             stage.members.iter().map(|member| (member.as_str(), stage.id.as_str()))
         }).collect();
-        nominal
-            .routes
+        routes
             .iter()
             .map(|(branch, route)| {
                 let paths: Vec<_> = if let Some(source) =
