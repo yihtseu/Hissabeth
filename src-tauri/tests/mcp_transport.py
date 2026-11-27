@@ -7,14 +7,13 @@ import socket
 import select
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target/debug/hissabeth"
-DATA = ROOT / "target/transport-workspace"
-DATA.mkdir(exist_ok=True)
-for filename in ("system.json", "endpoint.json"):
-    (DATA / filename).unlink(missing_ok=True)
+WORKSPACE = TemporaryDirectory(dir=ROOT / "target", prefix="transport-workspace-")
+DATA = Path(WORKSPACE.name)
 if "--workspace-recovery" in sys.argv:
     (DATA / "system.json").write_bytes(b"{ broken saved project\n")
 
@@ -39,28 +38,74 @@ identifier = 0
 last_response_bytes = 0
 
 
+def exchange(line: str) -> dict:
+    global last_response_bytes
+    relay.stdin.write(line + "\n")
+    relay.stdin.flush()
+    if not select.select([relay.stdout], [], [], 20)[0]:
+        raise TimeoutError("No MCP response")
+    line = relay.stdout.readline()
+    last_response_bytes = len(line.encode())
+    return json.loads(line)
+
+
 def request(method, params=None):
-    global identifier, last_response_bytes
+    global identifier
     identifier += 1
     message = dict(jsonrpc="2.0", id=identifier, method=method)
     if params is not None:
         message["params"] = params
-    relay.stdin.write(json.dumps(message) + "\n")
-    relay.stdin.flush()
-    if not select.select([relay.stdout], [], [], 20)[0]:
-        raise TimeoutError(f"No response for {method}")
-    line = relay.stdout.readline()
-    last_response_bytes = len(line.encode())
-    response = json.loads(line)
+    response = exchange(json.dumps(message))
     assert response["id"] == identifier, response
     assert "error" not in response, response
     return response["result"]
 
 
 def tool(name, args=None, error=False):
-    result = request("tools/call", dict(name=name, arguments=args or {}))
+    result = request("tools/call", dict(name=name, arguments=args if args is not None else {}))
     assert result["isError"] is error, result
     return result if error else json.loads(result["content"][0]["text"])
+
+
+def malformed_parameters() -> None:
+    before: dict = tool("system_get")
+    revision: int = before["revision"]
+    cases: list[tuple[str, object, str]] = [
+        ("system_get", False, "Invalid type"),
+        ("paraxial", {"wavelength": 20_001}, "Value outside range"),
+        ("paraxial", {"wavelength": "NaN"}, "Invalid type"),
+        ("paraxial", {"wavelength": "Infinity"}, "Invalid type"),
+        ("batch", {"steps": [None] * 100_001}, "Invalid array length"),
+        ("project_save_as", {"path": "", "revision": revision}, "Project path is required"),
+        ("project_new", {"revision": revision + 1}, "System changed"),
+    ]
+    for name, args, expected in cases:
+        result: dict = tool(name, args, error=True)
+        content: dict = result["content"][0]
+        assert content["type"] == "text" and expected in content["text"], (name, content)
+        assert tool("system_get") == before, (name, expected)
+
+    deep: str = "[" * 1000 + "0" + "]" * 1000
+    prefix: str = '{"jsonrpc":"2.0","id":1000,"method":"tools/call","params":'
+    prefix += '{"name":"paraxial","arguments":{"wavelength":'
+    for value in ("1e400", "-1e400", deep):
+        response: dict = exchange(prefix + value + "}}}")
+        assert response["id"] is None and response["error"]["code"] == -32700, response
+        assert tool("system_get") == before
+
+    report: dict = tool("batch", {
+        "revision": revision,
+        "steps": [
+            {"command": "project_new", "args": {}},
+            {"command": "paraxial", "args": {"wavelength": "Infinity"}},
+        ],
+    })
+    assert report["ok"] is False and report["revision"] == revision, report
+    assert report["failed"] == {
+        "index": 1, "command": "paraxial", "error": "Invalid type at arguments.wavelength",
+    }
+    assert tool("system_get") == before
+    print("PASS: real MCP tool errors, parser rejection, broker liveness, and batch rollback")
 
 
 def workspace_recovery():
@@ -68,6 +113,7 @@ def workspace_recovery():
     status=tool("workspace_status")
     assert status["state"]=="recovery" and status["source_text"]=="{ broken saved project\n"
     revision=status["revision"];original=(DATA/"system.json").read_bytes()
+    tool("workspace_retry", dict(revision=revision + 1), error=True)
     for name,args in [("system_get",{}),("layout",{}),("capabilities",{}),("materials_list",{}),("project_import",dict(format="hissabeth",text="{}",revision=revision))]:
         tool(name,args,error=True)
     for args in [{},dict(revision=revision+1,source=dict(kind="default")),dict(revision=revision,source=dict(kind="default",extra=True)),dict(revision=revision,source=dict(kind="project",format="hissabeth",text="{}"))]:
@@ -1131,6 +1177,9 @@ try:
     tools = request("tools/list")["tools"]
     if "--workspace-recovery" in sys.argv:
         workspace_recovery()
+        raise SystemExit(0)
+    if "--malformed-parameters" in sys.argv:
+        malformed_parameters()
         raise SystemExit(0)
     setup_status=tool("workspace_status")
     if setup_status["state"]=="recovery":

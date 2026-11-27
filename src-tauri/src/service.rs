@@ -31,6 +31,8 @@ pub type ChangeNotifier = Arc<dyn Fn(u64) + Send + Sync>;
 pub struct Engine {
     pub system: System,
     pub revision: u64,
+    // Batch reports can expose allocated revisions even when the workspace rolls back.
+    last_allocated_revision: u64,
     pub path: PathBuf,
     _lease: Arc<std::fs::File>,
     history: history::History,
@@ -172,6 +174,7 @@ impl Engine {
             ),
             system,
             revision,
+            last_allocated_revision: revision,
             path,
             _lease: lease,
             batch: None,
@@ -232,7 +235,7 @@ impl Engine {
 
     fn persist(&mut self, next: System, projects: &ProjectFiles) -> Result<(), String> {
         let revision = self
-            .revision
+            .last_allocated_revision
             .checked_add(1)
             .ok_or("Workspace revision exhausted")?;
         persist_system(
@@ -244,6 +247,7 @@ impl Engine {
         )?;
         self.system = next;
         self.revision = revision;
+        self.last_allocated_revision = revision;
         Ok(())
     }
 

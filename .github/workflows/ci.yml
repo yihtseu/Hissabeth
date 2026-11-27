@@ -47,6 +47,27 @@ jobs:
             - name: Check desktop application
               run: cargo check --manifest-path src-tauri/Cargo.toml --features tauri/custom-protocol
 
+    mcp:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
+            - name: Build the headless broker and relay
+              run: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin hissabeth --target-dir src-tauri/target
+            - name: Test MCP transport and workspace recovery
+              run: |
+                  python3 src-tauri/tests/mcp_transport.py
+                  python3 src-tauri/tests/mcp_transport.py --workspace-recovery
+            - name: Test malformed tool arguments and batch rollback
+              run: |
+                  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test mcp_fuzz --target-dir src-tauri/target
+                  python3 src-tauri/tests/mcp_transport.py --malformed-parameters
+
     frontend:
         runs-on: ubuntu-latest
         steps:
