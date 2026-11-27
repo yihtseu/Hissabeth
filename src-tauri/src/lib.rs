@@ -1,4 +1,6 @@
 pub mod agents;
+#[cfg(test)]
+mod arch_tests;
 #[cfg(feature = "desktop")]
 mod chat;
 pub mod compute;
