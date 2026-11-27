@@ -60,6 +60,33 @@ pub(super) struct BenchCheck {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct BenchField {
+    #[schemars(default, with = "bench::Bench")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<bench::Bench>,
+    /// Named branch whose end field is read. Give exactly one of branch or port.
+    #[schemars(default, with = "String")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Input port where every named branch ending there is superposed.
+    #[schemars(default, with = "bench::Port")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<bench::Port>,
+    /// Keep only arms at this wavelength (nm).
+    #[schemars(default, with = "f64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wavelength: Option<f64>,
+    /// Ground-glass realizations averaged, 1..256 (default 1).
+    #[schemars(default, with = "u32", range(min = 1, max = 256))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realizations: Option<usize>,
+    /// Include block-averaged intensity and phase arrays of at most 64 x 64.
+    #[serde(default)]
+    pub arrays: bool,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct BenchCatalog {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]

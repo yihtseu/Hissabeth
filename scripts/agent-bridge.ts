@@ -14,6 +14,7 @@ const instructions =
     'For a real lens group on the bench, use kind lens_group. It references the current sequential prescription, its position locates the first vertex, and local +X maps to the prescription +Z axis. ' +
     'Use bench_trace to inspect its continued path and power. For free-space benches, use bench_catalog for hardware, bench_template for mounted layouts, and bench_auto_aim to orient optics and snap mounts to the hole grid. ' +
     'Before treating a bench as lab-ready, use bench_lab_check to review 3ω clear aperture, clamping fork access, mount collisions, and beam dump positions. Use bench_alignment_guide for installation order and bench_export_blueprint for drawings and alignment SOPs. ' +
+    'Use bench_field for interference, speckle, masks, SLMs and tip-tilt: give the source field sampling and a polarization, then read a branch end or superpose every branch at one input port. ' +
     'Report actual results and tool errors. Respond in the language of the user.';
 
 export interface BridgeRequest {

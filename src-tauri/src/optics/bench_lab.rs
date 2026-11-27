@@ -21,6 +21,8 @@ use std::{
 mod alignment_solver;
 #[path = "bench_layout.rs"]
 mod layout;
+#[path = "bench_field.rs"]
+pub(crate) mod field;
 #[path = "bench_relay.rs"]
 mod relay;
 use alignment_solver::{AimResidual, Combiner, Separation, measure};
@@ -411,6 +413,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         substrate: None,
         phase: None,
         layer: None,
+        action: None,
     }
 }
 

@@ -145,6 +145,18 @@ interface ToolMap {
         args: { bench?: import('./bench').BenchInput; require_pass?: boolean };
         result: import('./bench').BenchLabCheck;
     };
+    /** Angular-spectrum field at one branch end or superposed at one input port. */
+    bench_field: {
+        args: {
+            bench?: import('./bench').BenchInput;
+            branch?: string;
+            port?: import('./bench').BenchPort;
+            wavelength?: number;
+            realizations?: number;
+            arrays?: boolean;
+        };
+        result: import('./bench').BenchFieldReading;
+    };
     bench_alignment_guide: {
         args: { bench?: import('./bench').BenchInput };
         result: import('./bench').BenchAlignmentGuide;

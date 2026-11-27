@@ -254,6 +254,9 @@ pub struct Element {
     /// Height layer. Its height fixes the element's Z, except on periscope mirrors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer: Option<String>,
+    /// Parametric action on the transverse field leaving an aperture plate or plane mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -328,6 +331,9 @@ struct ElementInput {
     /// Height layer. Its height fixes the element's Z, except on periscope mirrors.
     #[serde(default)]
     layer: Option<String>,
+    /// Parametric action on the transverse field leaving an aperture plate or plane mirror.
+    #[serde(default)]
+    action: Option<Action>,
 }
 
 impl From<ElementInput> for Element {
@@ -368,6 +374,7 @@ impl From<ElementInput> for Element {
             substrate: input.substrate,
             phase: input.phase,
             layer: input.layer,
+            action: input.action,
         }
     }
 }
@@ -490,6 +497,152 @@ impl PhasePlate {
             .radians
             .unwrap_or_else(|| std::f64::consts::TAU * self.waves.unwrap_or(0.));
         design * self.at_wavelength_nm / wavelength_nm
+    }
+}
+/// Parametric action on the transverse field leaving an aperture plate or plane
+/// mirror, in element-local in-plane coordinates `[y, z]` (mm) about the element
+/// centre. `nd` also scales the traced power; the spatial actions (`mask`, `slm`,
+/// `tip_tilt`, `rgg`) act on bench_field only and leave the geometric trace unchanged.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Action {
+    /// Neutral density: power × 10^(−od), field amplitude × 10^(−od/2).
+    Nd {
+        #[schemars(range(min = 0.0, max = 10.0))]
+        od: f64,
+    },
+    /// Intensity transmittance target: `inside` within `shape` and `outside`
+    /// elsewhere, or an inline grey-level `matrix` (rows from local +z downward,
+    /// columns along local +y, `pitch_um` cells centred on the element; `outside`
+    /// beyond it).
+    Mask {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape: Option<RegionShape>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matrix: Option<Vec<Vec<f64>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 0.1, max = 1e5))]
+        pitch_um: Option<f64>,
+        #[serde(default = "unit_fraction")]
+        #[schemars(range(min = 0.0, max = 1.0))]
+        inside: f64,
+        #[serde(default)]
+        #[schemars(range(min = 0.0, max = 1.0))]
+        outside: f64,
+    },
+    /// Segmented SLM over a `size_mm` rectangle split into `segments` [columns
+    /// along +y, rows from +z downward]: each segment adds its piston
+    /// (`phases_rad`, row-major) and an optional linear ramp (`tilts_mrad`,
+    /// [y, z] about the segment centre). Light outside the panel passes unchanged.
+    Slm {
+        #[schemars(inner(range(min = 1, max = 64)))]
+        segments: [usize; 2],
+        #[schemars(inner(range(min = 1e-6, max = 1e5)))]
+        size_mm: [f64; 2],
+        phases_rad: Vec<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tilts_mrad: Vec<[f64; 2]>,
+    },
+    /// Tip-tilt: linear phase k·(θy·y + θz·z), deflecting the field by the
+    /// small angles [θy, θz] (mrad) about the element plane.
+    TipTilt {
+        #[schemars(inner(range(min = -100.0, max = 100.0)))]
+        tilt_mrad: [f64; 2],
+    },
+    /// Rotating ground glass: a Gaussian-correlated random phase screen with
+    /// `correlation_um` correlation length and `roughness_waves` RMS phase. Each
+    /// realization (exposure step) draws an independent screen from `seed`; arms
+    /// split after the glass share each realization.
+    Rgg {
+        #[schemars(range(min = 0.1, max = 1e5))]
+        correlation_um: f64,
+        #[schemars(range(min = 0.0, max = 100.0))]
+        roughness_waves: f64,
+        seed: u32,
+    },
+}
+impl Action {
+    pub(crate) fn valid(&self) -> bool {
+        let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
+        match self {
+            Self::Nd { od } => (0. ..=10.).contains(od),
+            Self::Mask { shape, matrix, pitch_um, inside, outside } => {
+                (0. ..=1.).contains(inside)
+                    && (0. ..=1.).contains(outside)
+                    && match (shape, matrix) {
+                        (Some(shape), None) => shape.valid() && pitch_um.is_none(),
+                        (None, Some(rows)) => {
+                            (1..=64).contains(&rows.len())
+                                && rows.iter().all(|r| r.len() == rows[0].len() && (1..=64).contains(&r.len()))
+                                && rows.iter().flatten().all(|v| (0. ..=1.).contains(v))
+                                && pitch_um.is_some_and(|p| (0.1..=1e5).contains(&p))
+                        }
+                        _ => false,
+                    }
+            }
+            Self::Slm { segments, size_mm, phases_rad, tilts_mrad } => {
+                segments.iter().all(|n| (1..=64).contains(n))
+                    && size_mm.iter().all(|s| (1e-6..=1e5).contains(s))
+                    && phases_rad.len() == segments[0] * segments[1]
+                    && finite(phases_rad)
+                    && phases_rad.iter().all(|p| p.abs() <= 1e6)
+                    && (tilts_mrad.is_empty() || tilts_mrad.len() == phases_rad.len())
+                    && tilts_mrad.iter().flatten().all(|t| t.abs() <= 100.)
+            }
+            Self::TipTilt { tilt_mrad } => tilt_mrad.iter().all(|t| t.abs() <= 100.),
+            Self::Rgg { correlation_um, roughness_waves, .. } => {
+                (0.1..=1e5).contains(correlation_um) && (0. ..=100.).contains(roughness_waves)
+            }
+        }
+    }
+}
+/// Mutual coherence of sources: sources sharing `group` (for example fibre
+/// outputs of one laser) are coherent with each other; a source is always
+/// coherent with itself.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Coherence {
+    pub group: String,
+    /// Coherence length (mm) shared by every source of the group. Coherent pairs
+    /// are weighted by exp(−(ΔOPL/L)²); omitted means fully coherent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1e-6, max = 1e12))]
+    pub length_mm: Option<f64>,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldProfile {
+    /// exp(−r²/w²) amplitude, w the 1/e² intensity radius.
+    Gaussian,
+    /// Uniform disk of radius w.
+    Flat,
+}
+/// Transverse complex field sampling for bench_field: a `grid` [nx, ny] (powers
+/// of two) at `pitch_um`, centred on the chief ray.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldSampling {
+    #[schemars(inner(range(min = 8, max = 256)))]
+    pub grid: [usize; 2],
+    #[schemars(range(min = 0.1, max = 1000.0))]
+    pub pitch_um: f64,
+    pub profile: FieldProfile,
+    #[schemars(range(min = 0.1, max = 1e6))]
+    pub waist_um: f64,
+    /// Jones vector [[Ex re, im], [Ey re, im]] in the trace's horizontal/vertical
+    /// basis, normalised on use. It sets the traced launch polarization, so the
+    /// source must then omit `polarization`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polarization: Option<[[f64; 2]; 2]>,
+}
+impl FieldSampling {
+    fn valid(&self) -> bool {
+        self.grid.iter().all(|n| n.is_power_of_two() && (8..=256).contains(n))
+            && (0.1..=1000.).contains(&self.pitch_um)
+            && (0.1..=1e6).contains(&self.waist_um)
+            && self.polarization.is_none_or(|j| {
+                j.iter().flatten().all(|x| x.is_finite()) && j.iter().flatten().any(|x| *x != 0.)
+            })
     }
 }
 struct SlabFace {
@@ -675,6 +828,22 @@ pub struct Source {
     /// Permit auto-aim to change the supplied launch direction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub aim_direction: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence: Option<Coherence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<FieldSampling>,
+}
+impl Source {
+    /// Launch Jones vector: the field sampling's polarization, else `polarization`.
+    pub(crate) fn launch_jones(&self) -> Option<Jones> {
+        match self.field.as_ref().and_then(|f| f.polarization) {
+            Some(j) => {
+                let n = j.iter().flatten().map(|x| x * x).sum::<f64>().sqrt();
+                Some(j.map(|c| c.map(|x| x / n)))
+            }
+            None => self.polarization.and_then(Polarization::jones),
+        }
+    }
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1087,6 +1256,14 @@ impl Bench {
                     e.id
                 ));
             }
+            if let Some(a) = &e.action
+                && (!matches!(e.kind, Kind::Aperture | Kind::Mirror) || !a.valid())
+            {
+                return Err(format!(
+                    "Invalid action on {}: actions need an aperture or plane mirror; nd od in 0..10; a mask with either a valid shape or a 1–64 × 1–64 matrix of 0..1 values with pitch_um; an SLM with 1–64 segments per axis, positive size_mm and one finite phase (and optional tilt within ±100 mrad) per segment; tip-tilt within ±100 mrad; RGG correlation 0.1–1e5 um and roughness 0–100 waves",
+                    e.id
+                ));
+            }
             if let Some(n) = e.index
                 && (e.kind != Kind::Splitter || !(1. ..=4.).contains(&n))
             {
@@ -1155,10 +1332,26 @@ impl Bench {
                 || s.waist_offset.is_some_and(|x| !x.is_finite())
                 || s.m2.is_some_and(|x| !x.is_finite() || x < 1.)
                 || matches!(s.polarization, Some(Polarization::Linear { angle_deg }) if !angle_deg.is_finite())
+                || s.field.as_ref().is_some_and(|f| !f.valid() || (f.polarization.is_some() && s.polarization.is_some()))
+                || s.coherence.as_ref().is_some_and(|c| {
+                    !(1..=64).contains(&c.group.len()) || c.length_mm.is_some_and(|l| !(1e-6..=1e12).contains(&l))
+                })
             {
                 return Err(format!("Invalid source: {}", s.id));
             }
             packets += 1 + 3 * s.rings * (s.rings + 1);
+        }
+        for (i, a) in self.sources.iter().enumerate() {
+            let Some(ca) = &a.coherence else { continue };
+            if let Some(b) = self.sources[..i]
+                .iter()
+                .find(|b| b.coherence.as_ref().is_some_and(|cb| cb.group == ca.group && cb.length_mm != ca.length_mm))
+            {
+                return Err(format!(
+                    "Sources {} and {} share coherence group {} with different length_mm; a group has one coherence length",
+                    b.id, a.id, ca.group
+                ));
+            }
         }
         if packets > 1024 || self.connections.len() > 384 {
             return Err("Bench packet or connection budget exceeded".into());
@@ -2131,7 +2324,7 @@ impl Bench {
                     },
                     air,
                     wavelength: s.wavelength,
-                    jones: s.polarization.and_then(Polarization::jones),
+                    jones: s.launch_jones(),
                     probe: false,
                 });
             }
@@ -2536,6 +2729,12 @@ impl Bench {
                     children.push(("transmitted", ray.d, tf, Some(t)));
                 }
                 _ => {}
+            }
+            if let Some(Action::Nd { od }) = &e.action {
+                let gain = 10f64.powf(-od);
+                for child in &mut children {
+                    child.2 *= gain;
+                }
             }
             let transmitted: f64 = children.iter().map(|c| c.2).sum();
             out.power.absorbed += ray.power * (1. - transmitted).max(0.);
@@ -2952,6 +3151,7 @@ pub fn example() -> Bench {
         substrate: None,
         phase: None,
         layer: None,
+        action: None,
     };
     Bench {
         name: "Split laser experiment".into(),
@@ -2979,6 +3179,8 @@ pub fn example() -> Bench {
             polarization: None,
             gaussian_radius: None,
             aim_direction: false,
+            coherence: None,
+            field: None,
         }],
         connections: vec![
             Connection {

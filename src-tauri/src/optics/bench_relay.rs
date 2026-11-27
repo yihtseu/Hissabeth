@@ -78,12 +78,22 @@ fn is_reflection(d: V3, next: V3, normals: &[V3]) -> bool {
 /// coating, internal substrate bounces, curved mirrors), otherwise a refraction.
 pub(crate) fn frame(bench: &Bench, trace: &Trace, path: &BranchPath) -> Option<Frame> {
     let first = *path.segment_indices.first()?;
-    let mut d = direction(trace, path.start_segment.unwrap_or(first))?;
+    let d = direction(trace, path.start_segment.unwrap_or(first))?;
+    frames_along(bench, trace, d, &path.segment_indices)?.pop()
+}
+
+/// The frame on every segment of `indices`, starting from incoming direction `d`.
+pub(crate) fn frames_along(bench: &Bench, trace: &Trace, mut d: V3, indices: &[usize]) -> Option<Vec<Frame>> {
     let mut u = unit(cross([0., 0., 1.], d)).or_else(|_| unit(cross([1., 0., 0.], d))).ok()?;
     let mut v = cross(d, u);
     let mut reflections = 0;
-    for &index in &path.segment_indices {
-        let Some(next) = direction(trace, index) else { continue };
+    let mut frames = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let Some(next) = direction(trace, index) else {
+            // A zero-length flight keeps the frame, so frames stay aligned with `indices`.
+            frames.push(Frame { reflections, direction: d, basis: [u, v] });
+            continue;
+        };
         let flight = trace.segments[index].flight.as_ref()?;
         let normals = bench
             .elements
@@ -105,8 +115,9 @@ pub(crate) fn frame(bench: &Bench, trace: &Trace, path: &BranchPath) -> Option<F
         u = unit(sub(u, scale(d, dot(u, d)))).ok()?;
         let w = cross(d, u);
         v = if dot(v, w) >= 0. { w } else { scale(w, -1.) };
+        frames.push(Frame { reflections, direction: d, basis: [u, v] });
     }
-    Some(Frame { reflections, direction: d, basis: [u, v] })
+    Some(frames)
 }
 
 fn single(report: &BranchReport) -> Option<&BranchPath> {

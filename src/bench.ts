@@ -90,6 +90,45 @@ export interface BenchElement {
     phase?: BenchPhasePlate | null;
     /** Height layer ID. Its height fixes Z, except on periscope mirrors. */
     layer?: string | null;
+    /** Field action on apertures and mirrors. Only `nd` changes traced power; the rest act in bench_field. */
+    action?: BenchAction | null;
+}
+export type BenchAction =
+    | { kind: 'nd'; od: number }
+    | {
+          kind: 'mask';
+          shape?: BenchRegionShape | null;
+          /** Grey-level intensity rows from local +z downward, columns along +y. */
+          matrix?: number[][] | null;
+          pitch_um?: number | null;
+          inside?: number;
+          outside?: number;
+      }
+    | {
+          kind: 'slm';
+          /** [columns along +y, rows from +z downward]. */
+          segments: [number, number];
+          size_mm: [number, number];
+          phases_rad: number[];
+          tilts_mrad?: [number, number][];
+      }
+    | { kind: 'tip_tilt'; tilt_mrad: [number, number] }
+    | { kind: 'rgg'; correlation_um: number; roughness_waves: number; seed: number };
+export interface BenchCoherence {
+    /** Sources sharing a group interfere with each other. */
+    group: string;
+    /** Gaussian coherence length (mm); omitted means fully coherent. */
+    length_mm?: number | null;
+}
+export interface BenchFieldSampling {
+    /** Powers of two in 8..256: [columns, rows]. */
+    grid: [number, number];
+    pitch_um: number;
+    profile: 'gaussian' | 'flat';
+    /** Gaussian 1/e amplitude radius or flat-top radius (um). */
+    waist_um: number;
+    /** Launch Jones vector [[re, im], [re, im]]; exclusive with the source polarization. */
+    polarization?: [[number, number], [number, number]] | null;
 }
 export interface BenchSubstrate {
     material: string;
@@ -132,6 +171,9 @@ export interface BenchSource {
     waist_offset?: number | null;
     m2?: number | null;
     polarization?: BenchPolarization | null;
+    coherence?: BenchCoherence | null;
+    /** Transverse field sampling read by bench_field. */
+    field?: BenchFieldSampling | null;
 }
 export interface BenchConnection {
     from: string;
@@ -838,4 +880,43 @@ export function benchProblems(value: unknown): string[] {
     } catch {
         return [tr('bench.invalid')];
     }
+}
+export interface BenchFieldArm {
+    branch: string;
+    source: string;
+    power: number;
+    centroid_mm: [number, number];
+    phase_rad: number;
+    opl_mm: number;
+    geometric_tilt_mrad: [number, number] | null;
+}
+export interface BenchFieldReading {
+    saved: boolean;
+    revision: number;
+    branch?: string;
+    port?: BenchPort;
+    wavelength_nm: number;
+    realizations: number;
+    grid: [number, number];
+    pitch_um: number;
+    center: Vec3;
+    direction: Vec3;
+    basis: [Vec3, Vec3];
+    power: number;
+    centroid_mm: [number, number];
+    far_field_centroid_mrad: [number, number];
+    mean_phase_rad: number;
+    contrast: number;
+    arms: BenchFieldArm[];
+    pairs: { arms: [number, number]; coherence: number; correlation: number }[];
+    sampling: {
+        window_mm: [number, number];
+        max_angle_mrad: number;
+        band_limit_mrad: number;
+        edge_fraction: number;
+        warnings: string[];
+    };
+    intensity?: number[][];
+    phase_rad?: number[][];
+    array_pitch_um?: number;
 }

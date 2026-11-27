@@ -290,6 +290,12 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, SVG highlight color), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
             ),
             tool!(
+                bench_field,
+                Read,
+                None,
+                "Read the transverse complex field at the end of one named branch, or the superposed field of every named branch ending at one input port. Sources need field sampling (grid, pitch_um, profile, waist_um) and a polarization. Each arm launches that field, propagates it by the band-limited angular spectrum through its traced flights, applies clear apertures, region outlines, thin lens and curved mirror quadratic phases and element actions (mask, SLM, tip_tilt, rotating ground glass), and scales by the traced power and Jones vector, so ND filters, splitters and coatings act through the trace. Arms of one source, or of sources sharing a coherence group, interfere with a Gaussian coherence-length factor. Returns power, near-field centroid, far-field centroid in mrad, mean phase, speckle contrast averaged over ground-glass realizations, per-arm readings, pair coherence and correlation, sampling warnings (window edge power and band limit), and optional block-averaged intensity and phase arrays. Lens groups are not supported; boundaries are periodic."
+            ),
+            tool!(
                 bench_alignment_guide,
                 Read,
                 None,

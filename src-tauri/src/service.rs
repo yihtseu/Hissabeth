@@ -423,6 +423,14 @@ mod tests {
         let mut bad = aim["bench"].clone();
         bad["sources"][0]["polarization"] = json!({"kind":"horizontal","angle_deg":45.});
         assert!(call("bench_lab_check", json!({"bench":bad})).is_err());
+        let mut mz = call("bench_template", json!({"name":"mach_zehnder"})).unwrap()["bench"].clone();
+        mz["sources"][0]["field"] =
+            json!({"grid":[32,32],"pitch_um":50.,"profile":"gaussian","waist_um":400.,"polarization":[[1.,0.],[0.,0.]]});
+        let field = call("bench_field", json!({"bench":mz,"branch":"arm_a","arrays":true})).unwrap();
+        assert_eq!(field["saved"], false);
+        assert_eq!(field["arms"][0]["branch"], "arm_a");
+        assert_eq!(field["intensity"].as_array().unwrap().len(), 32);
+        assert!(call("bench_field", json!({"bench":mz,"branch":"arm_a","port":{"element":"BS2","port":"in_a"}})).is_err());
     }
 
     fn shared_workspace() -> (tempfile::TempDir, SharedWorkspace) {
