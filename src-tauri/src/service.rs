@@ -10,6 +10,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+mod artifacts;
 mod batch;
 mod broker;
 mod commands;

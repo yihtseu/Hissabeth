@@ -155,6 +155,38 @@ pub(super) struct BenchExportBlueprint {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ArtifactStart {
+    #[schemars(extend("enum" = ["blueprint"]))]
+    pub kind: String,
+    #[schemars(extend("enum" = bench_lab::FORMATS))]
+    pub format: String,
+    #[serde(default)]
+    pub params: ArtifactParams,
+}
+
+#[derive(Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ArtifactParams {
+    #[schemars(default, with = "bench::Bench")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<bench::Bench>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ArtifactId {
+    pub id: String,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ArtifactExport {
+    pub id: String,
+    pub path: String,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Revision {
     #[schemars(range(min = 0, max = 9_007_199_254_740_991_u64))]
     pub revision: u64,

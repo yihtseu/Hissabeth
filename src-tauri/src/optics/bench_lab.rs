@@ -3217,6 +3217,13 @@ pub(crate) struct Blueprint {
     content: String,
 }
 
+impl Blueprint {
+    /// The file name, MIME type and content of the drawing.
+    pub(crate) fn into_file(self) -> (String, &'static str, String) {
+        (self.filename, self.mime, self.content)
+    }
+}
+
 pub(crate) struct BlueprintRevision {
     pub revision: u64,
     pub saved: bool,

@@ -59,4 +59,4 @@
 - [x] **Oracle 参考验证 CI 化。** 语料改为声明式案例（`src-tauri/tests/oracle/cases/*.json`：处方、检查项、期望值、公差），期望来源包括解析一阶值（薄透镜 EFL、Petzval 和等）、现有 Geopter C++ oracle 与文献公开处方值；公差分级为 exact（计数/状态）、tight（一阶量）、loose（MTF/PSF 类数值）。驱动器经 `--engine` + `--mcp` 通路执行断言并输出通过数摘要。CI 新增 oracle job（缓存 Geopter 构建产物），README 公布通过数。
     > 实现说明：采用任务允许的 `--engine --run` 脚本通路，并提供同一语料的进程内 Rust 测试。
 - [x] **Agent 文件访问作用域。** `dispatch` 增加调用方来源：桌面 GUI 经文件对话框选择即授权；broker 连接（含应用内 agent 对话）按作用域判定。默认允许数据目录与会话内显式打开或保存过的目录，`--allow-path DIR` 可重复显式放行，`--allow-any-path` 恢复旧行为。判定前解析符号链接与 `..`，新文件的父目录必须已存在，拒绝时错误信息指明目录取自哪个 `--allow-path`。仅注册表中声明文件访问的命令做路径检查，作用域为会话状态，不落盘。
-- [ ] **异步产物任务。** 新增 `artifact_start`、`artifact_status`、`artifact_fetch`、`artifact_export`、`artifact_cancel` 命令族：后台线程生成 PNG/PDF 等产物，字节保留在会话内存并设上限，MCP 侧 fetch 返回 image content，export 落盘走文件作用域；SVG/文本类导出维持现状内联。GUI 的图纸导出改走同一命令族。此为阶段四 G4.2“桌面与对话均能取得带文件名和媒体类型的图纸文件”的前置。
+- [x] **异步产物任务。** 新增 `artifact_start`、`artifact_status`、`artifact_fetch`、`artifact_export`、`artifact_cancel` 命令族：后台线程生成 PNG/PDF 等产物，字节保留在会话内存并设上限，MCP 侧 fetch 返回 image content，export 落盘走文件作用域；SVG/文本类导出维持现状内联。GUI 的图纸导出改走同一命令族。此为阶段四 G4.2“桌面与对话均能取得带文件名和媒体类型的图纸文件”的前置。

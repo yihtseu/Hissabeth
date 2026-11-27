@@ -173,6 +173,22 @@ interface ToolMap {
         };
         result: import('./bench').BenchBlueprintExport;
     };
+    /** Start a background deliverable; poll artifact_status, then fetch or export it. */
+    artifact_start: {
+        args: {
+            kind: 'blueprint';
+            format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
+            params?: { bench?: import('./bench').BenchInput };
+        };
+        result: { id: string };
+    };
+    artifact_status: { args: { id: string }; result: import('./bench').ArtifactStatus };
+    artifact_fetch: { args: { id: string }; result: import('./bench').ArtifactFetch };
+    artifact_export: {
+        args: { id: string; path: string };
+        result: { id: string; path: string; bytes: number };
+    };
+    artifact_cancel: { args: { id: string }; result: import('./bench').ArtifactStatus };
     /** Workspace state; the only read that also works during recovery. */
     workspace_status: { args: NoArgs; result: WorkspaceStatus };
     /** Recovery only: rereads the file; the revision must be the one the caller last observed. */
@@ -354,6 +370,14 @@ export const inDesktop = (): boolean => isTauri();
 
 export function callTool<N extends ToolName>(name: N, args: ToolArgs<N>): Promise<ToolResult<N>> {
     return invoke<ToolResult<N>>('optical_call', { name, args });
+}
+
+/** Polls a background artifact until it is done, failed or cancelled. */
+export async function settleArtifact(id: string): Promise<import('./bench').ArtifactStatus> {
+    const status = await callTool('artifact_status', { id });
+    if (status.state !== 'queued' && status.state !== 'running') return status;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return settleArtifact(id);
 }
 
 export const detectAgents = (): Promise<AgentInfo[]> => invoke<AgentInfo[]>('detect_agents');

@@ -400,6 +400,77 @@ pub(super) fn bench_export_blueprint(
     })
 }
 
+pub(super) fn artifact_start(
+    target: &Target<'_>,
+    args: p::ArtifactStart,
+) -> Result<artifacts::Started, String> {
+    let (_, store) = target.artifacts("artifact_start")?;
+    let draft = args.params.bench;
+    let saved = draft.is_none();
+    let (bench, system, revision) =
+        target.system(|s, revision| Ok((selected(s, &draft)?.clone(), s.clone(), revision)))?;
+    let format = args.format.clone();
+    artifacts::start(&store, &args.kind, &args.format, revision, saved, move || {
+        let drawing = bench_lab::export_blueprint_report(
+            &bench, &system, &format, Some(bench_lab::BlueprintRevision { revision, saved }),
+        )?;
+        let (filename, mime, content) = drawing.into_file();
+        Ok(artifacts::Output { filename, mime: mime.into(), bytes: content.into_bytes() })
+    })
+}
+
+pub(super) fn artifact_status(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Status, String> {
+    let (_, store) = target.artifacts("artifact_status")?;
+    store.lock().map_err(|e| e.to_string())?.status(&args.id)
+}
+
+pub(super) fn artifact_fetch(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Fetched, String> {
+    let (_, store) = target.artifacts("artifact_fetch")?;
+    store.lock().map_err(|e| e.to_string())?.fetch(&args.id)
+}
+
+pub(super) fn artifact_export(target: &Target<'_>, args: p::ArtifactExport) -> Result<artifacts::Exported, String> {
+    let (workspace_file, store) = target.artifacts("artifact_export")?;
+    if args.path.trim().is_empty() {
+        return Err("Export path is required".into());
+    }
+    if Path::new(&args.path).extension().is_none() {
+        return Err(format!("Export path {:?} needs a file name with its extension, such as drawing.svg", args.path));
+    }
+    let path = ProjectFiles::locate(&workspace_file, &args.path, true)?;
+    if ProjectFiles::reserved(&workspace_file, &path) {
+        return Err("Export path is reserved for workspace storage".into());
+    }
+    // Never replace the project itself, whatever extension it was saved under.
+    let linked = target
+        .read(|e| Ok(e.projects.linked_path.clone()))
+        .unwrap_or_else(|_| ProjectFiles::load(&workspace_file).linked_path);
+    let normal = |p: &Path| match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => p.to_path_buf(),
+    };
+    // Compare by file identity too: a different spelling (case on a
+    // case-insensitive volume, a link) may still name the project.
+    let same = |project: &PathBuf| {
+        normal(project) == normal(&path) || same_file::is_same_file(project, &path).unwrap_or(false)
+    };
+    if std::iter::once(&workspace_file).chain(&linked).any(same) {
+        return Err(format!(
+            "Cannot export over {}: it is the open project; choose another file name",
+            normal(&path).display()
+        ));
+    }
+    if !path.parent().is_some_and(Path::is_dir) {
+        return Err(format!("Cannot write {}: its parent directory does not exist", path.display()));
+    }
+    store.lock().map_err(|e| e.to_string())?.export(&args.id, &path)
+}
+
+pub(super) fn artifact_cancel(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Status, String> {
+    let (_, store) = target.artifacts("artifact_cancel")?;
+    store.lock().map_err(|e| e.to_string())?.cancel(&args.id)
+}
+
 pub(super) fn bench_catalog(
     target: &Target<'_>,
     args: p::BenchCatalog,

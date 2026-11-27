@@ -1431,6 +1431,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+ "same-file",
  "schemars 1.2.3",
  "serde",
  "serde_json",

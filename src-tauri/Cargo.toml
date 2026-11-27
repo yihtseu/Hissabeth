@@ -22,6 +22,7 @@ schemars = "1.2"
 getrandom = "0.4"
 libc = "0.2"
 tempfile = "3"
+same-file = "1"
 tauri = { version = "2", features = [], optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }

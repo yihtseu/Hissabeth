@@ -42,11 +42,12 @@ fn respond(
         "tools/list" => Ok(json!({"tools":tools()})),
         "tools/call" => {
             let p = &request["params"];
-            let r = call_tool(
-                p["name"].as_str().unwrap_or(""),
-                p.get("arguments").cloned().unwrap_or(json!({})),
-            );
+            let name = p["name"].as_str().unwrap_or("");
+            let r = call_tool(name, p.get("arguments").cloned().unwrap_or(json!({})));
             Ok(match r {
+                Ok(v) if name == "artifact_fetch" => {
+                    json!({"content":artifact_content(v),"isError":false})
+                }
                 Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"isError":false})
                 }
@@ -59,6 +60,54 @@ fn respond(
         Ok(v) => json!({"jsonrpc":"2.0","id":id,"result":v}),
         Err(e) => json!({"jsonrpc":"2.0","id":id,"error":e}),
     })
+}
+
+/// MCP content for a fetched artifact: its metadata as text, then the file as
+/// image content for images, or as an embedded resource holding text or a
+/// base64 blob.
+fn artifact_content(mut fetched: Value) -> Value {
+    let data = fetched.as_object_mut().and_then(|o| o.remove("data")).unwrap_or_default();
+    let data = data.as_str().unwrap_or_default();
+    let mime = fetched["mime"].as_str().unwrap_or("application/octet-stream").to_owned();
+    let uri = format!(
+        "artifact://{}/{}",
+        fetched["id"].as_str().unwrap_or_default(),
+        fetched["filename"].as_str().unwrap_or_default()
+    );
+    let file = if mime.starts_with("image/") && mime != "image/svg+xml" && mime != "image/vnd.dxf" {
+        json!({"type":"image","data":data,"mimeType":mime})
+    } else {
+        match decode_text(data) {
+            Some(text) => json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"text":text}}),
+            None => json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"blob":data}}),
+        }
+    };
+    json!([{"type":"text","text":fetched.to_string()}, file])
+}
+
+/// The UTF-8 text a base64 payload encodes, if it is text.
+fn decode_text(data: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(data.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in data.bytes().take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | u32::from(v)) & 0xffff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((acc >> bits) as u8);
+        }
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    // Control characters other than whitespace mark binary data.
+    (!text.chars().any(|c| c.is_control() && !c.is_whitespace())).then_some(text)
 }
 
 pub fn serve(engine: SharedWorkspace, scope: Scope) -> Result<(), String> {

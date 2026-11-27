@@ -203,7 +203,7 @@ fn registered_tools_reject_malformed_arguments_without_changing_workspace() {
         if let Some(args) = mutate(schema, "", revision, &|_, field| {
             (field == "path").then(|| json!(""))
         }) {
-            check("empty path", args, "Project path is required");
+            check("empty path", args, "path is required");
         }
         if schema["properties"].get("revision").is_some() {
             let mut args = required_object(schema, revision);

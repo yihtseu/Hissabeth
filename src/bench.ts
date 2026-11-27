@@ -647,6 +647,32 @@ export interface BenchBlueprintExport {
     mime: string;
     content: string;
 }
+export type ArtifactState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+/** A background deliverable job; see artifact_start. */
+export interface ArtifactStatus {
+    id: string;
+    kind: 'blueprint';
+    format: string;
+    state: ArtifactState;
+    /** Project revision the artifact was generated from. */
+    revision: number;
+    saved: boolean;
+    progress?: number;
+    error?: string;
+    filename?: string;
+    mime?: string;
+    bytes?: number;
+}
+export interface ArtifactFetch {
+    id: string;
+    filename: string;
+    mime: string;
+    bytes: number;
+    revision: number;
+    saved: boolean;
+    encoding: 'base64';
+    data: string;
+}
 /** Rotation order matches Rust: Rz(yaw) Ry(pitch) Rx(roll). */
 export function benchRotate(v: Vec3, a: Vec3): Vec3 {
     const [r, p, y] = a.map((x) => (x * Math.PI) / 180) as Vec3;

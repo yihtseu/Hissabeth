@@ -159,6 +159,20 @@ impl Target<'_> {
         }
     }
 
+    /// The workspace file and the session's artifact store. Artifacts belong
+    /// to a workspace session, so batches (which run on the bare engine)
+    /// cannot reach them.
+    pub(super) fn artifacts(&self, name: &str) -> Result<(PathBuf, super::artifacts::Shared), String> {
+        match self {
+            Self::Shared(shared, _) => {
+                let w = shared.read().map_err(|e| e.to_string())?;
+                Ok((w.file().to_path_buf(), w.artifacts()))
+            }
+            Self::Workspace(w) => Ok((w.file().to_path_buf(), w.artifacts())),
+            Self::Engine(_) => Err(format!("{name} is not allowed inside a batch")),
+        }
+    }
+
     // Clone under the shared lock, then release it before optical computation.
     pub fn system<R>(
         &self,
@@ -234,7 +248,7 @@ macro_rules! tool {
 pub fn registry() -> &'static [CommandSpec] {
     static TOOLS: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         vec![
-            tool!(Meta, batch, Mutate, Steps, "Run ordered optical commands under one workspace lock. Supply an optional starting revision. Mutations inherit the current step revision. Stop at the first error; rollback defaults to true. History, workspace control, capabilities and nested batch commands are excluded."),
+            tool!(Meta, batch, Mutate, Steps, "Run ordered optical commands under one workspace lock. Supply an optional starting revision. Mutations inherit the current step revision. Stop at the first error; rollback defaults to true. History, workspace control, capabilities, artifact and nested batch commands are excluded."),
             tool!(
                 bench_get,
                 Read,
@@ -312,6 +326,36 @@ pub fn registry() -> &'static [CommandSpec] {
                 Read,
                 None,
                 "Return a lab blueprint or alignment SOP with its filename, MIME type and text content. SVG shows the project revision, stage readings, branch OPL, assertion results and highlighted stage-controlled arms."
+            ),
+            tool!(
+                Meta, artifact_start,
+                Read,
+                None,
+                "Start generating a deliverable on a background thread and return its id at once. kind blueprint takes the bench blueprint formats of bench_export_blueprint; params.bench optionally supplies an unsaved bench draft. Poll artifact_status, then artifact_fetch or artifact_export. Artifacts live for this session only: one may hold 16 MB, and the oldest finished ones are evicted once all exceed 64 MB."
+            ),
+            tool!(
+                Meta, artifact_status,
+                Read,
+                None,
+                "Read an artifact job: queued, running, done, failed (with error) or cancelled, the project revision it was generated from, and when done its filename, MIME type and byte size."
+            ),
+            tool!(
+                Meta, artifact_fetch,
+                Read,
+                None,
+                "Return a finished artifact's bytes. Over MCP an image arrives as image content and other files as an embedded resource (text, or base64 blob for binary data); the app receives base64 data with filename and MIME type."
+            ),
+            tool!(
+                Meta, artifact_export,
+                Read,
+                Write,
+                "Write a finished artifact to a file path that includes its extension. Relative paths resolve inside the workspace projects directory; the parent directory must exist, and an existing file is replaced atomically."
+            ),
+            tool!(
+                Meta, artifact_cancel,
+                Read,
+                None,
+                "Cancel a queued or running artifact; its result is discarded."
             ),
             tool!(
                 Meta, workspace_status,
@@ -717,7 +761,7 @@ mod tests {
             let files = match spec.name {
                 "batch" => FileAccess::Steps,
                 "project_list" | "project_open" | "workspace_retry" => FileAccess::Read,
-                "project_save_as" | "workspace_recover" => FileAccess::Write,
+                "project_save_as" | "workspace_recover" | "artifact_export" => FileAccess::Write,
                 _ => FileAccess::None,
             };
             assert_eq!(spec.files, files, "{}", spec.name);

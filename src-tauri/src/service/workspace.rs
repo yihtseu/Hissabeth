@@ -122,9 +122,6 @@ impl ProjectFiles {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        let workspace_dir = workspace_dir(workspace_file)
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
         let resolved = parent.canonicalize().map_err(|e| e.to_string())?.join(name);
         let target = match resolved.canonicalize() {
             Ok(path) if path.is_file() => path,
@@ -135,17 +132,27 @@ impl ProjectFiles {
         if save && Self::is_zmx(&target) {
             return Err(SAVE_ZMX.into());
         }
-        let workspace_file = workspace_dir.join(workspace_file.file_name().unwrap());
-        if [
-            workspace_dir.join(PROJECT_META),
-            workspace_file.with_extension("lock"),
-            workspace_file.with_extension("pending"),
-        ]
-        .contains(&target)
-        {
+        if Self::reserved(workspace_file, &target) {
             return Err("Project path is reserved for workspace storage".into());
         }
         Ok(target)
+    }
+
+    /// Whether `target` (canonical where it exists) is one of the files the
+    /// workspace keeps for itself.
+    pub fn reserved(workspace_file: &Path, target: &Path) -> bool {
+        let dir = workspace_dir(workspace_file);
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let target = match (target.parent().and_then(|p| p.canonicalize().ok()), target.file_name()) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => target.to_path_buf(),
+        };
+        let file = dir.join(workspace_file.file_name().unwrap_or_default());
+        // File identity also catches another spelling of an existing file
+        // (case on a case-insensitive volume, a link).
+        [dir.join(PROJECT_META), file.with_extension("lock"), file.with_extension("pending")]
+            .iter()
+            .any(|reserved| reserved == &target || same_file::is_same_file(reserved, &target).unwrap_or(false))
     }
 
     pub fn select(&mut self, path: &Path, linked: bool) {
@@ -366,6 +373,8 @@ pub struct Workspace {
     /// Directories the GUI opened or saved a project in this session; agents
     /// may reach them too. Never persisted.
     session: Vec<PathBuf>,
+    /// Background deliverables of this session. Never persisted.
+    artifacts: super::artifacts::Shared,
 }
 #[derive(schemars::JsonSchema, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -386,6 +395,10 @@ impl Workspace {
     pub(super) fn file(&self) -> &Path {
         &self.path
     }
+    pub(super) fn artifacts(&self) -> super::artifacts::Shared {
+        self.artifacts.clone()
+    }
+
     pub(super) fn session(&self) -> &[PathBuf] {
         &self.session
     }
@@ -459,6 +472,7 @@ impl Workspace {
             lease,
             state,
             session: Vec::new(),
+            artifacts: Default::default(),
         })
     }
     fn recovery_artifact(path: &std::path::Path) -> Option<PathBuf> {

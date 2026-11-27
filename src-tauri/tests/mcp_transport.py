@@ -111,6 +111,27 @@ def malformed_parameters() -> None:
     print("PASS: real MCP tool errors, parser rejection, broker liveness, and batch rollback")
 
 
+def artifacts() -> None:
+    before: dict = tool("system_get")
+    tool("bench_template", {"name": "michelson", "apply": True, "revision": before["revision"]})
+    started: dict = tool("artifact_start", {"kind": "blueprint", "format": "svg"})
+    deadline = time.monotonic() + 60
+    while (status := tool("artifact_status", {"id": started["id"]}))["state"] in ("queued", "running"):
+        assert time.monotonic() < deadline, status
+        time.sleep(0.02)
+    assert status["state"] == "done" and status["mime"] == "image/svg+xml", status
+    result: dict = request("tools/call", dict(name="artifact_fetch", arguments={"id": started["id"]}))
+    meta, resource = result["content"]
+    assert result["isError"] is False and json.loads(meta["text"])["bytes"] == status["bytes"], meta
+    assert resource["type"] == "resource" and resource["resource"]["mimeType"] == "image/svg+xml", resource
+    assert "<svg" in resource["resource"]["text"][:200], resource["resource"]["text"][:200]
+    denied: dict = tool("artifact_export", {"id": started["id"], "path": str(DATA.parent / "outside-scope.svg")}, error=True)
+    assert "File access denied" in denied["content"][0]["text"], denied
+    exported: dict = tool("artifact_export", {"id": started["id"], "path": "transport.svg"})
+    assert (DATA / "projects" / "transport.svg").stat().st_size == status["bytes"], exported
+    print("PASS: artifact start, status, fetch as MCP resource, and scoped export")
+
+
 def workspace_recovery():
     global engine
     status=tool("workspace_status")
@@ -966,6 +987,10 @@ try:
         raise SystemExit(0)
     if "--malformed-parameters" in sys.argv:
         malformed_parameters()
+        raise SystemExit(0)
+    if "--artifacts" in sys.argv:
+        assert {t["name"] for t in tools} >= {"artifact_start", "artifact_status", "artifact_fetch", "artifact_export", "artifact_cancel"}
+        artifacts()
         raise SystemExit(0)
     setup_status=tool("workspace_status")
     if setup_status["state"]=="recovery":

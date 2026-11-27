@@ -15,7 +15,7 @@ import {
     ZoomIn,
     ZoomOut,
 } from 'lucide-vue-next';
-import { callTool, errorMessage } from '../api';
+import { callTool, errorMessage, settleArtifact } from '../api';
 import { tr } from '../i18n';
 import {
     benchPorts,
@@ -918,7 +918,7 @@ function endPointer(): void {
 
 const cell = (v: unknown) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
 
-function downloadBlob(content: string, filename: string, mime: string): void {
+function downloadBlob(content: BlobPart, filename: string, mime: string): void {
     const url = URL.createObjectURL(new Blob([content], { type: mime }));
     const a = document.createElement('a');
     a.href = url;
@@ -985,15 +985,24 @@ async function exportDeliverable(): Promise<void> {
             );
             return;
         }
-        const out = await callTool('bench_export_blueprint', {
-            ...(benchDirty.value ? { bench: input.bench } : {}),
-            format: exportFormat.value,
+        const format = exportFormat.value;
+        const { id } = await callTool('artifact_start', {
+            kind: 'blueprint',
+            format,
+            ...(benchDirty.value ? { params: { bench: input.bench } } : {}),
         });
-        if (out.format === 'svg' && (input !== labInput.value || out.revision !== input.revision)) {
+        const status = await settleArtifact(id);
+        if (status.state !== 'done') {
+            error.value = status.error ?? status.state;
+            return;
+        }
+        if (format === 'svg' && (input !== labInput.value || status.revision !== input.revision)) {
             error.value = tr('benchLab.revisionChanged');
             return;
         }
-        downloadBlob(out.content, out.filename, out.mime);
+        const out = await callTool('artifact_fetch', { id });
+        const bytes = Uint8Array.from(atob(out.data), (c) => c.charCodeAt(0));
+        downloadBlob(bytes, out.filename, out.mime);
         statusMsg.value = tr('benchLab.exported', { file: out.filename });
     } catch (e) {
         error.value = errorMessage(e);
