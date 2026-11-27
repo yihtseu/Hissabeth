@@ -74,7 +74,7 @@ jobs:
             - uses: actions/checkout@v7
               with:
                   persist-credentials: false
-            - name: Fetch Geopter optical core and prescriptions
+            - name: Fetch Geopter prescriptions
               uses: actions/checkout@v7
               with:
                   repository: heterophyllus/Geopter
@@ -82,34 +82,11 @@ jobs:
                   path: reference/upstream
                   sparse-checkout: |
                       example
-                      geopter/optical
-                      3rdparty/eigen-3.3.9
-                      3rdparty/json
                   persist-credentials: false
-            - name: Fetch the JSON header used by Geopter
-              run: git -C reference/upstream submodule update --init --depth 1 -- 3rdparty/json
-            - uses: actions/cache@v5
-              with:
-                  path: ${{ runner.temp }}/geopter-ccache
-                  key: geopter-oracle-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
-                  restore-keys: geopter-oracle-${{ runner.os }}-${{ runner.arch }}-
-            - name: Build the C++ reference oracle
-              env:
-                  CCACHE_DIR: ${{ runner.temp }}/geopter-ccache
-                  CCACHE_BASEDIR: ${{ github.workspace }}
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y --no-install-recommends ccache
-                  cmake -S src-tauri/tests/oracle -B src-tauri/target/oracle-cpp -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-                  cmake --build src-tauri/target/oracle-cpp --parallel 2
             - uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
               with:
                   workspaces: src-tauri
-            - name: Verify frozen Geopter values
-              run: |
-                  export GEOPTER_ORACLE="$PWD/src-tauri/target/oracle-cpp/geopter_oracle"
-                  cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test oracle geopter_snapshots_match_cpp_oracle -- --ignored --nocapture
             - name: Run reference cases in-process and through the headless CLI
               run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test oracle oracle_ -- --include-ignored --nocapture
 

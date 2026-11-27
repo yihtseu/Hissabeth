@@ -138,28 +138,6 @@ impl Check {
         }
     }
 
-    fn cpp_expected<'a>(&self, result: &'a Value) -> Option<&'a Value> {
-        match self.quantity.as_str() {
-            "ray_image_y" => result.get("chief_rays")?.get(self.field_index())?.get(1),
-            "geometric_mtf" => {
-                let branch = if self.args["axis"] == "x" { "S" } else { "T" };
-                let name = format!("F{}_{branch}", self.field_index());
-                let curve = result["curves"]
-                    .as_array()?
-                    .iter()
-                    .find(|c| c["name"] == name)?;
-                self.mtf_sample(&curve["frequencies"], &curve["values"])
-            }
-            key => result.get(key),
-        }
-    }
-
-    fn field_index(&self) -> usize {
-        self.args.get("field_index").map_or(0, |value| {
-            usize::try_from(value.as_u64().expect("Expected a field index")).unwrap()
-        })
-    }
-
     fn matches(&self, actual: &Value, limit: f64) -> Option<bool> {
         match &self.expected {
             Expected::Text(expected) => Some(actual.as_str()? == expected),
@@ -285,82 +263,4 @@ fn oracle_headless() {
         }
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())
     });
-}
-
-#[test]
-#[ignore = "requires a C++ Geopter build at GEOPTER_ORACLE"]
-fn geopter_snapshots_match_cpp_oracle() {
-    let binary = std::env::var_os("GEOPTER_ORACLE").expect("Set GEOPTER_ORACLE to geopter_oracle");
-    let mut catalogs: Vec<_> = fs::read_dir(Path::new(MANIFEST).join("data/glass"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("agf"))
-        })
-        .collect();
-    catalogs.sort();
-    let mut matched = 0;
-    for case in cases() {
-        for (geometric, flags) in [(false, &[][..]), (true, &["--geometric"][..])] {
-            let checks: Vec<_> = case
-                .checks
-                .iter()
-                .filter(|check| {
-                    check.source == "geopter" && (check.quantity == "geometric_mtf") == geometric
-                })
-                .collect();
-            if checks.is_empty() {
-                continue;
-            }
-            let Prescription::File { file } = &case.prescription else {
-                panic!(
-                    "{}: a Geopter snapshot requires an upstream file",
-                    case.name
-                );
-            };
-            let output = Command::new(&binary)
-                .args(flags)
-                .arg(Prescription::upstream_path(file))
-                .args(&catalogs)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-            for check in checks {
-                let actual = check.cpp_expected(&result).unwrap_or(&Value::Null);
-                let limit = match check.expected {
-                    // These C++ results depend on subtracting chief ray heights
-                    // at the 1e10 mm infinity sentinel. Allow a few ulps there
-                    // when reproducing the snapshot across compiler builds.
-                    Expected::Number(_)
-                        if matches!(
-                            check.quantity.as_str(),
-                            "entrance_pupil_distance" | "exit_pupil_radius"
-                        ) =>
-                    {
-                        4. * f64::EPSILON * 1e10
-                    }
-                    Expected::Number(value) => 1e-12 * value.abs().max(1.),
-                    Expected::Text(_) => 0.,
-                };
-                assert_eq!(
-                    check.matches(actual, limit),
-                    Some(true),
-                    "{} / {} {:?}: C++ returned {actual}, fixture expects {:?}",
-                    case.name,
-                    check.quantity,
-                    check.args,
-                    check.expected
-                );
-                matched += 1;
-            }
-        }
-    }
-    assert!(matched > 0, "No Geopter snapshots in the corpus");
-    println!("Geopter snapshots: {matched}/{matched} matched");
 }

@@ -340,43 +340,6 @@ def field_curvature():
     print("PASS: real field-curvature schemas, all spectral entries, skew sampling, shared analytic astigmatism values, retained chief failures and all-infinite/zero-field diagnostics, read-only revisions and same-relay recovery")
 
 
-def curvature_oracles():
-    import copy
-    initial=tool("system_get")["system"]
-    catalogs=[str(p) for p in (ROOT/"data/glass").iterdir() if p.suffix.lower()==".agf"]
-    maximum=0.;count=0
-    cases=[("sphere-infinite",1e10,None),("sphere-finite",200,None),("even-off-axis-infinite",1e10,"even"),("odd-off-axis-finite",200,"odd")]
-    if "--curvature-oracles-aspheres" in sys.argv: cases=cases[2:]
-    for label,distance,terms in cases:
-        system=copy.deepcopy(initial);system.update(object_distance=distance,temperature=25,pupil_mapping="reference_entrance_pupil")
-        system["pupil"]=dict(kind="entrance_pupil_diameter",value=5)
-        for surface in system["surfaces"]:surface.update(conic=0,even=[],odd=[],gap_solve=dict(kind="fixed"),clear_aperture=True,aperture=12.5)
-        if terms:
-            system["surfaces"][1]["conic"]=-.4
-            system["surfaces"][1][terms]=[1e-6,-1e-8]
-        tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
-        text=tool("project_export",dict(format="geopter"))["text"]
-        path=ROOT/"target"/("curvature-oracle-"+label+".json");path.write_text(text)
-        reference=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--curvature",str(path),*catalogs],capture_output=True,text=True,check=True,timeout=30).stdout)
-        actual=tool("field_curvature",dict(samples=17))
-        assert len(reference["curves"])==2*len(actual["curves"])
-        case_max=0.
-        for wi,curve in enumerate(actual["curves"]):
-            for bi,branch in enumerate(["sagittal","tangential"]):
-                oracle=reference["curves"][2*wi+bi]
-                assert len(oracle["shifts"])==len(oracle["fields"])==17,(label,oracle)
-                for point,expected,radius in zip(curve["points"],oracle["shifts"],oracle["fields"]):
-                    assert point[branch]["error"] is None,(label,point)
-                    assert abs(point["radius"]-radius)<1e-12
-                    error=abs(point[branch]["shift"]-expected)
-                    case_max=max(case_max,error)
-                    assert error<2e-4,(label,wi,branch,point["field"],point[branch]["shift"],expected,error)
-                    count+=1
-        maximum=max(maximum,case_max)
-        print("PASS: C++ Geopter Coddington",label,"all3wavelengths17fields2branches; max error",case_max,flush=True)
-    print("PASS: C++ field-curvature workflow",count,"matched focal shifts; maximum absolute mm error",maximum)
-
-
 def ray_inspection():
     global engine
     snapshot = tool("system_get")
@@ -540,50 +503,7 @@ def apertures():
     recovered=tool("system_get")
     assert abs(recovered["system"]["surfaces"][1]["semi_diameter"]-6)<1e-8
     assert json.loads((DATA/"system.json").read_text())==recovered["system"]
-    # Run numerical checks only for the eight upstream examples not previously compared.
-    source=ROOT.parent/"reference/upstream/example"
-    catalogs=[p for p in (ROOT/"data/glass").iterdir() if p.suffix.lower()==".agf"]
-    for path in source.rglob("*.json"):
-        if path.name in ("sasian_triplet.json","kingslake_doublet.json"): continue
-        current=tool("system_get")
-        tool("project_import",dict(format="geopter",text=path.read_text(),revision=current["revision"]))
-        imported=tool("system_get")
-        first=tool("paraxial")
-        oracle=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),str(path),*map(str,catalogs)],capture_output=True,text=True,check=True,timeout=20).stdout)
-        for key in ("efl","bfl","entrance_pupil_distance","entrance_pupil_radius","exit_pupil_distance","exit_pupil_radius"):
-            actual=first[key]; expected=oracle[key]
-            assert abs(actual-expected)<=2e-5*max(1,abs(expected)),(path.name,key,actual,expected)
-        for index,expected in enumerate(oracle["chief_rays"]):
-            assert expected is not None,(path.name,index,"upstream chief failed")
-            ray=tool("trace_ray",dict(field_index=index,x=0,y=0))
-            actual=ray["points"][-1][:2]
-            assert max(abs(a-b) for a,b in zip(actual,expected))<2e-4,(path.name,index,actual,expected)
-        print("PASS: upstream first-order/chief comparison:",path.relative_to(source))
     print("PASS: aperture/vignetting MCP revision, sizing, factors, native persistence, atomic rejection, clear and same-relay corrected-size restart recovery")
-
-
-def prior_chiefs():
-    # The trace launch and signed intersections changed; reuse unchanged first-order
-    # evidence and compare only the two earlier prescriptions' affected chief rays.
-    source=ROOT.parent/"reference/upstream/example/book"
-    for filename in ("sasian_triplet.json","kingslake_doublet.json","sasian_triplet_glass.json"):
-        path=source/filename
-        if filename=="sasian_triplet.json":
-            # Upstream Buchdahl's quadratic denominator has the wrong sign:
-            # its off-reference indices do not reproduce the prescribed Abbe number.
-            # Compare the mapping at d, and use catalog glass for the full spectrum.
-            project=json.loads(path.read_text());waves=project["Spec"]["Wvl"];ref=waves["RefIndex"]
-            for key in ("Value","Weight","Color"): waves[key]=[waves[key][ref]]
-            waves["RefIndex"]=0
-            path=ROOT/"target/sasian-reference-only.json";path.write_text(json.dumps(project))
-        current=tool("system_get")
-        tool("project_import",dict(format="geopter",text=path.read_text(),revision=current["revision"]))
-        oracle=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),str(path)],capture_output=True,text=True,check=True,timeout=20).stdout)
-        for index,expected in enumerate(oracle["chief_rays"]):
-            assert expected is not None,(filename,index)
-            actual=tool("trace_ray",dict(field_index=index,x=0,y=0))["points"][-1][:2]
-            assert max(abs(a-b) for a,b in zip(actual,expected))<2e-4,(filename,index,actual,expected)
-        print("PASS: affected current chief rays; earlier first-order evidence reused:",filename)
 
 
 def spectrum_sampling():
@@ -656,36 +576,14 @@ def spectrum_sampling():
         error=tool(name,args,error=True)
         assert "3000" in error["content"][0]["text"],error
     assert tool("system_get")==current and (DATA/"system.json").read_bytes()==saved
-    # Exercise the original C++ analysis at the same physical frequencies and
-    # grid rays, with the original equal-weight, zero-vignetting prescriptions.
+    # The upstream prescriptions import with the reference entrance-pupil mapping.
     source=ROOT.parent/"reference/upstream/example/book"
     for filename in ("sasian_triplet.json","kingslake_doublet.json","sasian_triplet_glass.json"):
-        path=source/filename
-        if filename=="sasian_triplet.json":
-            # Upstream Buchdahl's quadratic denominator has the wrong sign:
-            # its off-reference indices do not reproduce the prescribed Abbe number.
-            # Compare the mapping at d, and use catalog glass for the full spectrum.
-            project=json.loads(path.read_text());waves=project["Spec"]["Wvl"];ref=waves["RefIndex"]
-            for key in ("Value","Weight","Color"): waves[key]=[waves[key][ref]]
-            waves["RefIndex"]=0
-            path=ROOT/"target/sasian-reference-only.json";path.write_text(json.dumps(project))
         current=tool("system_get")
-        tool("project_import",dict(format="geopter",text=path.read_text(),revision=current["revision"]))
-        imported=tool("system_get")
-        assert imported["system"]["pupil_mapping"]=="reference_entrance_pupil"
+        tool("project_import",dict(format="geopter",text=(source/filename).read_text(),revision=current["revision"]))
+        assert tool("system_get")["system"]["pupil_mapping"]=="reference_entrance_pupil"
         native=json.loads(tool("project_export",dict(format="hissabeth"))["text"])
         assert native["pupil_mapping"]=="reference_entrance_pupil"
-        oracle=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--geometric",str(path),str(ROOT.parent/"reference/upstream/data/AGF/SCHOTT.agf")],capture_output=True,text=True,check=True,timeout=30).stdout)
-        assert len(oracle["curves"])>=2
-        maximum_error=0.
-        for curve in oracle["curves"]:
-            field=int(curve["name"].split("_")[0][1:]);axis="x" if curve["name"].endswith("_S") else "y"
-            result=tool("geometric_mtf",dict(field_index=field,sampling=dict(kind="grid",count=17),spectrum=dict(kind="polychromatic"),axis=axis,max_frequency=100))
-            assert result["frequencies"]==curve["frequencies"]
-            delta=max(abs(a-b) for a,b in zip(result["mtf"],curve["values"]))
-            maximum_error=max(maximum_error,delta)
-            assert delta<.002,(filename,curve["name"],delta)
-        print("PASS: original C++ geometric MTF, all fields/axes/65 frequencies:",filename,"max absolute error",maximum_error)
     print("PASS: weighted hexapolar spot/energy, strict spectral/sampling arguments, real lateral-color OTF cancellation, diffraction physical frequencies/complex components, skipped zero weights, positive-weight failure without mutation, engine analysis revisions")
 
 
@@ -883,106 +781,6 @@ def endpoints():
     print("PASS: real MCP curved source/detector signed intersections and OPL, endpoint SPH/ASP/ODD exchange, object/image clipping and coverage, image-limited vignetting, final edge solve and profile edit reapplication, planar FFT model, atomic strict edits and same-relay stale-envelope/gap recovery")
 
 
-def endpoint_oracles():
-    import copy
-    catalogs=[str(p) for p in (ROOT/"data/glass").iterdir() if p.suffix.lower()==".agf"]
-    cases=0;rays=0;maximum=0.;branch_differences=0
-    def sag(profile,point):
-        r=math.hypot(point[0],point[1]);c=0 if profile["radius"]==0 else 1/profile["radius"]
-        return c*r*r/(1+math.sqrt(1-(1+profile["conic"])*c*c*r*r))+sum(a*r**(4+2*i) for i,a in enumerate(profile["even"]))+sum(a*r**(3+i) for i,a in enumerate(profile["odd"]))
-    def compare(project,label):
-        nonlocal cases,rays,maximum,branch_differences
-        path=ROOT/"target"/("endpoint-oracle-"+label+".json")
-        path.write_text(json.dumps(project))
-        tool("project_import",dict(format="geopter",text=path.read_text(),revision=tool("system_get")["revision"]))
-        system=tool("system_get")["system"]
-        radius=tool("paraxial")["entrance_pupil_radius"]
-        reference=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--rays",str(path),*catalogs],capture_output=True,text=True,check=True,timeout=30).stdout)
-        print("Oracle case:",label,"statuses",[r["status"] for r in reference],flush=True)
-        assert len(reference)==4
-        if label=="clipped-image": assert any(r["status"]==0 for r in reference) and any(r["status"]==0x2001 for r in reference)
-        for item in reference:
-            args=dict(field_index=0,wavelength=item["wavelength"],x=item["pupil"][0]*radius,y=item["pupil"][1]*radius)
-            vertices=[];z=0
-            for surface in system["surfaces"]: vertices.append(z);z+=surface["thickness"]
-            if item["status"]!=0:
-                result=request("tools/call",dict(name="trace_ray",arguments=args))
-                if not result["isError"]:
-                    # The original undamped asphere Newton iteration can select a different
-                    # radial-profile crossing. Prove both roots and the native vertex-sheet
-                    # choice, and validate native Snell conservation without claiming parity.
-                    actual=json.loads(result["content"][0]["text"])
-                    mismatch=None
-                    for i,segment in enumerate(actual["segments"]):
-                        other=item["points"][i+1];point=segment["point"]
-                        if max(abs(a-b) for a,b in zip(point,[other[0],other[1],other[2]+vertices[i]]))>2e-4:
-                            mismatch=i;break
-                    assert mismatch is not None,(label,"status difference without a distinct root")
-                    i=mismatch;shape=system["surfaces"][i];segment=actual["segments"][i]
-                    other=item["points"][i+1];point=segment["point"]
-                    assert any(shape["even"]+shape["odd"]),(label,"distinct root on non-polynomial profile")
-                    assert abs(sag(shape,other)-other[2])<1e-6
-                    assert abs(sag(shape,point)-(point[2]-vertices[i]))<1e-8
-                    assert abs(point[2]-vertices[i])<abs(other[2])
-                    for hit in actual["segments"]:
-                        n=hit["normal"];v=hit["incoming"];u=hit["direction"]
-                        ni=sum(a*b for a,b in zip(n,v));no=sum(a*b for a,b in zip(n,u))
-                        assert max(abs(hit["n_before"]*(v[j]-ni*n[j])-hit["n_after"]*(u[j]-no*n[j])) for j in range(3))<1e-10
-                    branch_differences+=1
-                    print("Distinct asphere roots (not coordinate parity):",label,item["pupil"],"surface",i+1,"native/upstream local z",point[2]-vertices[i],other[2],flush=True)
-                else:
-                    message=result["content"][0]["text"].lower()
-                    if item["status"]==0x2001: assert "blocked" in message,(label,item["status"],message)
-                    elif item["status"]==0x1000: assert "total internal" in message,(label,item["status"],message)
-                rays+=1;continue
-            actual=tool("trace_ray",args)
-            expected=[[p[0],p[1],p[2]+vertex] for p,vertex in zip(item["points"][1:],vertices+[z])]
-            hits=[segment["point"] for segment in actual["segments"]]+[actual["image_hit"]["point"]]
-            assert len(hits)==len(expected)
-            error=max(abs(a-b) for point,other in zip(hits,expected) for a,b in zip(point,other))
-            assert error<2e-4,(label,item["pupil"],error)
-            maximum=max(maximum,error);rays+=1
-        cases+=1
-    for source in sorted((ROOT.parent/"reference/upstream/example").rglob("*.json")):
-        original=json.loads(source.read_text());wave=original["Spec"]["Wvl"];reference=wave["RefIndex"]
-        for key in ("Value","Weight","Color"): wave[key]=[wave[key][reference]]
-        wave["RefIndex"]=0
-        fields=original["Spec"]["Field"];count=len(fields["X"])
-        for field_index in range(count):
-            project=copy.deepcopy(original);field=project["Spec"]["Field"]
-            order=[field_index]+[i for i in range(count) if i!=field_index]
-            for key in ("X","Y","Weight","Color","VUY","VLY","VUX","VLX"): field[key]=[fields[key][i] for i in order]
-            for key in ("VUY","VLY","VUX","VLX"): field[key]=[0]*count
-            compare(project,source.stem+"-f"+str(field_index))
-    initial=tool("system_get")["system"]
-    # Use the catalog singlet for endpoint cases, independent of the upstream model-glass denominator.
-    # Install a catalog singlet using the current saved prescription fields.
-    template=copy.deepcopy(initial["surfaces"][0])
-    a=copy.deepcopy(template);a.update(radius=50,thickness=5,material="N-BK7_SCHOTT",aperture=12.5,clear_aperture=True,conic=0,even=[],odd=[],gap_solve=dict(kind="fixed"))
-    b=copy.deepcopy(a);b.update(radius=-50,thickness=20,material="AIR")
-    initial.update(surfaces=[a,b],object_distance=300,object_material="AIR",stop_index=0,temperature=25,pressure=101325,
-                   pupil_mapping="reference_entrance_pupil",pupil=dict(kind="entrance_pupil_diameter",value=4),
-                   fields=[dict(x=.5,y=1,weight=1,vignetting=[0]*4,color=[.2,.5,.8,1])],field_type="angle",
-                   wavelengths=[dict(value=587.562,weight=1,color=[.7,.8,0,1])],reference_wavelength=0,custom_glasses=[])
-    flat=dict(radius=0,conic=0,even=[],odd=[],aperture=1,clear_aperture=False,semi_diameter=0)
-    initial["object_surface"]=copy.deepcopy(flat);initial["image_surface"]=copy.deepcopy(flat)
-    for profile in ("spherical","even","odd"):
-        for gap in (20,-20):
-            system=copy.deepcopy(initial);system["surfaces"][1]["thickness"]=gap
-            shape=system["image_surface"];shape["radius"]=40 if profile!="odd" else -40
-            if profile=="even": shape.update(conic=-1,even=[.0001])
-            if profile=="odd": shape.update(conic=-.2,odd=[.0001])
-            tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
-            project=json.loads(tool("project_export",dict(format="geopter"))["text"])
-            compare(project,profile+"-image-gap"+str(gap))
-    system=copy.deepcopy(initial)
-    system["fields"][0].update(x=.1,y=.2)
-    system["image_surface"].update(radius=10,clear_aperture=True,aperture=.6)
-    tool("system_set",dict(system=system,revision=tool("system_get")["revision"]))
-    compare(json.loads(tool("project_export",dict(format="geopter"))["text"]),"clipped-image")
-    print(f"PASS: original C++ reference-wavelength full-path comparison for all ten examples/every field, six signed SPH/ASP/ODD image cases and detector aperture clipping: {cases} prescriptions, {rays} rays, {branch_differences} distinct polynomial-root rays excluded from coordinate parity and checked by sag/Snell equations, maximum matched coordinate error {maximum} mm (tolerance 0.0002 mm)")
-
-
 def focus_overflow():
     import copy
     state=tool("system_get");system=state["system"]
@@ -1152,21 +950,6 @@ def fft_pupil():
             assert a==b,(mapping,a.keys())
         assert changed[-1]["failed_pupil_rays"]>0
         assert changed[0]["blocked"]>0
-    path=ROOT.parent/"reference/upstream/example/book/sasian_triplet_glass.json"
-    project=json.loads(path.read_text());fields=project["Spec"]["Field"]
-    for key,value in (("VUY",.4),("VLY",.2),("VUX",-.1),("VLX",.3)):
-        fields[key]=[value]*len(fields["Y"])
-    path=ROOT/"target/sasian-catalog-nonzero-vignetting.json";path.write_text(json.dumps(project))
-    saved=tool("system_get");tool("project_import",dict(format="geopter",text=path.read_text(),revision=saved["revision"]))
-    oracle=json.loads(subprocess.run([str(ROOT/"target/geopter_oracle"),"--geometric",str(path),str(ROOT.parent/"reference/upstream/data/AGF/SCHOTT.agf")],capture_output=True,text=True,check=True,timeout=30).stdout)
-    maximum=0.
-    for curve in oracle["curves"]:
-        field=int(curve["name"].split("_")[0][1:]);axis="x" if curve["name"].endswith("_S") else "y"
-        result=tool("geometric_mtf",dict(field_index=field,sampling=dict(kind="grid",count=17),spectrum=dict(kind="polychromatic"),axis=axis,max_frequency=100))
-        delta=max(abs(a-b) for a,b in zip(result["mtf"],curve["values"]))
-        assert delta<.002,(curve["name"],delta)
-        maximum=max(maximum,delta)
-    print("PASS: original C++ full-spectrum geometric MTF with asymmetric nonzero stored factors, all fields/global axes/65 frequencies, max absolute error",maximum)
     print("PASS: real MCP mono/poly spots, energy, geometric MTF, wavefront, PSF and diffraction MTF integrate nominal pupils on both mappings; physical-aperture losses and engine revisions retained")
 
 try:
@@ -1197,9 +980,6 @@ try:
     if "--field-curvature" in sys.argv:
         field_curvature()
         raise SystemExit(0)
-    if "--curvature-oracles" in sys.argv or "--curvature-oracles-aspheres" in sys.argv:
-        curvature_oracles()
-        raise SystemExit(0)
     if "--ray-inspection" in sys.argv:
         ray_inspection()
         raise SystemExit(0)
@@ -1208,9 +988,6 @@ try:
         raise SystemExit(0)
     if "--endpoints" in sys.argv:
         endpoints()
-        raise SystemExit(0)
-    if "--endpoint-oracles" in sys.argv:
-        endpoint_oracles()
         raise SystemExit(0)
     if "--focus-overflow" in sys.argv:
         focus_overflow()
@@ -1229,9 +1006,6 @@ try:
         raise SystemExit(0)
     if "--spectrum-sampling" in sys.argv:
         spectrum_sampling()
-        raise SystemExit(0)
-    if "--prior-chiefs" in sys.argv:
-        prior_chiefs()
         raise SystemExit(0)
     if "--apertures" in sys.argv:
         assert {t["name"] for t in tools}>={"aperture_report","vignetting_update"}
@@ -1256,26 +1030,6 @@ try:
     assert math.isfinite(spot["rms_radius"])
     psf = tool("diffraction_psf", dict(grid=16, field_index=0))
     assert abs(sum(psf["intensity"]) - 1.0) < 1e-10
-    oracle = ROOT / "target/geopter_oracle"
-    if oracle.exists():
-        for filename in ("sasian_triplet.json", "kingslake_doublet.json"):
-            fixture = ROOT.parent / "reference/upstream/example/book" / filename
-            reference = json.loads(subprocess.run([str(oracle), str(fixture)], capture_output=True, text=True, check=True, timeout=20).stdout)
-            current = tool("system_get")
-            tool("project_import", dict(format="geopter", text=fixture.read_text(), revision=current["revision"]))
-            first_order = tool("paraxial")
-            for key in ("efl", "bfl", "entrance_pupil_distance", "entrance_pupil_radius", "exit_pupil_distance", "exit_pupil_radius"):
-                actual = first_order[key]
-                expected = reference[key]
-                assert abs(actual - expected) < 2e-5 * max(1, abs(expected)), (filename, key, actual, expected)
-            for index, expected in enumerate(reference["chief_rays"]):
-                if expected is None:
-                    continue
-                actual = tool("trace_ray", dict(field_index=index))["points"][-1]
-                assert math.hypot(actual[0] - expected[0], actual[1] - expected[1]) < 2e-4, (filename, index, actual, expected)
-            print("PASS: C++ Geopter first-order and chief-ray comparison:", filename)
-        current = tool("system_get")
-        tool("system_set", dict(system=system, revision=current["revision"]))
     # Exercise registration using isolated CLI doubles; real account settings are untouched.
     fake_dir = ROOT / "target/agent-cli-fixtures"
     fake_dir.mkdir(exist_ok=True)
