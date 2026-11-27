@@ -236,6 +236,7 @@ export default {
             unexpected_hit: '意外元件阻挡',
             clipped: '口径截光',
             beam_stop: '挡光终止',
+            masked: '掩模遮挡',
             budget: '达到追迹预算',
             detected: '已探测',
         },
@@ -2114,6 +2115,7 @@ export default {
         templates: {
             mach_zehnder: '马赫-曾德尔干涉仪',
             delay_line: '双臂延迟线',
+            three_arm: '三孔光阑 L/C/R 三臂',
             michelson: '迈克尔逊干涉仪',
             polarized_beam_combiner: 'PBS + 半波片双臂分光',
             beam_expander_focus: '扩束准直 + 折转聚焦',

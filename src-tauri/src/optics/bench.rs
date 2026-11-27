@@ -161,6 +161,11 @@ pub struct Element {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 2.0, max = 200.0))]
     pub lever_arm_mm: Option<f64>,
+    /// Spatial regions on an aperture plate or mirror face. When present, each
+    /// region is its own named output port and light outside every region is blocked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub regions: Vec<Region>,
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -220,6 +225,11 @@ struct ElementInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 2.0, max = 200.0))]
     lever_arm_mm: Option<f64>,
+    /// Spatial regions on an aperture plate or mirror face. When present, each
+    /// region is its own named output port and light outside every region is blocked.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    regions: Vec<Region>,
 }
 
 impl From<ElementInput> for Element {
@@ -256,13 +266,99 @@ impl From<ElementInput> for Element {
             extinction_ratio: input.extinction_ratio,
             screw_tpi: input.screw_tpi,
             lever_arm_mm: input.lever_arm_mm,
+            regions: input.regions,
         }
     }
+}
+
+/// Region outline in element-local in-plane coordinates `[y, z]` (mm), the
+/// same frame as the clear aperture.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RegionShape {
+    Circle {
+        #[schemars(inner(range(min = -1e5, max = 1e5)))]
+        center: [f64; 2],
+        #[schemars(range(min = 1e-9, max = 1e5))]
+        radius: f64,
+    },
+    Rect {
+        #[schemars(inner(range(min = -1e5, max = 1e5)))]
+        center: [f64; 2],
+        /// Full width along local y and height along local z.
+        #[schemars(inner(range(min = 1e-9, max = 1e5)))]
+        size: [f64; 2],
+    },
+}
+impl RegionShape {
+    pub(crate) fn center(&self) -> [f64; 2] {
+        match self {
+            Self::Circle { center, .. } | Self::Rect { center, .. } => *center,
+        }
+    }
+    pub(crate) fn contains(&self, y: f64, z: f64) -> bool {
+        match self {
+            Self::Circle { center, radius } => (y - center[0]).hypot(z - center[1]) <= *radius,
+            Self::Rect { center, size } => {
+                (y - center[0]).abs() <= size[0] / 2. && (z - center[1]).abs() <= size[1] / 2.
+            }
+        }
+    }
+    /// Radius of the largest circle inside the region (mm).
+    pub(crate) fn inscribed_radius(&self) -> f64 {
+        match self {
+            Self::Circle { radius, .. } => *radius,
+            Self::Rect { size, .. } => size[0].min(size[1]) / 2.,
+        }
+    }
+    fn valid(&self) -> bool {
+        match self {
+            Self::Circle { center, radius } => {
+                center.iter().all(|v| v.is_finite()) && radius.is_finite() && *radius > 0.
+            }
+            Self::Rect { center, size } => {
+                center.iter().all(|v| v.is_finite())
+                    && size.iter().all(|v| v.is_finite() && *v > 0.)
+            }
+        }
+    }
+}
+/// One sub-aperture (aperture plate) or facet (mirror) with its own output port.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    /// Output port name, unique on the element (for example `L`, `C`, `R`).
+    pub port: String,
+    pub shape: RegionShape,
+    /// Power fraction passed (aperture) or reflected (mirror) by this region.
+    #[serde(default = "unit_fraction")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub transmittance: f64,
+    /// Mirror facets only: facet normal in element-local coordinates. The
+    /// element normal `[1, 0, 0]` is used when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
+    pub normal: Option<V3>,
+}
+fn unit_fraction() -> f64 {
+    1.
 }
 
 impl Element {
     pub(crate) fn rotation(&self) -> V3 {
         self.rotation.expect("bench pose was validated")
+    }
+    /// Output ports: the region ports when regions are defined, else the kind's ports.
+    pub(crate) fn ports(&self) -> Vec<&str> {
+        if self.regions.is_empty() {
+            ports(self.kind).to_vec()
+        } else {
+            self.regions.iter().map(|r| r.port.as_str()).collect()
+        }
+    }
+    /// First region containing the local in-plane point `[y, z]`.
+    pub(crate) fn region_at(&self, y: f64, z: f64) -> Option<&Region> {
+        self.regions.iter().find(|r| r.shape.contains(y, z))
     }
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -331,6 +427,11 @@ pub struct Source {
     pub power: f64,
     #[schemars(range(min = 0.0, max = 1e5))]
     pub beam_radius: f64,
+    /// 1/e² intensity radius (mm) of a Gaussian profile weighting the sampled disk;
+    /// omitted means a flat-top profile with equal-power samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
+    pub gaussian_radius: Option<f64>,
     #[schemars(range(min = 0, max = 8))]
     pub rings: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,7 +452,7 @@ pub struct Source {
 #[serde(deny_unknown_fields)]
 pub struct Connection {
     pub from: String,
-    #[schemars(extend("enum" = ["out", "reflected", "transmitted"]))]
+    /// `out`, `reflected`, `transmitted`, or a region port of the source element.
     pub port: String,
     pub to: String,
 }
@@ -466,6 +567,16 @@ pub(crate) fn cross(a: V3, b: V3) -> V3 {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+/// Output direction of a region: straight through an aperture plate, or the
+/// mirror reflection off the region's facet normal.
+fn region_direction(e: &Element, region: &Region, d: V3) -> V3 {
+    if e.kind != Kind::Mirror {
+        return d;
+    }
+    let local = region.normal.unwrap_or([1., 0., 0.]);
+    let n = rotate(scale(local, 1. / norm(local)), e.rotation());
+    reflect(d, n)
 }
 fn reflect(direction: V3, normal: V3) -> V3 {
     sub(direction, scale(normal, 2. * dot(direction, normal)))
@@ -676,6 +787,31 @@ impl Bench {
             {
                 return Err(format!("Invalid mount: {}", e.id));
             }
+            if !e.regions.is_empty() {
+                let mut names = HashSet::new();
+                let valid = matches!(e.kind, Kind::Aperture | Kind::Mirror)
+                    && e.regions.len() <= 16
+                    && e.coating.is_none()
+                    && e.scatter.is_none()
+                    && e.regions.iter().all(|r| {
+                        (1..=32).contains(&r.port.len())
+                            && !["in", "mount"].contains(&r.port.as_str())
+                            && names.insert(r.port.as_str())
+                            && r.shape.valid()
+                            && (0. ..=1.).contains(&r.transmittance)
+                            && r.normal.is_none_or(|n| {
+                                e.kind == Kind::Mirror
+                                    && valid_vec(n)
+                                    && unit(n).is_ok_and(|u| u[0] > 1e-6)
+                            })
+                    });
+                if !valid {
+                    return Err(format!(
+                        "Invalid regions on {}: regions need an aperture or plane mirror without coating or scatter, at most 16 unique port names, finite shapes, transmittance in 0..1, and mirror-only facet normals facing the element front",
+                        e.id
+                    ));
+                }
+            }
             if let Some(n) = e.index
                 && (e.kind != Kind::Splitter || !(1. ..=4.).contains(&n))
             {
@@ -739,6 +875,7 @@ impl Bench {
                 || !s.beam_radius.is_finite()
                 || !(0. ..=1e5).contains(&s.beam_radius)
                 || s.rings > 8
+                || s.gaussian_radius.is_some_and(|x| !x.is_finite() || x <= 0.)
                 || s.waist.is_some_and(|x| !x.is_finite() || x <= 0.)
                 || s.waist_offset.is_some_and(|x| !x.is_finite())
                 || s.m2.is_some_and(|x| !x.is_finite() || x < 1.)
@@ -754,12 +891,12 @@ impl Bench {
         let mut outputs = HashSet::new();
         for c in &self.connections {
             let allowed = if self.sources.iter().any(|s| s.id == c.from) {
-                &["out"][..]
+                vec!["out"]
             } else {
                 self.elements
                     .iter()
                     .find(|e| e.id == c.from)
-                    .map(|e| ports(e.kind))
+                    .map(Element::ports)
                     .ok_or("Unknown connection source")?
             };
             if !allowed.contains(&c.port.as_str())
@@ -790,6 +927,8 @@ pub struct Segment {
     pub jones: Option<[[f64; 2]; 2]>,
     #[serde(skip)]
     pub(super) axial: bool,
+    #[serde(skip)]
+    pub(super) beam: Vec<Port>,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Termination {
@@ -836,8 +975,18 @@ pub struct Trace {
     pub detectors: Vec<DetectorMap>,
     pub balance_error: f64,
     pub warnings: Vec<String>,
+    /// Physical traces only: power leaving each region port of a spatial
+    /// splitter. Unlit ports are listed with zero power.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub port_power: Vec<PortPower>,
     #[serde(skip)]
     pub(super) splitter_outputs: HashMap<usize, [Option<V3>; 2]>,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
+pub struct PortPower {
+    pub element: String,
+    pub port: String,
+    pub power: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -912,6 +1061,13 @@ struct Packet {
     air: f64,
     wavelength: f64,
     jones: Option<Jones>,
+    /// Zero-power nominal ray launched from an unlit region's centre so that
+    /// every region arm keeps a geometric path; it never touches the ledger.
+    probe: bool,
+    /// Identity of the beam: the source port followed by every element port the
+    /// packet left. A beam's samples, its chief and its region probes share it,
+    /// while different sources or upstream arms differ.
+    beam: Vec<Port>,
 }
 impl Packet {
     fn segment(&self, from: V3, to: V3, element: Option<&str>, status: &str, flight: Option<Flight>) -> Segment {
@@ -926,6 +1082,7 @@ impl Packet {
             flight,
             jones: self.jones,
             axial: self.departure.nominal,
+            beam: self.beam.clone(),
         }
     }
 
@@ -1345,6 +1502,7 @@ impl Bench {
                     departure.port = Port::new(&e.id, port);
                     queue.push_back(Packet {
                         source: ray.source.clone(),
+                        beam: next_beam(&ray.beam, &e.id, port),
                         branch: if main {
                             format!("{}/{}:out", ray.branch, e.id)
                         } else {
@@ -1366,6 +1524,7 @@ impl Bench {
                         air: ray.air,
                         wavelength: ray.wavelength,
                         jones: ray.jones,
+                        probe: ray.probe,
                     });
                 }
                 GhostEnd::Truncated => {
@@ -1391,6 +1550,43 @@ impl Bench {
         Ok(trace)
     }
 
+    /// Lists every region port's power and marks branches leaving an unlit
+    /// region as unreachable: their probe path stays geometric only.
+    fn report_region_power(&self, out: &mut Trace, (ports, beams): &(HashMap<Port, f64>, HashMap<Vec<Port>, f64>)) {
+        let region_ports: HashSet<Port> = self
+            .elements
+            .iter()
+            .flat_map(|e| e.regions.iter().map(move |r| Port::new(&e.id, &r.port)))
+            .collect();
+        for e in &self.elements {
+            for r in &e.regions {
+                let port = Port::new(&e.id, &r.port);
+                out.port_power.push(PortPower {
+                    power: ports.get(&port).copied().unwrap_or(0.),
+                    element: port.element,
+                    port: port.port,
+                });
+            }
+        }
+        // A path is lit only where its own incoming beam (same source and upstream
+        // route) put sampled power through each region port it leaves.
+        for path in out.branches.iter_mut().flat_map(|b| b.paths.iter_mut()) {
+            if path.interruption.is_some() {
+                continue;
+            }
+            let unlit = path.segment_indices.iter().find_map(|&at| {
+                let segment = &out.segments[at];
+                let flight = segment.flight.as_ref()?;
+                let port = Port::new(&flight.from_element, &flight.from_port);
+                (region_ports.contains(&port)
+                    && beams.get(&segment.beam).is_none_or(|p| *p <= 0.))
+                .then_some(port)
+            });
+            if let Some(port) = unlit {
+                path.interruption = Some(PathBreak::new(&port.element, &port.port, "not_illuminated"));
+            }
+        }
+    }
     pub(super) fn trace_resolved(&self, system: &System) -> Result<Trace, String> {
         self.trace_mode(system, TraceMode::Physical)
     }
@@ -1414,8 +1610,14 @@ impl Bench {
             detectors: vec![],
             balance_error: 0.,
             warnings: vec![],
+            port_power: vec![],
             splitter_outputs: HashMap::new(),
         };
+        // Region port power: per port for display, and per incoming beam (see
+        // `Packet::beam`) to judge which arms are lit.
+        let mut region_power: (HashMap<Port, f64>, HashMap<Vec<Port>, f64>) = Default::default();
+        // Incoming beams (lineage, element) whose region arms already have an anchor.
+        let mut anchors: HashSet<(Vec<Port>, String)> = HashSet::new();
         let mut maps: HashMap<&str, DetectorAccum> = HashMap::new();
         let next = |id: &str, port: &str| {
             self.connections
@@ -1446,16 +1648,26 @@ impl Bench {
                     ));
                 }
             }
-            let count = 1 + 3 * s.rings * (s.rings + 1);
+            // Each sample stands for an (almost) equal-area cell, so its power is the
+            // profile intensity at the sample. Ring k holds 6k samples at radius kR/n;
+            // the normalisation always covers the full physical grid.
+            let intensity = |r2: f64| s.gaussian_radius.map_or(1., |w| (-2. * r2 / (w * w)).exp());
+            let total: f64 = (0..=s.rings)
+                .map(|k| {
+                    let r = s.beam_radius * k as f64 / s.rings.max(1) as f64;
+                    (6 * k).max(1) as f64 * intensity(r * r)
+                })
+                .sum();
             let air = system.material_index("AIR", s.wavelength)?;
             out.power.launched += s.power;
             for (i, offset) in offsets.into_iter().enumerate() {
                 queue.push_back(Packet {
                     source: s.id.clone(),
                     branch: format!("{}:{i}", s.id),
+                    beam: vec![Port::new(&s.id, "out")],
                     p: add(s.position, offset),
                     d,
-                    power: s.power / count as f64,
+                    power: s.power * intensity(dot(offset, offset)) / total,
                     depth: 0,
                     expected: next(&s.id, "out"),
                     departure: Departure {
@@ -1467,6 +1679,7 @@ impl Bench {
                     air,
                     wavelength: s.wavelength,
                     jones: s.polarization.and_then(Polarization::jones),
+                    probe: false,
                 });
             }
         }
@@ -1474,13 +1687,16 @@ impl Bench {
             if directed && ray.expected.is_none() {
                 continue;
             }
-            let cutoff = ray.power < self.min_power
+            let cutoff = (!ray.probe && ray.power < self.min_power)
                 || ray.depth >= self.max_interactions
                 || out.segments.len() >= 50_000;
             if cutoff {
-                out.power.truncated += ray.power;
                 let departure = &ray.departure;
                 paths.stop(departure, PathBreak::new(&departure.port.element, &departure.port.port, "budget"));
+                if ray.probe {
+                    continue;
+                }
+                out.power.truncated += ray.power;
                 let (position, last) = (ray.p, departure.previous);
                 out.terminations.push(ray.finish(None, position, "budget", last));
                 continue;
@@ -1507,6 +1723,9 @@ impl Bench {
                     |id| (id, nominal.input(&departure.port)),
                 );
                 paths.stop(departure, PathBreak::new(element, port, status));
+                if ray.probe {
+                    continue;
+                }
                 let (expected, last) = (ray.expected.clone(), departure.previous);
                 out.power.escaped += ray.power;
                 out.terminations.push(ray.finish(expected, end, "escaped", last));
@@ -1520,6 +1739,9 @@ impl Bench {
                 Some("unexpected_hit")
             } else if !directed && h[1].hypot(h[2]) > e.aperture {
                 Some("clipped")
+            } else if !directed && !e.regions.is_empty() && e.region_at(h[1], h[2]).is_none() {
+                // Inside the plate but between its sub-apertures or facets.
+                Some("masked")
             } else if e.kind == Kind::LensGroup
                 && (face != Some(0) || local(ray.d, e.rotation())[0] <= 0.)
             {
@@ -1539,8 +1761,75 @@ impl Bench {
             };
             let flight = ray.departure.flight(Port::new(&e.id, input), distance, "AIR", ray.air, ray.wavelength);
             out.segments.push(ray.segment(ray.p, hit, Some(&e.id), reason.unwrap_or("hit"), Some(flight)));
-            paths.hit(&ray.departure, arrival, &e.id, reason.is_none());
+            // A region element still anchors its arms when the chief sample lands on the
+            // plate between regions: the arms start from region probes, and their
+            // illumination is judged from the sampled port power afterwards.
+            // Region arms are anchored by the first sample that reaches the plate as
+            // planned: the chief sample (even when it lands between regions), or, if
+            // the chief never gets there, the first sample passing a region. The anchor
+            // starts every arm from region probes; whether an arm is lit is judged from
+            // the sampled port power afterwards.
+            let mut ray = ray;
+            // Anchors are kept per source and upstream port, so two sources (or the
+            // arms of an upstream region plate) each start their own arms here. A
+            // nominal probe from an upstream region may take the anchor; a sampled
+            // ray is promoted only when no nominal packet reached the plate first.
+            let planned = !e.regions.is_empty()
+                && !mount
+                && ray.expected.as_deref() == Some(e.id.as_str())
+                && matches!(reason, None | Some("masked" | "clipped"));
+            let key = (ray.beam.clone(), e.id.clone());
+            if planned
+                && !directed
+                && !anchors.contains(&key)
+                && (ray.departure.nominal || (reason.is_none() && !ray.probe))
+            {
+                anchors.insert(key);
+                ray.departure.nominal = true;
+            } else if planned && !directed {
+                // Already anchored: later arrivals are ordinary samples.
+                ray.departure.nominal = false;
+            }
+            let anchored = planned && ray.departure.nominal;
+            paths.hit(&ray.departure, arrival, &e.id, reason.is_none() || anchored);
+            if anchored && reason.is_some() {
+                paths.anchor_regions(arrival);
+            }
+            if !directed && anchored {
+                // Unlit or not, every region arm keeps a geometric path from its centre.
+                let lit = reason.is_none().then(|| e.region_at(h[1], h[2])).flatten();
+                for region in e
+                    .regions
+                    .iter()
+                    .filter(|r| lit.is_none_or(|l| l.port != r.port))
+                {
+                    let [y, z] = region.shape.center();
+                    queue.push_back(Packet {
+                        source: ray.source.clone(),
+                        branch: format!("{}/{}:{}~probe", ray.branch, e.id, region.port),
+                        beam: next_beam(&ray.beam, &e.id, &region.port),
+                        p: add(e.position, rotate([0., y, z], e.rotation())),
+                        d: region_direction(e, region, ray.d),
+                        power: 0.,
+                        depth: ray.depth + 1,
+                        expected: next(&e.id, &region.port),
+                        departure: Departure {
+                            port: Port::new(&e.id, &region.port),
+                            previous: Some(arrival),
+                            arrival: Some(arrival),
+                            nominal: true,
+                        },
+                        air: ray.air,
+                        wavelength: ray.wavelength,
+                        jones: ray.jones,
+                        probe: true,
+                    });
+                }
+            }
             if let Some(reason) = reason {
+                if ray.probe {
+                    continue;
+                }
                 out.power.blocked += ray.power;
                 out.terminations.push(ray.finish(Some(e.id.clone()), hit, reason, Some(arrival)));
                 continue;
@@ -1645,6 +1934,7 @@ impl Bench {
                         queue.push_back(Packet {
                             source: ray.source,
                             branch: format!("{}/{}:out", ray.branch, e.id),
+                            beam: next_beam(&ray.beam, &e.id, "out"),
                             p: last,
                             d: rotate([d[2], d[0], d[1]], e.rotation()),
                             power: ray.power * e.transmittance,
@@ -1654,11 +1944,15 @@ impl Bench {
                             air: ray.air,
                             wavelength: ray.wavelength,
                             jones: ray.jones,
+                            probe: ray.probe,
                         });
                     } else {
                         paths.group_stop(departure.nominal, arrival, departure.previous.unwrap(), PathBreak::new(&e.id, "out", "no_output"));
                     }
                 }
+                continue;
+            }
+            if e.kind == Kind::Detector && ray.probe {
                 continue;
             }
             if e.kind == Kind::Detector {
@@ -1699,6 +1993,26 @@ impl Bench {
                 children.push((port, direction, fraction, ray.jones));
             };
             match e.kind {
+                Kind::Aperture | Kind::Mirror if !e.regions.is_empty() => {
+                    let gain = if e.kind == Kind::Mirror {
+                        e.reflectance
+                    } else {
+                        1.
+                    };
+                    let lit = e.region_at(h[1], h[2]);
+                    // Directed tracing ignores clear apertures, so every arm is followed.
+                    for region in e
+                        .regions
+                        .iter()
+                        .filter(|r| directed || lit.is_some_and(|l| l.port == r.port))
+                    {
+                        scalar(
+                            region.port.as_str(),
+                            region_direction(e, region, ray.d),
+                            gain * region.transmittance,
+                        );
+                    }
+                }
                 Kind::Mirror | Kind::CurvedMirror => {
                     let r = match &e.coating {
                         Some(c) => {
@@ -1770,7 +2084,10 @@ impl Bench {
                     continue;
                 }
                 let mut kept = fraction;
-                if !directed && let Some(model) = &e.scatter {
+                if !directed
+                    && !ray.probe
+                    && let Some(model) = &e.scatter
+                {
                     let axis = scale(n, if dot(d, n) >= 0. { 1. } else { -1. });
                     let tis = model.tis(d, axis);
                     if tis > 0. {
@@ -1781,6 +2098,7 @@ impl Bench {
                             queue.push_back(Packet {
                                 source: ray.source.clone(),
                                 branch: format!("{}/{}:scatter{k}", ray.branch, e.id),
+                                beam: next_beam(&ray.beam, &e.id, &format!("scatter{k}")),
                                 p: hit,
                                 d: direction,
                                 power: ray.power * fraction * weight,
@@ -1795,11 +2113,19 @@ impl Bench {
                                 air: ray.air,
                                 wavelength: ray.wavelength,
                                 jones,
+                                probe: false,
                             });
                         }
                     }
                 }
                 if kept > 0. {
+                    if !e.regions.is_empty() && !ray.probe {
+                        *region_power.0.entry(Port::new(&e.id, port)).or_default() += ray.power * kept;
+                        *region_power
+                            .1
+                            .entry(next_beam(&ray.beam, &e.id, port))
+                            .or_default() += ray.power * kept;
+                    }
                     if ray.departure.nominal && matches!(e.kind, Kind::Splitter | Kind::Pbs) {
                         // Slots store transmitted then reflected chief-ray directions.
                         let outputs = out.splitter_outputs.entry(arrival).or_default();
@@ -1808,6 +2134,7 @@ impl Bench {
                     queue.push_back(Packet {
                         source: ray.source.clone(),
                         branch: format!("{}/{}:{}", ray.branch, e.id, port),
+                        beam: next_beam(&ray.beam, &e.id, port),
                         p: hit,
                         d,
                         power: ray.power * kept,
@@ -1822,11 +2149,15 @@ impl Bench {
                         air: ray.air,
                         wavelength: ray.wavelength,
                         jones,
+                        probe: ray.probe,
                     });
                 }
             }
         }
         out.branches = paths.reports(self, &nominal, &out.segments);
+        if mode == TraceMode::Physical {
+            self.report_region_power(&mut out, &region_power);
+        }
         out.detectors = self
             .elements
             .iter()
@@ -2062,6 +2393,7 @@ pub fn example() -> Bench {
         extinction_ratio: None,
         screw_tpi: None,
         lever_arm_mm: None,
+        regions: vec![],
     };
     Bench {
         name: "Split laser experiment".into(),
@@ -2087,6 +2419,7 @@ pub fn example() -> Bench {
             waist_offset: None,
             m2: None,
             polarization: None,
+            gaussian_radius: None,
             aim_direction: false,
         }],
         connections: vec![
@@ -2123,6 +2456,11 @@ pub fn example() -> Bench {
         min_power: 1e-8,
     }
 }
+/// The beam identity of a packet leaving `element` through `port`.
+pub(super) fn next_beam(beam: &[Port], element: &str, port: &str) -> Vec<Port> {
+    beam.iter().cloned().chain(std::iter::once(Port::new(element, port))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2627,6 +2965,631 @@ mod tests {
         b.elements[3].pixels = None;
         b.elements[0].pixels = Some([4, 4]);
         assert!(b.validate().is_err());
+    }
+    fn port_fraction(t: &Trace, port: &str) -> f64 {
+        t.port_power
+            .iter()
+            .find(|p| p.element == "AP" && p.port == port)
+            .unwrap()
+            .power
+            / t.power.launched
+    }
+    fn strip(port: &str, center: f64, width: f64) -> Region {
+        Region {
+            port: port.into(),
+            shape: RegionShape::Rect {
+                center: [center, 0.],
+                size: [width, 40.],
+            },
+            transmittance: 1.,
+            normal: None,
+        }
+    }
+    #[test]
+    fn sub_apertures_split_sampled_power_by_area() {
+        // Flat-top sampler: n rings of 6k equal-power samples at radius kR/n, so each
+        // sample stands for an annulus cell of width δ = R/n and the sampled disk
+        // reaches ρ = R(1 + 1/(2n)). Region fractions converge to the area fraction
+        // of that disk; each region edge mis-assigns at most the band of cells it
+        // crosses, chord·δ / (πρ²).
+        let scene = super::super::bench_lab::template("three_arm").unwrap();
+        let system = System::default();
+        let source = &scene.sources[0];
+        let (r, n) = (source.beam_radius, source.rings as f64);
+        let (rho, delta) = (r * (1. + 0.5 / n), r / n);
+        let disk = |b: f64| {
+            let t = (b / rho).min(1.);
+            2. / std::f64::consts::PI * (t.asin() + t * (1. - t * t).sqrt())
+        };
+        let band = |b: f64| {
+            2. * (rho * rho - b * b).max(0.).sqrt() * delta / (std::f64::consts::PI * rho * rho)
+        };
+        for b in [2., 5., 8.] {
+            let mut bench = scene.clone();
+            bench.branches.clear();
+            bench.assertions.clear();
+            bench.connections.retain(|c| c.from != "AP");
+            bench.elements.retain(|e| e.id == "AP");
+            let side = (20. - b) / 2. + b;
+            bench.elements[0].regions = vec![
+                strip("L", side, 20. - b),
+                strip("C", 0., 2. * b),
+                strip("R", -side, 20. - b),
+            ];
+            let trace = bench.trace(&system).unwrap();
+            accounted(&trace);
+            let [l, c, rr] = ["L", "C", "R"].map(|p| port_fraction(&trace, p));
+            let expected = disk(b);
+            let tolerance = 2. * band(b);
+            println!("b={b}: C {c:.4} vs {expected:.4} (tol {tolerance:.4}), L {l:.4} R {rr:.4}");
+            assert!((c - expected).abs() <= tolerance);
+            assert!((l - (1. - expected) / 2.).abs() <= band(b));
+            close(l, rr);
+            close(l + c + rr, 1.);
+            close(trace.power.blocked, 0.);
+        }
+    }
+    #[test]
+    fn gaussian_source_weights_sub_aperture_power_by_the_gaussian_integral() {
+        // One centred hole of radius a in a Gaussian beam (1/e² radius w) sampled over
+        // the disk ρ = R(1 + 1/(2n)). Exact: the independently summed sample weights
+        // exp(-2r²/w²) inside the hole. Analytic: (1 - e^{-2a²/w²}) / (1 - e^{-2ρ²/w²}),
+        // within the Gaussian mass of one cell-width band δ at the hole edge.
+        let mut scene = super::super::bench_lab::template("three_arm").unwrap();
+        let system = System::default();
+        let (w, a) = (8., 6.);
+        scene.sources[0].gaussian_radius = Some(w);
+        scene.branches.clear();
+        scene.assertions.clear();
+        scene.connections.retain(|c| c.from != "AP");
+        scene.elements.retain(|e| e.id == "AP");
+        let plate = &mut scene.elements[0];
+        plate.regions.retain(|r| r.port == "C");
+        plate.regions[0].shape = RegionShape::Circle {
+            center: [0., 0.],
+            radius: a,
+        };
+        let source = &scene.sources[0];
+        let (r, n) = (source.beam_radius, source.rings);
+        let g = |x: f64| (-2. * x * x / (w * w)).exp();
+        let (mut inside, mut total) = (g(0.), g(0.));
+        for k in 1..=n {
+            let radius = r * k as f64 / n as f64;
+            let weight = 6. * k as f64 * g(radius);
+            total += weight;
+            if radius <= a {
+                inside += weight;
+            }
+        }
+        let trace = scene.trace(&system).unwrap();
+        accounted(&trace);
+        let f = port_fraction(&trace, "C");
+        close(f, inside / total);
+        let (rho, delta) = (r * (1. + 0.5 / n as f64), r / n as f64);
+        let norm = 1. - g(rho);
+        let analytic = (1. - g(a)) / norm;
+        let band = 2. * std::f64::consts::PI * a * delta * 2. / (std::f64::consts::PI * w * w) * g(a) / norm;
+        println!("gaussian: {f:.4} vs {analytic:.4} (band {band:.4})");
+        assert!((f - analytic).abs() <= band, "{f} vs {analytic}");
+        // The profile really is Gaussian: the sampled power differs from flat-top.
+        let mut flat = scene.clone();
+        flat.sources[0].gaussian_radius = None;
+        assert!(port_fraction(&flat.trace(&system).unwrap(), "C") < f - 0.1);
+        close(trace.power.blocked / trace.power.launched, 1. - f);
+    }
+    #[test]
+    fn gaussian_source_splits_three_holes_by_the_gaussian_integral() {
+        // The three_arm mask (holes of radius a = 3 at y = +10, 0, -10) in a Gaussian
+        // beam of 1/e² radius w. Exact: independently summed sample weights inside
+        // each hole. Analytic: the Gaussian integral over each hole (fine quadrature),
+        // normalised to the sampled disk ρ; tolerance is the Gaussian mass of a
+        // cell-width (δ) band along the hole edge, taken at its brightest point.
+        let mut scene = super::super::bench_lab::template("three_arm").unwrap();
+        let system = System::default();
+        let w = 12.;
+        scene.sources[0].gaussian_radius = Some(w);
+        let trace = scene.trace(&system).unwrap();
+        accounted(&trace);
+        let source = &scene.sources[0];
+        let (r, n) = (source.beam_radius, source.rings);
+        let (rho, delta) = (r * (1. + 0.5 / n as f64), r / n as f64);
+        let intensity = |x: f64, y: f64| 2. / (std::f64::consts::PI * w * w) * (-2. * (x * x + y * y) / (w * w)).exp();
+        let norm = 1. - (-2. * rho * rho / (w * w)).exp();
+        let mut points = vec![([0., 0.], 1.)];
+        for k in 1..=n {
+            let radius = r * k as f64 / n as f64;
+            for j in 0..6 * k {
+                let angle = std::f64::consts::TAU * j as f64 / (6 * k) as f64;
+                let weight = (-2. * radius * radius / (w * w)).exp();
+                points.push(([-radius * angle.cos(), -radius * angle.sin()], weight));
+            }
+        }
+        let total: f64 = points.iter().map(|p| p.1).sum();
+        let a = 3.;
+        for (port, centre) in [("L", 10.), ("C", 0.), ("R", -10.)] {
+            let exact: f64 = points
+                .iter()
+                .filter(|(p, _)| (p[0] - centre).hypot(p[1]) <= a)
+                .map(|p| p.1)
+                .sum::<f64>()
+                / total;
+            let f = port_fraction(&trace, port);
+            close(f, exact);
+            let steps = 400;
+            let mut analytic = 0.;
+            for i in 0..steps {
+                let radius = a * (i as f64 + 0.5) / steps as f64;
+                for j in 0..steps {
+                    let angle = std::f64::consts::TAU * (j as f64 + 0.5) / steps as f64;
+                    let (x, y) = (centre + radius * angle.cos(), radius * angle.sin());
+                    analytic += intensity(x, y) * radius;
+                }
+            }
+            analytic *= a / steps as f64 * std::f64::consts::TAU / steps as f64 / norm;
+            let brightest = intensity((centre.abs() - a).max(0.), 0.);
+            let band = std::f64::consts::TAU * a * delta * brightest / norm;
+            println!("{port}: {f:.5} vs {analytic:.5} (band {band:.5})");
+            assert!((f - analytic).abs() <= band, "{port}: {f} vs {analytic}");
+        }
+        close(port_fraction(&trace, "L"), port_fraction(&trace, "R"));
+        assert!(port_fraction(&trace, "C") > 1.5 * port_fraction(&trace, "L"));
+    }
+    #[test]
+    fn region_arms_keep_their_beam_through_a_shared_plain_element() {
+        // AP/L, C, R all pass one plain aperture A before a second mask AP2: each arm
+        // is a different incoming beam at AP2 and must keep its own anchor.
+        let system = System::default();
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        let plate = bench.elements.iter().find(|e| e.id == "AP").unwrap().clone();
+        let mut common = plate.clone();
+        common.id = "A".into();
+        common.position[0] += 50.;
+        common.aperture = 15.;
+        common.regions.clear();
+        let mut second = plate;
+        second.id = "AP2".into();
+        second.position[0] += 100.;
+        bench.elements.retain(|e| !e.id.starts_with("D_"));
+        bench.elements.extend([common, second]);
+        bench.connections = [("S1", "out", "AP"), ("AP", "L", "A"), ("AP", "C", "A"), ("AP", "R", "A"), ("A", "out", "AP2")]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = ["L", "C", "R"]
+            .map(|arm| Branch {
+                id: arm.into(),
+                from: Port::new("AP", arm),
+                to: Port::new("AP2", "in"),
+                via: vec![],
+            })
+            .into();
+        let trace = bench.trace(&system).unwrap();
+        for arm in ["L", "C", "R"] {
+            let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+            assert!(report.interruption.is_none(), "{arm}");
+            assert_eq!(report.paths.len(), 1, "{arm}: {:?}", report.paths);
+            assert!(report.paths[0].interruption.is_none(), "{arm}: {:?}", report.paths[0].interruption);
+            assert!((report.paths[0].length_mm - 100.).abs() < 1e-9);
+        }
+    }
+    #[test]
+    fn illumination_is_judged_per_source() {
+        // S2 is shifted +12 mm: its samples span y ∈ [-2, 26] and miss the R hole,
+        // which S1 still lights. Only S2's R path is not illuminated.
+        let system = System::default();
+        let mut twin = super::super::bench_lab::template("three_arm").unwrap();
+        let mut second = twin.sources[0].clone();
+        second.id = "S2".into();
+        second.position[1] += 12.;
+        twin.sources.push(second);
+        twin.connections.push(Connection {
+            from: "S2".into(),
+            port: "out".into(),
+            to: "AP".into(),
+        });
+        let trace = twin.trace(&system).unwrap();
+        accounted(&trace);
+        for arm in ["L", "C", "R"] {
+            let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+            assert_eq!(report.paths.len(), 2, "{arm}");
+            for path in &report.paths {
+                let unlit = arm == "R" && path.source == "S2";
+                let reason = path.interruption.as_ref().map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
+                assert_eq!(reason, unlit.then_some(("AP", "R", "not_illuminated")), "{arm} {}", path.source);
+            }
+        }
+        assert!(port_fraction(&trace, "R") > 0.);
+    }
+    #[test]
+    fn region_arms_start_once_per_source_and_upstream_port() {
+        let system = System::default();
+        // Two sources on one mask: each arm gets one path per source.
+        let mut twin = super::super::bench_lab::template("three_arm").unwrap();
+        let mut second = twin.sources[0].clone();
+        second.id = "S2".into();
+        second.position[1] += 1.;
+        twin.sources.push(second);
+        twin.connections.push(Connection {
+            from: "S2".into(),
+            port: "out".into(),
+            to: "AP".into(),
+        });
+        let trace = twin.trace(&system).unwrap();
+        accounted(&trace);
+        for (arm, length) in [("L", 200.), ("C", 250.), ("R", 300.)] {
+            let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+            assert!(report.interruption.is_none(), "{arm}: {:?}", report.interruption);
+            let mut sources: Vec<_> = report.paths.iter().map(|p| p.source.as_str()).collect();
+            sources.sort();
+            assert_eq!(sources, ["S1", "S2"], "{arm}");
+            for path in &report.paths {
+                assert!(path.interruption.is_none());
+                assert!((path.length_mm - length).abs() < 1e-9, "{arm}: {}", path.length_mm);
+            }
+        }
+        // Cascade: the L arm (led by a zero-power probe) meets a second region plate.
+        // Its arms U / V start once each from that probe, never again from samples.
+        let mut cascade = super::super::bench_lab::template("three_arm").unwrap();
+        let mut second = cascade.elements.iter().find(|e| e.id == "AP").unwrap().clone();
+        second.id = "AP2".into();
+        second.position[0] += 100.;
+        second.position[1] += 10.;
+        second.regions = [("U", 0., 1.), ("V", -2., 0.8)]
+            .map(|(port, y, radius)| Region {
+                port: port.into(),
+                shape: RegionShape::Circle {
+                    center: [y, 0.],
+                    radius,
+                },
+                transmittance: 1.,
+                normal: None,
+            })
+            .into();
+        // Only the L arm continues (the second mask would block C / R anyway).
+        cascade.elements.retain(|e| e.id != "D_C" && e.id != "D_R");
+        let first = cascade.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+        first.regions.retain(|r| r.port == "L");
+        cascade.elements.push(second);
+        cascade.connections.retain(|c| c.from != "AP");
+        for (from, port, to) in [("AP", "L", "AP2"), ("AP2", "U", "D_L"), ("AP2", "V", "D_L")] {
+            cascade.connections.push(Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            });
+        }
+        cascade.branches.clear();
+        for arm in ["U", "V"] {
+            cascade.branches.push(Branch {
+                id: arm.into(),
+                from: Port::new("AP2", arm),
+                to: Port::new("D_L", "in"),
+                via: vec![],
+            });
+        }
+        let trace = cascade.trace(&system).unwrap();
+        accounted(&trace);
+        for arm in ["U", "V"] {
+            let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+            assert!(report.interruption.is_none(), "{arm}: {:?}", report.interruption);
+            assert_eq!(report.paths.len(), 1, "{arm}: {:?}", report.paths);
+            assert!(report.paths[0].interruption.is_none(), "{arm}");
+            assert!((report.paths[0].length_mm - 100.).abs() < 1e-9);
+        }
+        assert!(["U", "V"].iter().all(|p| trace.port_power.iter().any(|q| q.element == "AP2" && q.port == *p && q.power > 0.)));
+    }
+    #[test]
+    fn unlit_sub_aperture_reports_zero_power_and_unreachable_arm() {
+        let scene = super::super::bench_lab::template("three_arm").unwrap();
+        let system = System::default();
+        let centered = scene.trace(&system).unwrap();
+        accounted(&centered);
+        let source = &scene.sources[0];
+        let rho = source.beam_radius * (1. + 0.5 / source.rings as f64);
+        let delta = source.beam_radius / source.rings as f64;
+        // Exact expectation: count the sampler's equal-power points inside each hole.
+        // For a +X beam the sample offset is (y, z) = (-r cos a, -r sin a).
+        let samples = |dy: f64| -> Vec<[f64; 2]> {
+            let n = source.rings;
+            let mut out = vec![[dy, 0.]];
+            for k in 1..=n {
+                let radius = source.beam_radius * k as f64 / n as f64;
+                for j in 0..6 * k {
+                    let a = std::f64::consts::TAU * j as f64 / (6 * k) as f64;
+                    out.push([dy - radius * a.cos(), -radius * a.sin()]);
+                }
+            }
+            out
+        };
+        let plate = scene.elements.iter().find(|e| e.id == "AP").unwrap();
+        let dy0 = scene.sources[0].position[1] - plate.position[1];
+        let expect = |pts: &[[f64; 2]], port: &str| {
+            pts.iter()
+                .filter(|p| p[0].hypot(p[1]) <= plate.aperture)
+                .filter(|p| {
+                    // Independent of Element::region_at: holes of radius 3 at y = +10, 0, -10.
+                    let centre = match port {
+                        "L" => 10.,
+                        "C" => 0.,
+                        _ => -10.,
+                    };
+                    (p[0] - centre).hypot(p[1]) <= 3.
+                })
+                .count() as f64
+                / pts.len() as f64
+        };
+        let pts = samples(dy0);
+        for port in ["L", "C", "R"] {
+            // Exact sample count, and consistent with the hole area 9/ρ² within the
+            // sampler's worst-case edge band 2·3·δ/ρ².
+            let f = port_fraction(&centered, port);
+            close(f, expect(&pts, port));
+            assert!(
+                (f - 9. / (rho * rho)).abs() <= 6. * delta / (rho * rho),
+                "{port}: {f}"
+            );
+        }
+        // Area consistency with a margin smaller than the expectation: one 10 mm hole,
+        // expected 100/ρ², worst-case edge band 2·10·δ/ρ² (≈35 % of the value).
+        let mut wide = scene.clone();
+        wide.elements.iter_mut().find(|e| e.id == "AP").unwrap().regions.retain(|r| r.port == "C");
+        if let RegionShape::Circle { radius, .. } = &mut wide.elements.iter_mut().find(|e| e.id == "AP").unwrap().regions[0].shape {
+            *radius = 10.;
+        }
+        wide.connections.retain(|c| c.from != "AP" || c.port == "C");
+        wide.branches.retain(|b| b.id == "C");
+        wide.assertions.clear();
+        let f = port_fraction(&wide.trace(&system).unwrap(), "C");
+        assert!((f - 100. / (rho * rho)).abs() <= 20. * delta / (rho * rho), "{f}");
+        let lit: f64 = ["L", "C", "R"]
+            .iter()
+            .map(|p| port_fraction(&centered, p))
+            .sum();
+        close(centered.power.blocked / centered.power.launched, 1. - lit);
+        assert!(
+            centered
+                .branches
+                .iter()
+                .all(|b| b.interruption.is_none()
+                    && b.paths.iter().all(|p| p.interruption.is_none()))
+        );
+
+        // Shift the beam 12 mm towards +Y: it spans y ∈ [-2, 26], missing the R hole at y = -10.
+        let mut shifted = scene.clone();
+        shifted.sources[0].position[1] += 12.;
+        let trace = shifted.trace(&system).unwrap();
+        accounted(&trace);
+        close(port_fraction(&trace, "R"), 0.);
+        let pts = samples(dy0 + 12.);
+        for port in ["L", "C"] {
+            close(port_fraction(&trace, port), expect(&pts, port));
+        }
+        // Samples beyond the plate body miss it; between aperture and body they are
+        // clipped, and inside the aperture but outside every hole they are masked.
+        let count = |f: &dyn Fn(f64) -> bool| {
+            pts.iter().filter(|p| f(p[0].hypot(p[1]))).count() as f64 / pts.len() as f64
+        };
+        close(trace.power.escaped / trace.power.launched, count(&|r| r > plate.body_radius));
+        let lit_now: f64 = ["L", "C"].iter().map(|p| port_fraction(&trace, p)).sum();
+        close(
+            trace.power.blocked / trace.power.launched,
+            count(&|r| r <= plate.body_radius) - lit_now,
+        );
+        // Samples beyond the plate body miss it and escape; the rest outside the holes are masked.
+        let lit: f64 = ["L", "C", "R"]
+            .iter()
+            .map(|p| port_fraction(&trace, p))
+            .sum();
+        close(
+            (trace.power.blocked + trace.power.escaped) / trace.power.launched,
+            1. - lit,
+        );
+        close(trace.power.detected / trace.power.launched, lit);
+        let arm = trace.branches.iter().find(|b| b.id == "R").unwrap();
+        let path = &arm.paths[0];
+        let broken = path
+            .interruption
+            .as_ref()
+            .or(arm.interruption.as_ref())
+            .unwrap();
+        assert_eq!(
+            (
+                broken.element.as_str(),
+                broken.port.as_str(),
+                broken.reason.as_str()
+            ),
+            ("AP", "R", "not_illuminated")
+        );
+        // The geometric probe still measures the arm from the hole centre to D_R.
+        close(path.length_mm, 300.);
+        for id in ["L", "C"] {
+            let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
+            assert!(
+                arm.interruption.is_none() && arm.paths[0].interruption.is_none(),
+                "{id}"
+            );
+        }
+        assert!(
+            trace
+                .terminations
+                .iter()
+                .all(|t| !t.branch.contains("~probe"))
+        );
+
+        // Shift 26 mm: the chief sample misses the plate body entirely, but a few
+        // samples still pass L. L stays reachable; C and R are unlit.
+        let mut far = scene.clone();
+        far.sources[0].position[1] += 26.;
+        let trace = far.trace(&system).unwrap();
+        accounted(&trace);
+        let pts = samples(dy0 + 26.);
+        assert!((dy0 + 26.) > plate.body_radius);
+        for id in ["L", "C", "R"] {
+            close(port_fraction(&trace, id), expect(&pts, id));
+            let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
+            assert_eq!(arm.paths.len(), 1, "{id}");
+            let broken = arm.paths[0].interruption.as_ref().or(arm.interruption.as_ref());
+            if id == "L" {
+                assert!(port_fraction(&trace, id) > 0. && broken.is_none(), "{broken:?}");
+            } else {
+                assert_eq!(broken.map(|b| b.reason.as_str()), Some("not_illuminated"));
+            }
+        }
+
+        // Shift 5 mm: the chief sample lands on the plate between holes, yet every
+        // hole passes samples, so all three arms stay reachable with their power.
+        let mut between = scene.clone();
+        between.sources[0].position[1] += 5.;
+        let trace = between.trace(&system).unwrap();
+        accounted(&trace);
+        let pts = samples(dy0 + 5.);
+        assert!((dy0 + 5. - 0f64).abs() > 3. && (dy0 + 5. - 10f64).abs() > 3.);
+        // Hole centre to detector: D_L, D_C, D_R sit 200, 250, 300 mm downstream.
+        for (id, length) in [("L", 200.), ("C", 250.), ("R", 300.)] {
+            let f = port_fraction(&trace, id);
+            close(f, expect(&pts, id));
+            assert!(f > 0., "{id}");
+            let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
+            assert!(
+                arm.interruption.is_none()
+                    && !arm.paths.is_empty()
+                    && arm.paths.iter().all(|p| p.interruption.is_none()),
+                "{id}: {:?}",
+                arm.interruption
+            );
+            close(arm.paths[0].length_mm, length);
+        }
+    }
+    #[test]
+    fn source_branches_cross_a_region_plate_whose_chief_is_masked() {
+        // Shifted 5 mm, the representative sample lands between holes and is masked,
+        // yet every hole is lit, so branches from the source through each hole reach
+        // their detectors; their length adds the source-to-plate flight.
+        let system = System::default();
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        bench.sources[0].position[1] += 5.;
+        let direct = bench.trace(&system).unwrap();
+        bench.branches = [("L", "D_L"), ("C", "D_C"), ("R", "D_R")]
+            .map(|(arm, detector)| Branch {
+                id: arm.into(),
+                from: Port::new("S1", "out"),
+                to: Port::new(detector, "in"),
+                via: vec![Port::new("AP", arm)],
+            })
+            .into();
+        bench.assertions.clear();
+        let trace = bench.trace(&system).unwrap();
+        accounted(&trace);
+        let chief = &trace.segments[trace.branches[0].paths[0].segment_indices[0]];
+        assert_eq!(chief.status, "masked");
+        let approach = super::super::math::norm(super::super::math::sub(chief.to, chief.from));
+        for arm in ["L", "C", "R"] {
+            let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+            let arm_only = direct.branches.iter().find(|b| b.id == arm).unwrap();
+            assert_eq!(report.paths.len(), 1, "{arm}");
+            let path = &report.paths[0];
+            assert!(path.interruption.is_none(), "{arm}: {:?}", path.interruption);
+            close(path.length_mm, approach + arm_only.paths[0].length_mm);
+        }
+
+        // Moved fully off the plate's R hole the source branch through R is unlit.
+        bench.sources[0].position[1] += 7.;
+        let trace = bench.trace(&system).unwrap();
+        let report = trace.branches.iter().find(|b| b.id == "R").unwrap();
+        let reason = report.paths[0].interruption.as_ref().map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
+        assert_eq!(reason, Some(("AP", "R", "not_illuminated")));
+    }
+    #[test]
+    fn port_names_never_alias_beam_identity() {
+        // A legal port name that looks like an internal marker keeps its own power,
+        // whether it names the hole the chief ray lights (C) or an off-axis one (R),
+        // and the Gaussian envelope and lab check stay consistent.
+        let system = System::default();
+        let renamed = "L~probe";
+        for original in ["C", "R"] {
+            let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+            for region in bench.elements.iter_mut().flat_map(|e| e.regions.iter_mut()) {
+                if region.port == original {
+                    region.port = renamed.into();
+                }
+            }
+            for connection in &mut bench.connections {
+                if connection.from == "AP" && connection.port == original {
+                    connection.port = renamed.into();
+                }
+            }
+            for branch in &mut bench.branches {
+                if branch.from.port == original {
+                    branch.from.port = renamed.into();
+                }
+            }
+            let trace = bench.trace(&system).unwrap();
+            accounted(&trace);
+            assert!(port_fraction(&trace, renamed) > 0., "{original}");
+            for report in &trace.branches {
+                assert!(!report.paths.is_empty(), "{original} {}", report.id);
+                for path in &report.paths {
+                    assert!(path.interruption.is_none(), "{original} {}: {:?}", report.id, path.interruption);
+                }
+            }
+            let envelope = super::super::bench_lab::gaussian_envelope(&bench, &system);
+            assert!(envelope.is_ok(), "{original}: {envelope:?}");
+            let check = super::super::bench_lab::lab_check(&bench, &system);
+            assert!(check.is_ok(), "{original}: {check:?}");
+        }
+    }
+    #[test]
+    fn prism_facets_split_by_landing_point_and_obey_reflection() {
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        bench.branches.clear();
+        bench.assertions.clear();
+        bench.connections.retain(|c| c.from != "AP");
+        bench.elements.retain(|e| e.id == "AP");
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let facet = |port: &str, center: f64, ny: f64| Region {
+            port: port.into(),
+            shape: RegionShape::Rect {
+                center: [center, 0.],
+                size: [15., 30.],
+            },
+            transmittance: 1.,
+            normal: Some([h, ny, 0.]),
+        };
+        let ap = &mut bench.elements[0];
+        ap.kind = Kind::Mirror;
+        ap.reflectance = 1.;
+        ap.transmittance = 0.;
+        ap.regions = vec![facet("top", 7.5, h), facet("bottom", -7.5, -h)];
+        let trace = bench.trace(&System::default()).unwrap();
+        accounted(&trace);
+        let source = &bench.sources[0];
+        let samples = (1 + 3 * source.rings * (source.rings + 1)) as f64;
+        // Samples on y = 0 (centre plus the a = π/2, 3π/2 points of even rings) may land
+        // on either facet: at most 2n + 1 samples, half of them per side.
+        let tolerance = (2. * source.rings as f64 + 1.) / (2. * samples);
+        let d = [1., 0., 0.];
+        for (port, ny) in [("top", h), ("bottom", -h)] {
+            let f = port_fraction(&trace, port);
+            assert!((f - 0.5).abs() <= tolerance, "{port}: {f}");
+            let n = [h, ny, 0.];
+            let expected = sub(d, scale(n, 2. * dot(d, n)));
+            let leg = trace
+                .segments
+                .iter()
+                .find(|s| s.branch.ends_with(&format!("AP:{port}")))
+                .unwrap();
+            let actual = unit(sub(leg.to, leg.from)).unwrap();
+            for i in 0..3 {
+                close(actual[i], expected[i]);
+            }
+        }
+        close(
+            port_fraction(&trace, "top") + port_fraction(&trace, "bottom"),
+            1.,
+        );
     }
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");

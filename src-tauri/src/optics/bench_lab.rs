@@ -3,8 +3,8 @@ use super::{
     System,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
-        Connection, Element, Kind, Mount, PathBreak, Polarization, Port, Stage, StagePose, StagePzt,
-        Trace,
+        Connection, Element, Kind, Mount, PathBreak, Polarization, Port, Region, RegionShape, Stage,
+        StagePose, StagePzt, Trace, next_beam,
     },
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
 };
@@ -149,6 +149,27 @@ const DETECTOR: Hardware = Hardware {
     typical_price_usd: 390,
     notes: "9.5 mm entrance aperture; confirm wavelength and power limits with the meter.",
     ..LENS
+};
+const MASK: Hardware = Hardware {
+    part: "custom",
+    name: "Three-hole aperture mask, 6 mm holes on 10 mm pitch",
+    category: "aperture",
+    kind: Kind::Aperture,
+    aperture: 15.,
+    body_radius: 25.4,
+    focal_length: 0.,
+    reflectance: 0.,
+    transmittance: 1.,
+    retardance_waves: None,
+    fast_axis_deg: None,
+    extinction_ratio: None,
+    screw_tpi: None,
+    lever_arm_mm: None,
+    clamping_style: "retaining_ring",
+    mount: "LMR2/M",
+    base_size: [25., 25.],
+    typical_price_usd: 40,
+    notes: "Custom laser-cut mask; hole ports are named L, C and R.",
 };
 const DUMP: Hardware = Hardware {
     part: "BT610/M",
@@ -346,6 +367,7 @@ pub(crate) const TEMPLATES: &[&str] = &[
     "polarized_beam_combiner",
     "beam_expander_focus",
     "periscope_routing",
+    "three_arm",
 ];
 
 fn normal_rotation([x, y, z]: V3) -> V3 {
@@ -380,6 +402,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         extinction_ratio: hardware.extinction_ratio,
         screw_tpi: hardware.screw_tpi,
         lever_arm_mm: hardware.lever_arm_mm,
+        regions: vec![],
     }
 }
 
@@ -505,6 +528,47 @@ pub fn template(name: &str) -> Result<Bench, String> {
                 ],
             )
         }
+        "three_arm" => {
+            // A three-hole mask splits one wide beam into parallel L / C / R arms
+            // (L is on the +Y side, left when looking along the beam).
+            scene.sources[0].beam_radius = 14.;
+            scene.sources[0].waist = Some(14.);
+            scene.sources[0].rings = 8;
+            let mut mask = mount_element("AP", MASK, at(200., 200.), X);
+            mask.regions = [("L", 10.), ("C", 0.), ("R", -10.)]
+                .map(|(port, y)| Region {
+                    port: port.into(),
+                    shape: RegionShape::Circle {
+                        center: [y, 0.],
+                        radius: 3.,
+                    },
+                    transmittance: 1.,
+                    normal: None,
+                })
+                .into();
+            scene.elements.push(mask);
+            // Staggered along the beam so the 25 mm bases clear each other
+            // while the neighbouring arms pass 10 mm beside each small head.
+            for (id, x, y) in [
+                ("D_L", 400., 210.),
+                ("D_C", 450., 200.),
+                ("D_R", 500., 190.),
+            ] {
+                let mut detector = mount_element(id, DETECTOR, at(x, y), X);
+                detector.aperture = 4.;
+                detector.body_radius = 4.5;
+                scene.elements.push(detector);
+            }
+            (
+                "Three-arm spatial split",
+                &[
+                    ("S1", "out", "AP"),
+                    ("AP", "L", "D_L"),
+                    ("AP", "C", "D_C"),
+                    ("AP", "R", "D_R"),
+                ],
+            )
+        }
         _ => {
             return Err(format!(
                 "Unknown bench template {name:?}. Choose {}",
@@ -539,6 +603,16 @@ pub fn template(name: &str) -> Result<Bench, String> {
             unit: AssertionUnit::Mm,
             tolerance: 1e-6,
         }];
+    }
+    if name == "three_arm" {
+        scene.branches = ["L", "C", "R"]
+            .map(|arm| Branch {
+                id: arm.into(),
+                from: Port::new("AP", arm),
+                to: Port::new(&format!("D_{arm}"), "in"),
+                via: vec![],
+            })
+            .into();
     }
     if name == "delay_line" {
         let members = ["M3".into(), "M4".into()];
@@ -812,7 +886,7 @@ struct Clearance {
 struct BeamState<'a> {
     q: Q,
     from: &'a str,
-    port: &'static str,
+    port: &'a str,
 }
 
 struct GroupState {
@@ -870,8 +944,8 @@ fn envelope<'a>(
     };
     let elements: HashMap<_, _> = bench.elements.iter().map(|e| (e.id.as_str(), e)).collect();
     let sources: HashMap<_, _> = bench.sources.iter().map(|s| (s.id.as_str(), s)).collect();
-    let mut states = HashMap::<(&str, String), BeamState>::new();
-    let mut groups = HashMap::<(&str, &str), GroupState>::new();
+    let mut states = HashMap::<Vec<Port>, BeamState>::new();
+    let mut groups = HashMap::<Vec<Port>, GroupState>::new();
     let mut matrices = HashMap::<u64, Vec<(Matrix, f64)>>::new();
     let mut links = HashSet::new();
     for source in &bench.sources {
@@ -885,7 +959,7 @@ fn envelope<'a>(
         out.source_radii
             .insert(source.id.as_str(), q.radius(wavelength, n)?);
         states.insert(
-            (source.id.as_str(), format!("{}:0", source.id)),
+            vec![Port::new(&source.id, "out")],
             BeamState {
                 q,
                 from: &source.id,
@@ -902,7 +976,7 @@ fn envelope<'a>(
         let (w_from, w_to) = match segment.status.as_str() {
             "group_surface" | "group_obstruction" => {
                 let group = groups
-                    .get_mut(&key)
+                    .get_mut(&segment.beam)
                     .ok_or("Missing Gaussian lens group entry")?;
                 let path = &matrices[&source.wavelength.to_bits()];
                 let (m, index) = path[group.surface - 1];
@@ -926,13 +1000,16 @@ fn envelope<'a>(
             }
             _ => {
                 let state = states
-                    .remove(&(key.0, key.1.to_owned()))
+                    .remove(&segment.beam)
                     .ok_or("Missing Gaussian center-ray branch")?;
                 let q = state.q.transfer(norm(sub(segment.to, segment.from)));
                 let to = q.radius(wavelength, n)?;
-                if let Some(e) = element
-                    .filter(|_| matches!(segment.status.as_str(), "hit" | "clipped" | "beam_stop"))
-                {
+                if let Some(e) = element.filter(|_| {
+                    matches!(
+                        segment.status.as_str(),
+                        "hit" | "clipped" | "beam_stop" | "masked"
+                    )
+                }) {
                     let ratio = e.aperture / to;
                     out.hits.push(Clearance {
                         element_id: e.id.clone(),
@@ -977,7 +1054,7 @@ fn envelope<'a>(
                                         ),
                                 };
                                 groups.insert(
-                                    key,
+                                    segment.beam.clone(),
                                     GroupState {
                                         q,
                                         surface: 1,
@@ -989,9 +1066,9 @@ fn envelope<'a>(
                             }
                             _ => q,
                         };
-                        for &port in bench::ports(e.kind) {
+                        for port in e.ports().into_iter().filter(|_| e.regions.is_empty()) {
                             states.insert(
-                                (key.0, format!("{}/{}:{port}", key.1, e.id)),
+                                next_beam(&segment.beam, &e.id, port),
                                 BeamState {
                                     q: next,
                                     from: &e.id,
@@ -999,6 +1076,30 @@ fn envelope<'a>(
                                 },
                             );
                         }
+                    }
+                    // A region passes the incoming beam unchanged when it is wider than
+                    // the beam. A narrower region truncates it: keep the wavefront
+                    // curvature (Re 1/q) and clamp the spot radius to the region
+                    // (Im 1/q = -λ/(π n a²)). Each region arm, lit or probed, is keyed by
+                    // its structured beam identity.
+                    for region in &e.regions {
+                        let a = region.shape.inscribed_radius();
+                        let q_out = if to <= a {
+                            q
+                        } else {
+                            let norm = q.re * q.re + q.im * q.im;
+                            let (inv_re, inv_im) = (q.re / norm, -wavelength / (PI * n * a * a));
+                            let norm = inv_re * inv_re + inv_im * inv_im;
+                            Q { re: inv_re / norm, im: -inv_im / norm }
+                        };
+                        states.insert(
+                            next_beam(&segment.beam, &e.id, &region.port),
+                            BeamState {
+                                q: q_out,
+                                from: &e.id,
+                                port: &region.port,
+                            },
+                        );
                     }
                 }
                 (state.q.radius(wavelength, n)?, to)
@@ -1463,6 +1564,7 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
         let (severity, diagnostic) = match code {
             "detected" => continue,
             "beam_stop" => ("info", "beam_stop"),
+            "masked" => ("info", "masked"),
             "escaped" => ("warning", "escaped"),
             "missed_target" => ("error", "missed_target"),
             "clipped" | "group_aperture" => ("error", "clipped"),
@@ -2526,6 +2628,87 @@ pub(crate) fn export_blueprint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unexpected_hit_on_a_region_plate_is_reported_not_an_internal_error() {
+        let mut bench = template("three_arm").unwrap();
+        for c in &mut bench.connections {
+            if c.from == "S1" {
+                c.to = "D_C".into();
+            }
+        }
+        let system = System::default();
+        gaussian_envelope(&bench, &system).unwrap();
+        let check = lab_check(&bench, &system).unwrap();
+        assert!(
+            check["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "obstruction" && x["severity"] == "error"),
+            "{}",
+            check["issues"]
+        );
+    }
+    #[test]
+    fn sub_aperture_keeps_wavefront_curvature_and_truncates_only_wider_beams() {
+        // Single C hole on the three-arm plate; the source focuses 300 mm ahead.
+        let system = System::default();
+        let n = system.material_index("AIR", 532.).unwrap();
+        let lambda = 532e-6;
+        let setup = |hole: f64| {
+            let mut bench = template("three_arm").unwrap();
+            bench.branches.clear();
+            bench.assertions.clear();
+            bench.connections.retain(|c| c.from != "AP" || c.port == "C");
+            bench.elements.retain(|e| !matches!(e.id.as_str(), "D_L" | "D_R"));
+            let source = &mut bench.sources[0];
+            source.waist = Some(0.2);
+            source.waist_offset = Some(300.);
+            source.rings = 0;
+            source.wavelength = 532.;
+            let plate = bench.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+            plate.regions.retain(|r| r.port == "C");
+            if let RegionShape::Circle { radius, .. } = &mut plate.regions[0].shape {
+                *radius = hole;
+            }
+            bench
+        };
+        let after_plate = |bench: &Bench| {
+            let envelope = gaussian_envelope(bench, &system).unwrap();
+            envelope["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["branch"].as_str().unwrap().contains("AP:C"))
+                .map(|s| (s["w_from"].as_f64().unwrap(), s["w_to"].as_f64().unwrap()))
+                .unwrap()
+        };
+        let bench = setup(14.);
+        let source = &bench.sources[0];
+        let plate = bench.elements.iter().find(|e| e.id == "AP").unwrap();
+        let detector = bench.elements.iter().find(|e| e.id == "D_C").unwrap();
+        let (z_plate, z_det) = (
+            plate.position[0] - source.position[0],
+            detector.position[0] - source.position[0],
+        );
+        let z_r = PI * n * 0.04 / lambda;
+        let w = |z: f64| 0.2 * (1. + ((z - 300.) / z_r).powi(2)).sqrt();
+        // Wide hole: the beam continues as if the plate were absent.
+        let (w_from, w_to) = after_plate(&bench);
+        close(w_from, w(z_plate));
+        close(w_to, w(z_det));
+        // Narrow hole: radius clamps to a, curvature 1/R of the incoming wave is kept.
+        let a = 0.5 * w(z_plate);
+        let (w_from, w_to) = after_plate(&setup(a));
+        close(w_from, a);
+        let d = z_plate - 300.;
+        let curvature = d / (d * d + z_r * z_r);
+        let (re, im) = (curvature, -lambda / (PI * n * a * a));
+        let norm = re * re + im * im;
+        let q = (re / norm + (z_det - z_plate), -im / norm);
+        let expected = (q.0.hypot(q.1)) * (lambda / PI / n / q.1).sqrt();
+        close(w_to, expected);
+    }
 
     fn close(got: f64, expected: f64) {
         assert!((got - expected).abs() < 1e-8, "{got} vs {expected}");
@@ -2797,13 +2980,15 @@ mod tests {
             let bench = template(name).unwrap();
             assert!(bench.elements.iter().all(|e| e.mount.is_some()));
             let trace = bench.trace(&system).unwrap();
-            assert!(trace.power.detected > 0.4, "{name}: {:?}", trace.power);
+            // The three-hole mask passes only its holes' share of the wide beam.
+            let floor = if name == "three_arm" { 0.1 } else { 0.4 };
+            assert!(trace.power.detected > floor, "{name}: {:?}", trace.power);
             close(trace.balance_error, 0.);
             assert!(
                 trace
                     .terminations
                     .iter()
-                    .all(|t| matches!(t.reason.as_str(), "detected" | "beam_stop")),
+                    .all(|t| matches!(t.reason.as_str(), "detected" | "beam_stop" | "masked")),
                 "{name}: {:?}",
                 trace.terminations
             );

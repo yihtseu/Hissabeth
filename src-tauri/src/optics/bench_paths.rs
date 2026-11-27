@@ -1,5 +1,5 @@
 //! Nominal bench routes and their correspondence with actual propagation.
-use super::{Bench, Segment, ports};
+use super::{Bench, Segment};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -193,7 +193,7 @@ impl Bench {
                         && self
                             .elements
                             .iter()
-                            .any(|e| e.id == a.from.element && ports(e.kind).len() > 1)
+                            .any(|e| e.id == a.from.element && e.ports().len() > 1)
                 }
                 AssertionKind::Colinear => {
                     matches!(
@@ -334,6 +334,10 @@ pub(super) struct PathIndex {
     departures: HashMap<(Option<usize>, Port), Step>,
     arrivals: HashMap<String, Vec<usize>>,
     group_stops: HashMap<usize, (usize, PathBreak)>,
+    /// Arrivals on a region plate whose representative sample was masked or clipped
+    /// but which anchor the plate's region arms; paths continue through them and
+    /// whether an arm is lit is judged from its sampled port power.
+    region_anchors: HashSet<usize>,
 }
 
 impl PathIndex {
@@ -356,6 +360,10 @@ impl PathIndex {
                     .push(segment);
             }
         }
+    }
+
+    pub(super) fn anchor_regions(&mut self, segment: usize) {
+        self.region_anchors.insert(segment);
     }
 
     pub(super) fn stop(&mut self, departure: &Departure, location: PathBreak) {
@@ -471,7 +479,8 @@ impl PathIndex {
                 let expected = route
                     .get(i + 1)
                     .map_or(branch.to.element.as_str(), |edge| edge.0);
-                if hit.status != "hit" || flight.to_element != expected {
+                let passable = hit.status == "hit" || self.region_anchors.contains(at);
+                if !passable || flight.to_element != expected {
                     result.interruption = Some(PathBreak::new(
                         &flight.to_element,
                         &flight.to_port,

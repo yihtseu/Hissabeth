@@ -19,10 +19,12 @@ import { callTool, errorMessage } from '../api';
 import { tr } from '../i18n';
 import {
     benchPorts,
+    benchElementPorts,
     benchRotate,
     type Bench,
     type BenchCatalogItem,
     type BenchElement,
+    type BenchRegion,
     type BenchLabCheck,
     type BenchPolarization,
     type BenchTrace,
@@ -144,6 +146,7 @@ let alive = true;
 const TEMPLATES = [
     'mach_zehnder',
     'delay_line',
+    'three_arm',
     'michelson',
     'polarized_beam_combiner',
     'beam_expander_focus',
@@ -497,7 +500,7 @@ function updateSelectedPol(kind: string): void {
 const selectedPorts = computed(() => {
     const e = entity.value;
     if (!e) return [];
-    return benchPorts('kind' in e ? e.kind : 'source');
+    return 'kind' in e ? benchElementPorts(e) : benchPorts('source');
 });
 const selectedConnections = computed(() =>
     (scene.value?.connections ?? []).filter((c) => c.from === selected.value),
@@ -657,6 +660,46 @@ function shape(e: BenchElement, radius = e.body_radius): string {
             return e.position.map((x, j) => x + v[j]!) as Vec3;
         }),
     );
+}
+function regionOutline(e: BenchElement, region: BenchRegion): string {
+    const rotation = e.rotation;
+    if (!rotation) return '';
+    const s = region.shape;
+    const local: [number, number][] =
+        s.kind === 'circle'
+            ? Array.from({ length: 25 }, (_, i) => {
+                  const a = (i * Math.PI) / 12;
+                  return [
+                      s.center[0] + s.radius * Math.cos(a),
+                      s.center[1] + s.radius * Math.sin(a),
+                  ];
+              })
+            : (
+                  [
+                      [-1, -1],
+                      [1, -1],
+                      [1, 1],
+                      [-1, 1],
+                      [-1, -1],
+                  ] as const
+              ).map(([a, b]) => [
+                  s.center[0] + (a * s.size[0]) / 2,
+                  s.center[1] + (b * s.size[1]) / 2,
+              ]);
+    return path(
+        local.map(([y, z]) => {
+            const v = benchRotate([0, y, z], rotation);
+            return e.position.map((x, j) => x + v[j]!) as Vec3;
+        }),
+    );
+}
+function regionCenter(e: BenchElement, region: BenchRegion): [number, number] {
+    const v = benchRotate(
+        [0, region.shape.center[0], region.shape.center[1]],
+        e.rotation ?? [0, 0, 0],
+    );
+    const p = project(e.position.map((x, j) => x + v[j]!) as Vec3);
+    return [p[0], p[1]];
 }
 function mountLines(e: BenchElement): Vec3[][] {
     if (!e.mount || !scene.value || !e.rotation) return [];
@@ -1174,6 +1217,20 @@ defineExpose({ saveBench, discardBench });
                                 class="bench-body lens"
                             />
                             <polyline :points="shape(e, e.aperture)" class="bench-aperture" />
+                            <g
+                                v-for="region in e.regions ?? []"
+                                :key="region.port"
+                                class="bench-region"
+                            >
+                                <polyline :points="regionOutline(e, region)" />
+                                <text
+                                    :x="regionCenter(e, region)[0]"
+                                    :y="regionCenter(e, region)[1]"
+                                    text-anchor="middle"
+                                >
+                                    {{ region.port }}
+                                </text>
+                            </g>
                             <circle
                                 :cx="project(e.position)[0]"
                                 :cy="project(e.position)[1]"
@@ -1901,6 +1958,17 @@ defineExpose({ saveBench, discardBench });
     fill: none;
     stroke: var(--accent);
     stroke-width: 1.5;
+    pointer-events: none;
+}
+.bench-region polyline {
+    fill: color-mix(in srgb, var(--accent) 18%, transparent);
+    stroke: var(--accent);
+    stroke-width: 1;
+    pointer-events: none;
+}
+.bench-region text {
+    font-size: 9px;
+    fill: var(--accent);
     pointer-events: none;
 }
 .bench-inspector {

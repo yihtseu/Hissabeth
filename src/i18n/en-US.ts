@@ -243,6 +243,7 @@ export default {
             unexpected_hit: 'Unexpected component',
             clipped: 'Aperture clipped',
             beam_stop: 'Beam stop',
+            masked: 'Masked by aperture plate',
             budget: 'Trace budget reached',
             detected: 'Detected',
         },
@@ -2189,6 +2190,7 @@ export default {
         templates: {
             mach_zehnder: 'Mach-Zehnder',
             delay_line: 'Two-arm delay line',
+            three_arm: 'Three-hole mask, L/C/R arms',
             michelson: 'Michelson',
             polarized_beam_combiner: 'PBS + HWP Two-Arm',
             beam_expander_focus: 'Beam Expander + Focus',

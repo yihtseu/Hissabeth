@@ -34,6 +34,19 @@ export interface BenchCoating {
 export type BenchScatter =
     | { model: 'lambertian'; fraction: number; rays: number }
     | { model: 'abg'; a: number; b: number; g: number; rays: number };
+/** Sub-aperture shape in element-local [y, z] coordinates (mm). */
+export type BenchRegionShape =
+    | { kind: 'circle'; center: [number, number]; radius: number }
+    | { kind: 'rect'; center: [number, number]; size: [number, number] };
+/** Named active region: a mask hole (aperture) or a prism facet (mirror). */
+export interface BenchRegion {
+    port: string;
+    shape: BenchRegionShape;
+    /** Power fraction passed through the region, 0..1 (default 1). */
+    transmittance?: number;
+    /** Mirror facet normal in element-local coordinates (default [1, 0, 0]). */
+    normal?: Vec3 | null;
+}
 export interface BenchElement {
     id: string;
     label: string;
@@ -69,6 +82,8 @@ export interface BenchElement {
     screw_tpi?: number | null;
     /** Kinematic mount pivot lever arm (mm, e.g. 25.4). */
     lever_arm_mm?: number | null;
+    /** Sub-apertures on apertures and mirrors; each region is an output port. First match wins. */
+    regions?: BenchRegion[];
 }
 type DefaultedElementFields =
     | 'label'
@@ -91,6 +106,8 @@ export interface BenchSource {
     wavelength: number;
     power: number;
     beam_radius: number;
+    /** 1/e² intensity radius (mm) weighting the sampled disk; omitted means flat-top. */
+    gaussian_radius?: number | null;
     rings: number;
     waist?: number | null;
     waist_offset?: number | null;
@@ -229,6 +246,8 @@ export interface BenchTrace {
     detectors: BenchDetectorMap[];
     balance_error: number;
     warnings: string[];
+    /** Power leaving each sub-aperture port (physical trace only). */
+    port_power?: { element: string; port: string; power: number }[];
 }
 export interface BenchAssembly {
     revision: number;
@@ -418,6 +437,10 @@ export function benchRotate(v: Vec3, a: Vec3): Vec3 {
     ];
     return [Math.cos(y) * c[0] - Math.sin(y) * c[1], Math.sin(y) * c[0] + Math.cos(y) * c[1], c[2]];
 }
+/** Output ports of a placed element: its region ports when it has sub-apertures. */
+export function benchElementPorts(e: { kind: BenchKind; regions?: BenchRegion[] }): string[] {
+    return e.regions?.length ? e.regions.map((r) => r.port) : benchPorts(e.kind);
+}
 export function benchPorts(kind: BenchKind | 'source'): string[] {
     return kind === 'source' ||
         kind === 'lens' ||
@@ -529,7 +552,9 @@ export function benchProblems(value: unknown): string[] {
                 s.beam_radius < 0 ||
                 !Number.isInteger(s.rings) ||
                 s.rings < 0 ||
-                s.rings > 8
+                s.rings > 8 ||
+                (s.gaussian_radius != null &&
+                    (!Number.isFinite(s.gaussian_radius) || s.gaussian_radius <= 0))
             )
                 throw Error();
         for (const c of b.connections)
