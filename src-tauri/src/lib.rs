@@ -47,7 +47,7 @@ mod desktop {
                 if let Err(error) = window.set_title(title) {
                     eprintln!("Window title: {error}");
                 }
-                if let Err(error) = window.set_theme(theme.clone()) {
+                if let Err(error) = window.set_theme(theme) {
                     eprintln!("Window theme: {error}");
                 }
             }

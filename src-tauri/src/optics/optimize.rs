@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Damped Least Squares (Levenberg-Marquardt) sequential optical optimizer and design summary.
 use super::{
-    CoordinateTransform, Interaction, Override, PupilSampling, System, analysis, material, parallel,
-    sag,
+    CoordinateTransform, Interaction, Override, PupilSampling, System, analysis, material,
+    parallel, sag,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -499,7 +499,9 @@ fn parse_model_glass(s: &System, surface: usize) -> Result<(f64, f64), String> {
         .find(|g| g.key() == *mat || g.name == *mat)
         .cloned()
         .or_else(|| material::find(mat).ok().cloned())
-        .ok_or_else(|| format!("Material {mat} on surface {surface} has no nd/vd for model glass"))?;
+        .ok_or_else(|| {
+            format!("Material {mat} on surface {surface} has no nd/vd for model glass")
+        })?;
     Ok((glass.nd, glass.vd))
 }
 
@@ -617,10 +619,7 @@ fn get_var_internal(s: &System, v: &Variable) -> Result<f64, String> {
                 .overrides
                 .iter()
                 .find_map(|o| match *o {
-                    Override::Thickness {
-                        surface: k,
-                        value,
-                    } if k == surface => Some(value),
+                    Override::Thickness { surface: k, value } if k == surface => Some(value),
                     _ => None,
                 })
                 .unwrap_or(s.surfaces[surface].thickness);
@@ -640,10 +639,7 @@ fn get_var_internal(s: &System, v: &Variable) -> Result<f64, String> {
                 .overrides
                 .iter()
                 .find_map(|o| match *o {
-                    Override::Radius {
-                        surface: k,
-                        value,
-                    } if k == surface => Some(value),
+                    Override::Radius { surface: k, value } if k == surface => Some(value),
                     _ => None,
                 })
                 .unwrap_or(s.surfaces[surface].radius);
@@ -672,12 +668,8 @@ fn clamp_var_internal(v: &Variable, x: f64) -> f64 {
                 _ => x.clamp(-1.0, 1.0), // curvature limit |R| >= 1mm when unbounded
             }
         }
-        Variable::ModelGlassNd { min, max, .. } => {
-            x.clamp(min.unwrap_or(1.4), max.unwrap_or(2.1))
-        }
-        Variable::ModelGlassVd { min, max, .. } => {
-            x.clamp(min.unwrap_or(18.), max.unwrap_or(95.))
-        }
+        Variable::ModelGlassNd { min, max, .. } => x.clamp(min.unwrap_or(1.4), max.unwrap_or(2.1)),
+        Variable::ModelGlassVd { min, max, .. } => x.clamp(min.unwrap_or(18.), max.unwrap_or(95.)),
         Variable::Thickness { min, max, .. }
         | Variable::Conic { min, max, .. }
         | Variable::EvenAsphere { min, max, .. }
@@ -700,9 +692,7 @@ fn clamp_var_internal(v: &Variable, x: f64) -> f64 {
 fn var_step(v: &Variable, x: f64) -> f64 {
     match v {
         Variable::Radius { .. } | Variable::ConfigRadius { .. } => 1e-6_f64.max(x.abs() * 1e-5),
-        Variable::EvenAsphere { .. } | Variable::OddAsphere { .. } => {
-            1e-10_f64.max(x.abs() * 1e-4)
-        }
+        Variable::EvenAsphere { .. } | Variable::OddAsphere { .. } => 1e-10_f64.max(x.abs() * 1e-4),
         Variable::ModelGlassNd { .. } => 1e-4,
         Variable::ModelGlassVd { .. } => 1e-2,
         Variable::Thickness { .. }
@@ -779,7 +769,8 @@ fn set_var_internal(s: &mut System, v: &Variable, x: f64) -> Result<(), String> 
             {
                 *value = x;
             } else {
-                cfg.overrides.push(Override::Thickness { surface, value: x });
+                cfg.overrides
+                    .push(Override::Thickness { surface, value: x });
             }
         }
         Variable::ConfigRadius {
@@ -856,14 +847,26 @@ fn operand_meta(op: &Operand) -> (String, f64, f64, ConstraintMode, Option<usize
             mode,
             configuration,
             ..
-        } => ("Working F/#".into(), *target, *weight, *mode, *configuration),
+        } => (
+            "Working F/#".into(),
+            *target,
+            *weight,
+            *mode,
+            *configuration,
+        ),
         Operand::TotalTrack {
             target,
             weight,
             mode,
             configuration,
             ..
-        } => ("Total Track".into(), *target, *weight, *mode, *configuration),
+        } => (
+            "Total Track".into(),
+            *target,
+            *weight,
+            *mode,
+            *configuration,
+        ),
         Operand::CenterThickness {
             surface,
             target,
@@ -911,7 +914,13 @@ fn operand_meta(op: &Operand) -> (String, f64, f64, ConstraintMode, Option<usize
             mode,
             configuration,
             ..
-        } => ("Axial Color".into(), *target, *weight, *mode, *configuration),
+        } => (
+            "Axial Color".into(),
+            *target,
+            *weight,
+            *mode,
+            *configuration,
+        ),
         Operand::LateralColor {
             field_index,
             target,
@@ -1148,10 +1157,7 @@ fn evaluate_operand(s: &System, op: &Operand) -> Result<f64, String> {
     }
 }
 
-fn evaluate_all(
-    base: &System,
-    operands: &[Operand],
-) -> Result<(Vec<f64>, Vec<f64>, f64), String> {
+fn evaluate_all(base: &System, operands: &[Operand]) -> Result<(Vec<f64>, Vec<f64>, f64), String> {
     // Cache resolved configurations used by operands.
     let mut resolved_map: std::collections::HashMap<usize, System> =
         std::collections::HashMap::new();
@@ -1218,8 +1224,9 @@ fn solve_linear(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Result<Vec<f64>, Strin
         for row in (col + 1)..n {
             let factor = a[row][col] / diag;
             a[row][col] = 0.;
-            for k in (col + 1)..n {
-                a[row][k] -= factor * a[col][k];
+            let (pivot_rows, rest) = a.split_at_mut(row);
+            for (x, p) in rest[0][col + 1..].iter_mut().zip(&pivot_rows[col][col + 1..]) {
+                *x -= factor * p;
             }
             b[row] -= factor * b[col];
         }
@@ -1307,40 +1314,39 @@ pub fn run(source: &System, request: &Request) -> Result<OptimizationResult, Str
             let res_ref = &residuals;
             let vars_ref = &request.variables;
             let ops_ref = &request.operands;
-            let jac_cols: Vec<Result<Vec<f64>, String>> =
-                parallel::par_map_index(n_vars, 1, |j| {
-                    let h = var_step(&vars_ref[j], x_ref[j]);
-                    let mut trial = base_ref.clone();
-                    let x_plus = clamp_var_internal(&vars_ref[j], x_ref[j] + h);
-                    let mut actual_h = x_plus - x_ref[j];
+            let jac_cols: Vec<Result<Vec<f64>, String>> = parallel::par_map_index(n_vars, 1, |j| {
+                let h = var_step(&vars_ref[j], x_ref[j]);
+                let mut trial = base_ref.clone();
+                let x_plus = clamp_var_internal(&vars_ref[j], x_ref[j] + h);
+                let mut actual_h = x_plus - x_ref[j];
+                if actual_h.abs() < 1e-14 {
+                    let x_minus = clamp_var_internal(&vars_ref[j], x_ref[j] - h);
+                    actual_h = x_minus - x_ref[j];
                     if actual_h.abs() < 1e-14 {
-                        let x_minus = clamp_var_internal(&vars_ref[j], x_ref[j] - h);
-                        actual_h = x_minus - x_ref[j];
+                        return Ok(vec![0.; n_ops]);
+                    }
+                    set_var_internal(&mut trial, &vars_ref[j], x_minus)?;
+                } else {
+                    set_var_internal(&mut trial, &vars_ref[j], x_plus)?;
+                }
+                let (_, r_trial, _) = match evaluate_all(&trial, ops_ref) {
+                    Ok(out) => out,
+                    Err(_) => {
+                        // Try opposite finite-difference direction if forward step left valid domain.
+                        let mut trial_back = base_ref.clone();
+                        let x_alt = clamp_var_internal(&vars_ref[j], x_ref[j] - actual_h);
+                        actual_h = x_alt - x_ref[j];
                         if actual_h.abs() < 1e-14 {
                             return Ok(vec![0.; n_ops]);
                         }
-                        set_var_internal(&mut trial, &vars_ref[j], x_minus)?;
-                    } else {
-                        set_var_internal(&mut trial, &vars_ref[j], x_plus)?;
+                        set_var_internal(&mut trial_back, &vars_ref[j], x_alt)?;
+                        evaluate_all(&trial_back, ops_ref)?
                     }
-                    let (_, r_trial, _) = match evaluate_all(&trial, ops_ref) {
-                        Ok(out) => out,
-                        Err(_) => {
-                            // Try opposite finite-difference direction if forward step left valid domain.
-                            let mut trial_back = base_ref.clone();
-                            let x_alt = clamp_var_internal(&vars_ref[j], x_ref[j] - actual_h);
-                            actual_h = x_alt - x_ref[j];
-                            if actual_h.abs() < 1e-14 {
-                                return Ok(vec![0.; n_ops]);
-                            }
-                            set_var_internal(&mut trial_back, &vars_ref[j], x_alt)?;
-                            evaluate_all(&trial_back, ops_ref)?
-                        }
-                    };
-                    Ok((0..n_ops)
-                        .map(|i| (r_trial[i] - res_ref[i]) / actual_h)
-                        .collect())
-                });
+                };
+                Ok((0..n_ops)
+                    .map(|i| (r_trial[i] - res_ref[i]) / actual_h)
+                    .collect())
+            });
 
             let mut j_cols = Vec::with_capacity(n_vars);
             for col in jac_cols {
@@ -1352,14 +1358,14 @@ pub fn run(source: &System, request: &Request) -> Result<OptimizationResult, Str
             let mut g = vec![0.; n_vars];
             for col in 0..n_vars {
                 let mut sum_g = 0.;
-                for i in 0..n_ops {
-                    sum_g += j_cols[col][i] * residuals[i];
+                for (j, r) in j_cols[col].iter().zip(&residuals[..n_ops]) {
+                    sum_g += j * r;
                 }
                 g[col] = sum_g;
                 for col2 in col..n_vars {
                     let mut sum = 0.;
-                    for i in 0..n_ops {
-                        sum += j_cols[col][i] * j_cols[col2][i];
+                    for (a, b) in j_cols[col].iter().zip(&j_cols[col2]).take(n_ops) {
+                        sum += a * b;
                     }
                     jtj[col][col2] = sum;
                     jtj[col2][col] = sum;
@@ -1375,9 +1381,9 @@ pub fn run(source: &System, request: &Request) -> Result<OptimizationResult, Str
             let mut step_accepted = false;
             for _retry in 0..10 {
                 let mut a = jtj.clone();
-                for idx in 0..n_vars {
-                    let diag_scale = a[idx][idx].max(1e-10);
-                    a[idx][idx] += damping * diag_scale;
+                for (idx, row) in a.iter_mut().enumerate().take(n_vars) {
+                    let diag_scale = row[idx].max(1e-10);
+                    row[idx] += damping * diag_scale;
                 }
                 let rhs: Vec<f64> = g.iter().map(|v| -v).collect();
                 let Ok(dx) = solve_linear(a, rhs) else {
@@ -1401,28 +1407,27 @@ pub fn run(source: &System, request: &Request) -> Result<OptimizationResult, Str
                 }
                 if let Ok((next_vals, next_res, next_merit)) =
                     evaluate_all(&candidate, &request.operands)
+                    && next_merit < merit
                 {
-                    if next_merit < merit {
-                        let rel = (merit - next_merit) / merit.max(1e-12);
-                        current = candidate;
-                        x = x_next;
-                        values = next_vals;
-                        residuals = next_res;
-                        merit = next_merit;
-                        damping = (damping * 0.3).max(1e-12);
-                        history.push(IterationRecord {
-                            iteration: iter,
-                            merit,
-                            damping,
-                            accepted: true,
-                        });
-                        step_accepted = true;
-                        if merit <= request.tolerance || rel < request.tolerance {
-                            converged = true;
-                            reason = "Converged within tolerance".into();
-                        }
-                        break;
+                    let rel = (merit - next_merit) / merit.max(1e-12);
+                    current = candidate;
+                    x = x_next;
+                    values = next_vals;
+                    residuals = next_res;
+                    merit = next_merit;
+                    damping = (damping * 0.3).max(1e-12);
+                    history.push(IterationRecord {
+                        iteration: iter,
+                        merit,
+                        damping,
+                        accepted: true,
+                    });
+                    step_accepted = true;
+                    if merit <= request.tolerance || rel < request.tolerance {
+                        converged = true;
+                        reason = "Converged within tolerance".into();
                     }
+                    break;
                 }
                 damping = (damping * 5.).min(1e12);
             }
@@ -1604,15 +1609,15 @@ pub(crate) fn design_summary_report(s: &System) -> Result<DesignSummary, String>
             .iter()
             .map(|w| w.value)
             .fold(f64::NEG_INFINITY, f64::max);
-        if let (Ok(p1), Ok(p2)) = (s.paraxial(w_min), s.paraxial(w_max)) {
-            if let (Some(f1), Some(f2)) = (p1["image_distance"].as_f64(), p2["image_distance"].as_f64())
-            {
-                axial_color = Some(AxialColor {
-                    min_nm: w_min,
-                    max_nm: w_max,
-                    shift_mm: f1 - f2,
-                });
-            }
+        if let (Ok(p1), Ok(p2)) = (s.paraxial(w_min), s.paraxial(w_max))
+            && let (Some(f1), Some(f2)) =
+                (p1["image_distance"].as_f64(), p2["image_distance"].as_f64())
+        {
+            axial_color = Some(AxialColor {
+                min_nm: w_min,
+                max_nm: w_max,
+                shift_mm: f1 - f2,
+            });
         }
     }
     Ok(DesignSummary {
@@ -1686,7 +1691,12 @@ mod tests {
             tolerance: 1e-7,
         };
         let res = run(&s, &req).unwrap();
-        assert!(res.final_merit < res.initial_merit * 0.2, "merit: {} -> {}", res.initial_merit, res.final_merit);
+        assert!(
+            res.final_merit < res.initial_merit * 0.2,
+            "merit: {} -> {}",
+            res.initial_merit,
+            res.final_merit
+        );
         let efl = res.system.paraxial(res.system.reference()).unwrap()["efl"]
             .as_f64()
             .unwrap();

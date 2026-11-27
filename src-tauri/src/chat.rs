@@ -269,17 +269,17 @@ pub fn start(
         }
         let (runtime, storage) = chatgpt_paths(&app)?;
         let mut input = Vec::new();
-        if session.is_some() {
-            if let Some(previous) = &previous {
-                input.extend(previous.messages.iter().filter_map(|message| {
-                    let role = match message["kind"].as_str()? {
-                        "user" => "user",
-                        "text" => "assistant",
-                        _ => return None,
-                    };
-                    Some(json!({"role":role, "content":message["text"].as_str()?}))
-                }));
-            }
+        if session.is_some()
+            && let Some(previous) = &previous
+        {
+            input.extend(previous.messages.iter().filter_map(|message| {
+                let role = match message["kind"].as_str()? {
+                    "user" => "user",
+                    "text" => "assistant",
+                    _ => return None,
+                };
+                Some(json!({"role":role, "content":message["text"].as_str()?}))
+            }));
         }
         input.push(json!({"role":"user", "content":request.prompt}));
         json!({"provider":provider, "model":request.model, "session":session,
@@ -308,7 +308,7 @@ pub fn start(
         .map_err(|e| format!("Start agent bridge: {e}"))?;
     let mut record = previous.clone().unwrap_or_else(|| Conversation {
         id: conversation_id.clone(),
-        provider: request.provider.clone(),
+        provider: request.provider,
         model: request.model.clone(),
         title: request
             .prompt
@@ -400,45 +400,42 @@ pub fn start(
             };
             let kind = event["kind"].as_str().unwrap_or("");
             if kind == "session" {
-                if let Some(session) = event["session"].as_str() {
-                    if let Ok(mut chat) = state.lock() {
-                        if let Some(record) = chat
-                            .conversations
-                            .iter_mut()
-                            .find(|record| record.id == conversation_id)
-                        {
-                            record.session = Some(session.to_string());
-                        }
-                        if let Err(error) = chat.save() {
-                            let _ = channel.send(json!({"kind":"storage_error","text":error}));
-                        }
+                if let Some(session) = event["session"].as_str()
+                    && let Ok(mut chat) = state.lock()
+                {
+                    if let Some(record) = chat
+                        .conversations
+                        .iter_mut()
+                        .find(|record| record.id == conversation_id)
+                    {
+                        record.session = Some(session.to_string());
+                    }
+                    if let Err(error) = chat.save() {
+                        let _ = channel.send(json!({"kind":"storage_error","text":error}));
                     }
                 }
             } else if matches!(kind, "done" | "cancelled" | "error") {
                 terminal = Some(event);
             } else {
-                if matches!(kind, "text" | "tool") {
-                    if let Ok(mut chat) = state.lock() {
-                        if let Some(record) = chat
-                            .conversations
-                            .iter_mut()
-                            .find(|record| record.id == conversation_id)
-                        {
-                            let key =
-                                format!("{}:{}", request.id, event["id"].as_str().unwrap_or(""));
-                            if let Some(existing) =
-                                record.messages.iter_mut().find(|item| item["id"] == key)
-                            {
-                                for (key, value) in event.as_object().unwrap() {
-                                    existing[key] = value.clone();
-                                }
-                                existing["id"] = json!(key);
-                            } else {
-                                let mut item = event.clone();
-                                item["id"] = json!(key);
-                                record.messages.push(item);
-                            }
+                if matches!(kind, "text" | "tool")
+                    && let Ok(mut chat) = state.lock()
+                    && let Some(record) = chat
+                        .conversations
+                        .iter_mut()
+                        .find(|record| record.id == conversation_id)
+                {
+                    let key = format!("{}:{}", request.id, event["id"].as_str().unwrap_or(""));
+                    if let Some(existing) =
+                        record.messages.iter_mut().find(|item| item["id"] == key)
+                    {
+                        for (key, value) in event.as_object().unwrap() {
+                            existing[key] = value.clone();
                         }
+                        existing["id"] = json!(key);
+                    } else {
+                        let mut item = event.clone();
+                        item["id"] = json!(key);
+                        record.messages.push(item);
                     }
                 }
                 if channel.send(event).is_err() {
@@ -447,10 +444,10 @@ pub fn start(
                 }
             }
         }
-        if terminal.is_none() || delivery_failed {
-            if let Ok(mut child) = process.lock() {
-                kill_tree(&mut child);
-            }
+        if (terminal.is_none() || delivery_failed)
+            && let Ok(mut child) = process.lock()
+        {
+            kill_tree(&mut child);
         }
         let status = process.lock().ok().and_then(|mut child| child.wait().ok());
         let diagnostic = errors.join().unwrap_or_default();
@@ -514,10 +511,10 @@ pub fn cancel(state: &State, id: &str) -> Result<(), String> {
     // SDK cancellation should reap its own children; stop a stuck bridge after a grace period.
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(5));
-        if let Ok(mut child) = process.lock() {
-            if matches!(child.try_wait(), Ok(None)) {
-                kill_tree(&mut child);
-            }
+        if let Ok(mut child) = process.lock()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            kill_tree(&mut child);
         }
     });
     Ok(())
@@ -546,11 +543,10 @@ fn kill_tree(child: &mut Child) {
     let _ = child.kill();
 }
 pub fn shutdown(state: &State) {
-    if let Ok(chat) = state.lock() {
-        if let Some(active) = &chat.active {
-            if let Ok(mut child) = active.child.lock() {
-                kill_tree(&mut child);
-            }
-        }
+    if let Ok(chat) = state.lock()
+        && let Some(active) = &chat.active
+        && let Ok(mut child) = active.child.lock()
+    {
+        kill_tree(&mut child);
     }
 }

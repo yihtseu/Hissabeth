@@ -91,18 +91,18 @@ impl Profile<'_> {
     pub fn is_plane(self) -> bool {
         self.radius == 0.
             && self.even.iter().chain(self.odd).all(|a| *a == 0.)
-            && self.toroid.map_or(true, |t| {
-                t.revolution == 0. && t.even_y.iter().all(|a| *a == 0.)
-            })
+            && self
+                .toroid
+                .is_none_or(|t| t.revolution == 0. && t.even_y.iter().all(|a| *a == 0.))
             && self
                 .zernike
-                .map_or(true, |z| z.coefficients.iter().all(|a| *a == 0.))
+                .is_none_or(|z| z.coefficients.iter().all(|a| *a == 0.))
     }
     /// Rotationally symmetric profiles keep the fast radial path. A toroid or
     /// any Fringe term with m != 0 breaks the symmetry.
     pub fn is_radial(self) -> bool {
         self.toroid.is_none()
-            && self.zernike.map_or(true, |z| {
+            && self.zernike.is_none_or(|z| {
                 z.coefficients
                     .iter()
                     .enumerate()
@@ -129,14 +129,13 @@ impl Profile<'_> {
                 return Err("Toroidal profiles take no radial asphere coefficients".into());
             }
         }
-        if let Some(z) = self.zernike {
-            if !z.normalize.is_finite()
+        if let Some(z) = self.zernike
+            && (!z.normalize.is_finite()
                 || z.normalize <= 0.
                 || z.coefficients.len() > 37
-                || !z.coefficients.iter().all(|a| a.is_finite())
-            {
-                return Err("Invalid Zernike sag parameters".into());
-            }
+                || !z.coefficients.iter().all(|a| a.is_finite()))
+        {
+            return Err("Invalid Zernike sag parameters".into());
         }
         Ok(())
     }
@@ -502,11 +501,11 @@ impl Profile<'_> {
             let mut next = None;
             for _ in 0..24 {
                 let candidate = t - fraction * step;
-                if let Ok((_, next_error, _)) = self.residual(p, v, candidate) {
-                    if next_error.abs() < error.abs() {
-                        next = Some(candidate);
-                        break;
-                    }
+                if let Ok((_, next_error, _)) = self.residual(p, v, candidate)
+                    && next_error.abs() < error.abs()
+                {
+                    next = Some(candidate);
+                    break;
                 }
                 fraction *= 0.5;
             }
@@ -820,9 +819,11 @@ mod tests {
         );
     }
     fn uniform_source() -> System {
-        let mut s = System::default();
-        s.object_material = "1.500000:60.000000".into();
-        s.object_distance = Some(100.);
+        let mut s = System {
+            object_material: "1.500000:60.000000".into(),
+            object_distance: Some(100.),
+            ..Default::default()
+        };
         s.object_surface.radius = 50.;
         s.wavelengths = vec![Wavelength::new(587.562, 1.)];
         s.reference_wavelength = 0;

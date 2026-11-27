@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn quarter_wave_layer_matches_closed_form_and_zero_thickness_vanishes() {
         let (r, t) = stack(550., 1., &[(1.38, 550. / 4. / 1.38)], 1.5).unwrap();
-        let expected = (((1.5 - 1.38 * 1.38) / (1.5 + 1.38 * 1.38)) as f64).powi(2);
+        let expected = ((1.5_f64 - 1.38 * 1.38) / (1.5 + 1.38 * 1.38)).powi(2);
         assert!((r - expected).abs() < 1e-12);
         assert!((r + t - 1.).abs() < 1e-9);
         let (r0, _) = stack(550., 1., &[(1.38, 0.), (2.1, 0.)], 1.5).unwrap();

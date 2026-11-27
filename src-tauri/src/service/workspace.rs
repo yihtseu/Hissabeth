@@ -270,7 +270,7 @@ struct Recovery {
     observed: Observed,
 }
 enum State {
-    Ready(Engine),
+    Ready(Box<Engine>),
     Recovery(Recovery),
 }
 pub struct Workspace {
@@ -342,7 +342,7 @@ impl Workspace {
                     _ => None,
                 };
                 match Engine::load_bytes(path.clone(), lease.clone(), revision, bytes) {
-                    Ok(engine) => State::Ready(engine),
+                    Ok(engine) => State::Ready(Box::new(engine)),
                     Err(reason) => State::Recovery(Recovery {
                         revision,
                         reason,
@@ -426,7 +426,7 @@ impl Workspace {
             Observed::Unreadable(reason) => Err(reason.clone()),
         };
         self.state = match loaded {
-            Ok(engine) => State::Ready(engine),
+            Ok(engine) => State::Ready(Box::new(engine)),
             Err(reason) => State::Recovery(Recovery {
                 revision: next,
                 reason,
@@ -528,13 +528,13 @@ impl Workspace {
                     .unwrap_or_else(|| "no source file was present".into())
             ));
         }
-        self.state = State::Ready(Engine::new(
+        self.state = State::Ready(Box::new(Engine::new(
             self.path.clone(),
             self.lease.clone(),
             next,
             system,
             ProjectFiles::load(&self.path),
-        ));
+        )));
         Ok(Recovered {
             revision: next,
             preserved_path: preserved.map(|p| p.display().to_string()),
@@ -649,8 +649,10 @@ mod tests {
         assert_eq!(status["state"], "recovery");
         assert_eq!(status["revision"], rev + 1);
         assert_eq!(status["source_text"], "new external edit");
-        let mut fixed = System::default();
-        fixed.name = "Externally repaired".into();
+        let mut fixed = System {
+            name: "Externally repaired".into(),
+            ..Default::default()
+        };
         fixed.update().unwrap();
         std::fs::write(&w.path, serde_json::to_vec(&fixed).unwrap()).unwrap();
         let status = w
@@ -678,8 +680,10 @@ mod tests {
             let mut w = bad(format, &original);
             let rev = revision(&w);
             assert!(w.status()["source_text"].is_null());
-            let mut candidate = System::default();
-            candidate.name = "Chosen optical project".into();
+            let mut candidate = System {
+                name: "Chosen optical project".into(),
+                ..Default::default()
+            };
             if format == "geopter" {
                 candidate.pupil_mapping = optics::PupilMapping::ReferenceEntrancePupil;
                 candidate.object_distance = Some(1e10);

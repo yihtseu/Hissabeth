@@ -442,10 +442,12 @@ mod tests {
     }
     #[test]
     fn geopter_export_rejects_unstored_builtin_dispersion_for_each_medium() {
-        let mut s = System::default();
-        s.object_distance = Some(300.);
-        s.temperature = 25.;
-        s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
+        let s = System {
+            object_distance: Some(300.),
+            temperature: 25.,
+            pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+            ..Default::default()
+        };
         for position in 0..=s.surfaces.len() {
             let mut trial = s.clone();
             if position == 0 {
@@ -509,10 +511,12 @@ mod tests {
     #[test]
     fn endpoint_profiles_and_apertures_survive_geopter_exchange() {
         for odd_object in [false, true] {
-            let mut s = System::default();
-            s.object_distance = Some(300.);
-            s.temperature = 25.;
-            s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
+            let mut s = System {
+                object_distance: Some(300.),
+                temperature: 25.,
+                pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+                ..Default::default()
+            };
             s.object_surface.radius = 500.;
             s.object_surface.conic = -0.4;
             s.object_surface.clear_aperture = true;

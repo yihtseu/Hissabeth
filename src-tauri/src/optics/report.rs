@@ -1155,9 +1155,11 @@ mod tests {
     }
     #[test]
     fn canonical_selection_text_and_precision_retain_saved_values() {
-        let mut s = System::default();
-        s.name = "Title\tline\nend".into();
-        s.note = "First line\nSecond line".into();
+        let mut s = System {
+            name: "Title\tline\nend".into(),
+            note: "First line\nSecond line".into(),
+            ..Default::default()
+        };
         s.image_surface.even = vec![1e-20, 0.];
         s.wavelengths.push(Wavelength::new(s.reference(), 0.));
         let before = serde_json::to_value(&s).unwrap();
@@ -1215,18 +1217,20 @@ mod tests {
     }
     #[test]
     fn hand_derived_thick_lens_cardinals_conjugates_and_skew_invariants() {
-        let mut s = System::default();
-        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-        s.reference_wavelength = 0;
-        s.object_distance = Some(200.);
-        s.field_type = FieldType::ObjectHeight;
-        s.object_material = "1.500000:60.000000".into();
-        s.surfaces = vec![Surface::sphere(-50., 200., "AIR", 10.)];
-        s.stop_index = 0;
-        s.fields = vec![Field {
-            x: 3.,
-            ..Field::meridional(4.)
-        }];
+        let mut s = System {
+            wavelengths: vec![Wavelength::new(587.562, 1.)],
+            reference_wavelength: 0,
+            object_distance: Some(200.),
+            field_type: FieldType::ObjectHeight,
+            object_material: "1.500000:60.000000".into(),
+            surfaces: vec![Surface::sphere(-50., 200., "AIR", 10.)],
+            stop_index: 0,
+            fields: vec![Field {
+                x: 3.,
+                ..Field::meridional(4.)
+            }],
+            ..Default::default()
+        };
         s.pupil.value = 6.;
         let r = first(&s);
         // Single immersed interface: M=[1,0; -0.01,1], n0=1.5, ni=1.
@@ -1269,9 +1273,11 @@ mod tests {
     }
     #[test]
     fn mirror_and_afocal_cells_preserve_valid_quantities() {
-        let mut s = System::default();
-        s.surfaces = vec![Surface::sphere(-100., -50., "N-BK7_SCHOTT", 10.)];
-        s.stop_index = 0;
+        let mut s = System {
+            surfaces: vec![Surface::sphere(-100., -50., "N-BK7_SCHOTT", 10.)],
+            stop_index: 0,
+            ..Default::default()
+        };
         s.surfaces[0].interaction = Interaction::Reflect;
         let r = first(&s);
         close(&r, "efl", 50.);
@@ -1321,8 +1327,10 @@ mod tests {
     }
     #[test]
     fn endpoints_mixed_profiles_constraints_and_actual_media_are_complete() {
-        let mut s = System::default();
-        s.object_distance = Some(100.);
+        let mut s = System {
+            object_distance: Some(100.),
+            ..Default::default()
+        };
         s.object_surface.radius = -40.;
         s.image_surface.radius = 30.;
         s.object_surface.even = vec![0., 1e-18];

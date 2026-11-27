@@ -32,7 +32,11 @@ impl CoordinateTransform {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if !self.decenter.iter().all(|v| v.is_finite() && v.abs() <= 1e6) {
+        if !self
+            .decenter
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= 1e6)
+        {
             return Err("Invalid coordinate decenter".into());
         }
         if !self.tilt.iter().all(|v| v.is_finite() && v.abs() <= 360.) {
@@ -104,7 +108,11 @@ impl Frame {
         if self.aligned {
             v
         } else {
-            [dot(v, self.axes[0]), dot(v, self.axes[1]), dot(v, self.axes[2])]
+            [
+                dot(v, self.axes[0]),
+                dot(v, self.axes[1]),
+                dot(v, self.axes[2]),
+            ]
         }
     }
 
@@ -186,9 +194,13 @@ mod tests {
             tilt_first: false,
             return_after: false,
         });
-        let expected_z = [0., -std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2];
-        for i in 0..3 {
-            assert!((f.axes[2][i] - expected_z[i]).abs() < 1e-12);
+        let expected_z = [
+            0.,
+            -std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+        ];
+        for (a, e) in f.axes[2].iter().zip(expected_z) {
+            assert!((a - e).abs() < 1e-12);
         }
     }
 }

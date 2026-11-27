@@ -285,7 +285,12 @@ pub(crate) fn catalog_report(query: Option<&str>, kind: Option<&str>) -> Catalog
             let name = kind_name(item.kind);
             if kind.is_some_and(|filter| !name.eq_ignore_ascii_case(filter.trim()))
                 || ![
-                    item.part, item.name, item.category, item.mount, item.notes, &name,
+                    item.part,
+                    item.name,
+                    item.category,
+                    item.mount,
+                    item.notes,
+                    &name,
                 ]
                 .iter()
                 .any(|text| text.to_ascii_lowercase().contains(&query))
@@ -1153,20 +1158,18 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
                 format!("{}: {code}{at}", end.branch),
             ));
         }
-        if end.reason == "escaped" {
-            if let Some(segment) = last {
-                if let Ok(direction) = unit(sub(segment.to, segment.from)) {
-                    if let Some(position) = dump_position(bench, segment.from, direction) {
-                        dumps.push(BeamDump {
-                            branch: end.branch.clone(),
-                            source: end.source.clone(),
-                            position,
-                            direction,
-                            power: end.power,
-                        });
-                    }
-                }
-            }
+        if end.reason == "escaped"
+            && let Some(segment) = last
+            && let Ok(direction) = unit(sub(segment.to, segment.from))
+            && let Some(position) = dump_position(bench, segment.from, direction)
+        {
+            dumps.push(BeamDump {
+                branch: end.branch.clone(),
+                source: end.source.clone(),
+                position,
+                direction,
+                power: end.power,
+            });
         }
     }
     for hit in &gaussian.hits {
@@ -1858,8 +1861,7 @@ fn markdown_cell(text: &str) -> String {
     xml(text)
         .replace('\\', "&#92;")
         .replace('|', "&#124;")
-        .replace('\n', " ")
-        .replace('\r', " ")
+        .replace(['\n', '\r'], " ")
 }
 
 fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Result<String, String> {
@@ -2242,8 +2244,10 @@ mod tests {
         let rows: Vec<_> = drawing.lines().collect();
         assert_eq!(rows.len() % 2, 0);
         assert!(
-            rows.chunks_exact(2)
-                .all(|pair| pair[0].parse::<i32>().is_ok())
+            rows.as_chunks::<2>()
+                .0
+                .iter()
+                .all(|[code, _]| code.parse::<i32>().is_ok())
         );
         assert!(drawing.contains("1\nAC1009\n") && drawing.ends_with("0\nEOF\n"));
         for layer in ["TABLE", "HOLES", "MOUNTS", "OPTICS", "BEAMS", "TEXT"] {

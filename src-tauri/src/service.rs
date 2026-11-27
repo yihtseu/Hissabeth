@@ -144,13 +144,13 @@ impl Engine {
         system.update()?;
         system.validate()?;
         let projects = ProjectFiles::load(&path);
-        if let Some(bytes) = bytes {
-            if stored != serde_json::to_value(&system).map_err(|e| e.to_string())? {
-                if std::fs::read(&path).map_err(|e| e.to_string())? != bytes {
-                    return Err("Saved file changed while loading; retry from disk".into());
-                }
-                persist_system(&path, &system, &projects, false)?;
+        if let Some(bytes) = bytes
+            && stored != serde_json::to_value(&system).map_err(|e| e.to_string())?
+        {
+            if std::fs::read(&path).map_err(|e| e.to_string())? != bytes {
+                return Err("Saved file changed while loading; retry from disk".into());
             }
+            persist_system(&path, &system, &projects, false)?;
         }
         Ok(Self::new(path, lease, revision, system, projects))
     }

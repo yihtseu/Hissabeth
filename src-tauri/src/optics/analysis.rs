@@ -835,7 +835,13 @@ fn huygens_psf_data(
         .iter()
         .zip(&wf.values)
         .filter_map(|(p, value)| {
-            value.map(|opd| (p[0] * map.radius, p[1] * map.radius, std::f64::consts::TAU * opd))
+            value.map(|opd| {
+                (
+                    p[0] * map.radius,
+                    p[1] * map.radius,
+                    std::f64::consts::TAU * opd,
+                )
+            })
         })
         .collect();
     let half = (size / 2) as f64;
@@ -1353,8 +1359,10 @@ mod tests {
     #[test]
     fn finite_distortion_uses_stored_image_plane_and_physical_object() {
         use super::super::FieldType;
-        let mut s = System::default();
-        s.object_distance = Some(200.);
+        let mut s = System {
+            object_distance: Some(200.),
+            ..Default::default()
+        };
         s.pupil.value = 0.1;
         for kind in [
             FieldType::Angle,
@@ -1444,23 +1452,24 @@ mod tests {
                 .iter()
                 .map(|v| v.abs2().sqrt())
                 .collect::<Vec<_>>();
-            for k in 0..8 {
+            for (k, c) in cut.iter().enumerate().take(8) {
                 let variance = 9. * axis[0] * axis[0] + 36. * axis[1] * axis[1];
                 let expected =
                     (-2. * std::f64::consts::PI.powi(2) * (k as f64 / n as f64).powi(2) * variance)
                         .exp();
                 assert!(
-                    (cut[k] - expected).abs() < 2e-6,
-                    "{axis:?}/{k}: {} vs {expected}",
-                    cut[k]
+                    (c - expected).abs() < 2e-6,
+                    "{axis:?}/{k}: {c} vs {expected}"
                 );
             }
         }
     }
     #[test]
     fn very_near_finite_object_keeps_forward_launch_and_finite_opd() {
-        let mut s = System::default();
-        s.object_distance = Some(0.1);
+        let mut s = System {
+            object_distance: Some(0.1),
+            ..Default::default()
+        };
         s.pupil.value = 0.002;
         s.fields = vec![Field::meridional(0.)];
         s.update().unwrap();
@@ -1539,13 +1548,15 @@ mod physical_tests {
     fn finite_object_wavefront_matches_uniform_medium_sphere_intersection() {
         use crate::optics::{FieldType, Interaction, Surface, Wavelength};
         for image_distance in [10., -20.] {
-            let mut s = System::default();
-            s.object_material = "1.500000:60.000000".into();
-            s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-            s.reference_wavelength = 0;
-            s.object_distance = Some(100.);
-            s.field_type = FieldType::ObjectHeight;
-            s.fields = vec![Field::meridional(0.)];
+            let mut s = System {
+                object_material: "1.500000:60.000000".into(),
+                wavelengths: vec![Wavelength::new(587.562, 1.)],
+                reference_wavelength: 0,
+                object_distance: Some(100.),
+                field_type: FieldType::ObjectHeight,
+                fields: vec![Field::meridional(0.)],
+                ..Default::default()
+            };
             s.pupil.value = 2.;
             let mut surface = Surface::sphere(0., image_distance, "AIR", 20.);
             surface.interaction = Interaction::Dummy;
@@ -1721,8 +1732,10 @@ mod spectral_tests {
     }
     #[test]
     fn full_diffraction_pipeline_matches_circular_aperture_otf_at_low_na() {
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 0.05;
         s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 3.)];
         s.reference_wavelength = 0;
@@ -1780,8 +1793,10 @@ mod spectral_tests {
     #[test]
     fn fft_pupil_ignores_ray_compression_and_retains_physical_clipping() {
         for mapping in [PupilMapping::RealStop, PupilMapping::ReferenceEntrancePupil] {
-            let mut s = System::default();
-            s.pupil_mapping = mapping;
+            let mut s = System {
+                pupil_mapping: mapping,
+                ..Default::default()
+            };
             s.pupil.value = 2.;
             s.fields = vec![Field {
                 x: 0.8,
@@ -1815,10 +1830,12 @@ mod spectral_tests {
     }
     #[test]
     fn spectral_diffraction_skips_zero_weight_and_reports_positive_weight_failure() {
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(0.)];
-        s.wavelengths = vec![Wavelength::new(587.5618, 2.), Wavelength::new(435.834, 0.)];
-        s.reference_wavelength = 0;
+        let mut s = System {
+            fields: vec![Field::meridional(0.)],
+            wavelengths: vec![Wavelength::new(587.5618, 2.), Wavelength::new(435.834, 0.)],
+            reference_wavelength: 0,
+            ..Default::default()
+        };
         s.update().unwrap();
         let a =
             diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, Some(50.)).unwrap();
@@ -1845,8 +1862,10 @@ mod spectral_tests {
             .unwrap_err()
             .contains("3000")
         );
-        let mut s = System::default();
-        s.stop_index = 1;
+        let mut s = System {
+            stop_index: 1,
+            ..Default::default()
+        };
         s.pupil.value = 0.00001;
         s.fields = vec![Field::meridional(5.)];
         s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 1.)];
@@ -1874,9 +1893,11 @@ mod spectral_tests {
     }
     #[test]
     fn encircled_energy_integrates_area_weights_instead_of_ray_counts() {
-        let mut s = System::default();
-        s.surfaces = vec![Surface::sphere(0., 10., "AIR", 2.)];
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            surfaces: vec![Surface::sphere(0., 10., "AIR", 2.)],
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 2.;
         s.update().unwrap();
         let result = encircled_energy(

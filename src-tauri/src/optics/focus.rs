@@ -360,10 +360,12 @@ mod tests {
         assert!((a - b).abs() < tolerance, "{a} != {b}");
     }
     fn plane_glass() -> System {
-        let mut s = System::default();
-        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-        s.reference_wavelength = 0;
-        s.surfaces = vec![Surface::sphere(40., 80., "1.500000:60.000000", 20.)];
+        let mut s = System {
+            wavelengths: vec![Wavelength::new(587.562, 1.)],
+            reference_wavelength: 0,
+            surfaces: vec![Surface::sphere(40., 80., "1.500000:60.000000", 20.)],
+            ..Default::default()
+        };
         s.pupil.value = 1.;
         s
     }
@@ -495,10 +497,12 @@ mod tests {
     fn mixed_aspheres_match_convergent_real_bundle_and_rotated_skew_fields() {
         for finite in [false, true] {
             for mapping in [PupilMapping::RealStop, PupilMapping::ReferenceEntrancePupil] {
-                let mut s = System::default();
-                s.stop_index = 1;
-                s.pupil_mapping = mapping;
-                s.object_distance = finite.then_some(200.);
+                let mut s = System {
+                    stop_index: 1,
+                    pupil_mapping: mapping,
+                    object_distance: finite.then_some(200.),
+                    ..Default::default()
+                };
                 s.object_surface.radius = if finite { 200. } else { 0. };
                 s.field_type = if finite {
                     FieldType::ObjectHeight

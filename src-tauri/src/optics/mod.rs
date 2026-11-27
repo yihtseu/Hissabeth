@@ -573,10 +573,10 @@ impl System {
                 "A curved or clipped object surface requires a finite object distance".into(),
             );
         }
-        if let Some(d) = self.object_distance {
-            if !d.is_finite() || d <= 0. {
-                return Err("Object distance must be positive or null for infinity".into());
-            }
+        if let Some(d) = self.object_distance
+            && (!d.is_finite() || d <= 0.)
+        {
+            return Err("Object distance must be positive or null for infinity".into());
         }
         if self.field_type != FieldType::Angle && self.object_distance.is_none() {
             return Err("Height fields require a finite object distance".into());
@@ -1012,24 +1012,26 @@ mod tests {
     use super::*;
     #[test]
     fn configuration_overrides_apply_only_to_the_resolved_copy() {
-        let mut s = System::default();
-        s.configurations = vec![
-            Configuration {
-                name: "Base".into(),
-                overrides: vec![],
-            },
-            Configuration {
-                name: "Zoom".into(),
-                overrides: vec![
-                    Override::Thickness {
-                        surface: 1,
-                        value: 20.,
-                    },
-                    Override::ObjectDistance { value: Some(250.) },
-                ],
-            },
-        ];
-        s.active_configuration = 1;
+        let mut s = System {
+            configurations: vec![
+                Configuration {
+                    name: "Base".into(),
+                    overrides: vec![],
+                },
+                Configuration {
+                    name: "Zoom".into(),
+                    overrides: vec![
+                        Override::Thickness {
+                            surface: 1,
+                            value: 20.,
+                        },
+                        Override::ObjectDistance { value: Some(250.) },
+                    ],
+                },
+            ],
+            active_configuration: 1,
+            ..Default::default()
+        };
         s.update().unwrap();
         let zoom = s.resolved().unwrap();
         assert_eq!(zoom.surfaces[1].thickness, 20.);
@@ -1047,17 +1049,19 @@ mod tests {
     #[test]
     fn invalid_configuration_tables_are_rejected() {
         let with = |overrides: Vec<Override>| {
-            let mut s = System::default();
-            s.configurations = vec![
-                Configuration {
-                    name: "Base".into(),
-                    overrides: vec![],
-                },
-                Configuration {
-                    name: "Bad".into(),
-                    overrides,
-                },
-            ];
+            let mut s = System {
+                configurations: vec![
+                    Configuration {
+                        name: "Base".into(),
+                        overrides: vec![],
+                    },
+                    Configuration {
+                        name: "Bad".into(),
+                        overrides,
+                    },
+                ],
+                ..Default::default()
+            };
             s.update()
         };
         assert!(
@@ -1125,36 +1129,42 @@ mod tests {
         ];
         assert!(s.update().unwrap_err().contains("solved gap"));
         // The active index must be inside the table.
-        let mut s = System::default();
-        s.configurations = vec![Configuration {
-            name: "Only".into(),
-            overrides: vec![],
-        }];
-        s.active_configuration = 1;
+        let mut s = System {
+            configurations: vec![Configuration {
+                name: "Only".into(),
+                overrides: vec![],
+            }],
+            active_configuration: 1,
+            ..Default::default()
+        };
         assert!(s.update().unwrap_err().contains("configuration table"));
     }
     fn immersed_interface() -> System {
-        let mut s = System::default();
-        s.object_material = "1.500000:60.000000".into();
-        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-        s.reference_wavelength = 0;
-        s.surfaces = vec![Surface::sphere(-50., 200., "AIR", 20.)];
-        s.object_distance = Some(300.);
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            object_material: "1.500000:60.000000".into(),
+            wavelengths: vec![Wavelength::new(587.562, 1.)],
+            reference_wavelength: 0,
+            surfaces: vec![Surface::sphere(-50., 200., "AIR", 20.)],
+            object_distance: Some(300.),
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 0.0002;
         s.update().unwrap();
         s
     }
     #[test]
     fn overflowing_finite_object_conjugate_returns_an_error() {
-        let mut s = System::default();
-        s.object_distance = Some(1e308);
-        s.surfaces = vec![
-            Surface::sphere(1., 100., "1.500000:60.000000", 0.1),
-            Surface::sphere(-1., 10., "AIR", 0.1),
-        ];
-        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-        s.reference_wavelength = 0;
+        let s = System {
+            object_distance: Some(1e308),
+            surfaces: vec![
+                Surface::sphere(1., 100., "1.500000:60.000000", 0.1),
+                Surface::sphere(-1., 10., "AIR", 0.1),
+            ],
+            wavelengths: vec![Wavelength::new(587.562, 1.)],
+            reference_wavelength: 0,
+            ..Default::default()
+        };
         assert!(s.paraxial(s.reference()).unwrap_err().contains("Nonfinite"));
         assert!(analysis::longitudinal(&s, s.reference(), 5).is_err());
         assert!(analysis::chromatic_focus(&s, 500., 650., 3).is_err());
@@ -1314,8 +1324,10 @@ mod tests {
     }
     #[test]
     fn finite_conjugate_focus() {
-        let mut s = System::default();
-        s.object_distance = Some(200.);
+        let mut s = System {
+            object_distance: Some(200.),
+            ..Default::default()
+        };
         let p = s.paraxial(s.reference()).unwrap();
         let z = p["image_distance"].as_f64().unwrap();
         s.surfaces.last_mut().unwrap().thickness = z;
@@ -1324,8 +1336,10 @@ mod tests {
     }
     #[test]
     fn chief_ray_aims_at_internal_stop() {
-        let mut s = System::default();
-        s.stop_index = 1;
+        let s = System {
+            stop_index: 1,
+            ..Default::default()
+        };
         let r = s.trace(0., 0., 5., s.reference()).unwrap();
         assert!(r.segments[1].point[1].abs() < 1e-9);
     }

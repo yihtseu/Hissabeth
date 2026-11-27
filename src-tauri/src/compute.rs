@@ -112,8 +112,10 @@ mod spectral_tests {
     use super::*;
     use crate::optics::{Field, System, Wavelength};
     fn chromatic_system() -> System {
-        let mut s = System::default();
-        s.stop_index = 1;
+        let mut s = System {
+            stop_index: 1,
+            ..Default::default()
+        };
         s.pupil.value = 0.00001;
         s.fields = vec![Field::meridional(5.)];
         s.wavelengths = vec![Wavelength::new(486.1327, 1.), Wavelength::new(656.2725, 1.)];

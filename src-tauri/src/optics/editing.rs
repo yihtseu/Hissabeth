@@ -159,16 +159,17 @@ mod tests {
     use serde_json::to_value;
 
     fn draft(n: usize) -> System {
-        let mut s = System::default();
-        s.surfaces = (0..n)
-            .map(|i| {
-                let mut row = Surface::sphere(0., (i + 1) as f64, "AIR", 4.);
-                row.label = format!("physical-{i}");
-                row
-            })
-            .collect();
-        s.stop_index = n - 1;
-        s
+        System {
+            surfaces: (0..n)
+                .map(|i| {
+                    let mut row = Surface::sphere(0., (i + 1) as f64, "AIR", 4.);
+                    row.label = format!("physical-{i}");
+                    row
+                })
+                .collect(),
+            stop_index: n - 1,
+            ..Default::default()
+        }
     }
     #[test]
     fn surface_edit_insertion_maps_physical_rows_and_half_open_constraints() {
@@ -361,13 +362,15 @@ mod tests {
     }
     #[test]
     fn surface_edit_zero_gap_dummy_preserves_real_rays_matrix_and_total_path() {
-        let mut finite = System::default();
-        finite.object_distance = Some(160.);
-        finite.fields = vec![Field {
-            x: 1.,
-            y: 2.,
-            ..Field::meridional(0.)
-        }];
+        let mut finite = System {
+            object_distance: Some(160.),
+            fields: vec![Field {
+                x: 1.,
+                y: 2.,
+                ..Field::meridional(0.)
+            }],
+            ..Default::default()
+        };
         finite.object_surface.radius = 500.;
         finite.image_surface.radius = -300.;
         let mut mirror = draft(1);

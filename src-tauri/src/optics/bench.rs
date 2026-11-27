@@ -195,7 +195,7 @@ pub struct Connection {
     pub port: String,
     pub to: String,
 }
-const GOLDEN: f64 = 2.39996322972865332;
+const GOLDEN: f64 = 2.399_963_229_728_653_5;
 fn hemisphere(axis: V3, cos: f64, phi: f64) -> V3 {
     let u = unit(cross(
         axis,
@@ -380,34 +380,32 @@ impl Bench {
             {
                 return Err(format!("Invalid optical parameters: {}", e.id));
             }
-            if let Some(m) = &e.mount {
-                if m.part.len() > 256
+            if let Some(m) = &e.mount
+                && (m.part.len() > 256
                     || m.base_size
                         .iter()
                         .any(|x| !x.is_finite() || *x <= 0. || *x > 1e5)
                     || m.height_range
                         .iter()
                         .any(|x| !x.is_finite() || *x < 0. || *x > 1e6)
-                    || m.height_range[0] > m.height_range[1]
-                {
-                    return Err(format!("Invalid mount: {}", e.id));
-                }
+                    || m.height_range[0] > m.height_range[1])
+            {
+                return Err(format!("Invalid mount: {}", e.id));
             }
-            if let Some(n) = e.index {
-                if e.kind != Kind::Splitter || !(1. ..=4.).contains(&n) {
-                    return Err(format!("Splitter substrate index outside 1..4: {}", e.id));
-                }
+            if let Some(n) = e.index
+                && (e.kind != Kind::Splitter || !(1. ..=4.).contains(&n))
+            {
+                return Err(format!("Splitter substrate index outside 1..4: {}", e.id));
             }
-            if let Some(c) = &e.coating {
-                if ![Kind::Mirror, Kind::CurvedMirror, Kind::Splitter].contains(&e.kind)
+            if let Some(c) = &e.coating
+                && (![Kind::Mirror, Kind::CurvedMirror, Kind::Splitter].contains(&e.kind)
                     || c.layers.len() > 32
                     || !(1. ..=4.).contains(&c.substrate_index)
                     || c.layers.iter().any(|l| {
                         !(1. ..=4.).contains(&l.index) || !(0. ..=1e5).contains(&l.thickness)
-                    })
-                {
-                    return Err(format!("Invalid coating stack: {}", e.id));
-                }
+                    }))
+            {
+                return Err(format!("Invalid coating stack: {}", e.id));
             }
             if let Some(s) = &e.scatter {
                 let valid = match s {
@@ -436,13 +434,13 @@ impl Bench {
                     e.id
                 ));
             }
-            if let Some(bins) = e.pixels {
-                if e.kind != Kind::Detector || bins.iter().any(|b| !(2..=128).contains(b)) {
-                    return Err(format!(
-                        "Detector pixels require 2..=128 bins per axis: {}",
-                        e.id
-                    ));
-                }
+            if let Some(bins) = e.pixels
+                && (e.kind != Kind::Detector || bins.iter().any(|b| !(2..=128).contains(b)))
+            {
+                return Err(format!(
+                    "Detector pixels require 2..=128 bins per axis: {}",
+                    e.id
+                ));
             }
         }
         let mut packets = 0;
@@ -648,10 +646,10 @@ impl GhostWalk<'_> {
             self.after[i - 1]
         }
     }
+    /// `(p, v)` is the ray position and direction in prescription coordinates.
     fn run(
         &mut self,
-        mut p: V3,
-        mut v: V3,
+        (mut p, mut v): (V3, V3),
         mut i: i64,
         step: i64,
         mut factor: f64,
@@ -703,8 +701,7 @@ impl GhostWalk<'_> {
                 let bounced = unit(sub(v, scale(hit.normal, 2. * ci))).unwrap_or(v);
                 if bounces_left > 0 {
                     self.run(
-                        hit.point,
-                        bounced,
+                        (hit.point, bounced),
                         i - step,
                         -step,
                         factor * reflectance,
@@ -857,10 +854,9 @@ impl Bench {
                         surface
                             .profile()
                             .intersect([p[1], p[2], p[0]], [d[1], d[2], d[0]], vertex)
+                        && hit.point[0].hypot(hit.point[1]) <= e.body_radius
                     {
-                        if hit.point[0].hypot(hit.point[1]) <= e.body_radius {
-                            take(hit.distance, false, Some(i));
-                        }
+                        take(hit.distance, false, Some(i));
                     }
                     vertex += surface.thickness;
                 }
@@ -928,8 +924,7 @@ impl Bench {
             paths: vec![],
         };
         walk.run(
-            [p[1], p[2], p[0]],
-            [d[1], d[2], d[0]],
+            ([p[1], p[2], p[0]], [d[1], d[2], d[0]]),
             0,
             1,
             1.,
@@ -1190,7 +1185,10 @@ impl Bench {
                 );
                 let (traced, failure) = match result {
                     Ok(path) => (Some(path), None),
-                    Err(error) => (error.ray, Some((error.kind.as_str(), error.point))),
+                    Err(error) => (
+                        error.ray.map(|r| *r),
+                        Some((error.kind.as_str(), error.point)),
+                    ),
                 };
                 let world = |p: V3| add(e.position, rotate([p[2], p[0], p[1]], e.rotation));
                 let mut last = hit;
@@ -1212,31 +1210,30 @@ impl Bench {
                             }
                             if let Some((distance, obstacle, mount, _)) =
                                 self.nearest(system, last, direction, Some(&e.id))
+                                && distance < length - 1e-7
                             {
-                                if distance < length - 1e-7 {
-                                    let stop = add(last, scale(direction, distance));
-                                    out.segments.push(Segment {
-                                        jones: ray.jones,
-                                        source: ray.source.clone(),
-                                        branch: ray.branch.clone(),
-                                        from: last,
-                                        to: stop,
-                                        power: ray.power,
-                                        element: Some(obstacle.id.clone()),
-                                        status: "group_obstruction".into(),
-                                    });
-                                    last = stop;
-                                    blocked = Some((
-                                        if mount {
-                                            "mount_obstruction"
-                                        } else {
-                                            "group_obstruction"
-                                        }
-                                        .to_string(),
-                                        obstacle.id.clone(),
-                                    ));
-                                    break;
-                                }
+                                let stop = add(last, scale(direction, distance));
+                                out.segments.push(Segment {
+                                    jones: ray.jones,
+                                    source: ray.source.clone(),
+                                    branch: ray.branch.clone(),
+                                    from: last,
+                                    to: stop,
+                                    power: ray.power,
+                                    element: Some(obstacle.id.clone()),
+                                    status: "group_obstruction".into(),
+                                });
+                                last = stop;
+                                blocked = Some((
+                                    if mount {
+                                        "mount_obstruction"
+                                    } else {
+                                        "group_obstruction"
+                                    }
+                                    .to_string(),
+                                    obstacle.id.clone(),
+                                ));
+                                break;
                             }
                         }
                         out.segments.push(Segment {
@@ -1252,10 +1249,10 @@ impl Bench {
                         last = end;
                     }
                 }
-                if blocked.is_none() {
-                    if let Some((reason, _)) = failure {
-                        blocked = Some((format!("group_{reason}"), e.id.clone()));
-                    }
+                if blocked.is_none()
+                    && let Some((reason, _)) = failure
+                {
+                    blocked = Some((format!("group_{reason}"), e.id.clone()));
                 }
                 if let Some((reason, id)) = blocked {
                     out.power.blocked += ray.power;
@@ -1634,6 +1631,102 @@ pub(crate) struct Assembly {
     scope: &'static str,
 }
 
+pub fn example() -> Bench {
+    let element = |id: &str, kind, position, yaw| Element {
+        id: id.into(),
+        label: id.into(),
+        kind,
+        position,
+        rotation: [0., 0., yaw],
+        aperture: 12.5,
+        body_radius: 15.,
+        focal_length: 100.,
+        reflectance: if kind == Kind::Mirror {
+            1.
+        } else if kind == Kind::Splitter {
+            0.5
+        } else {
+            0.
+        },
+        transmittance: if kind == Kind::Mirror {
+            0.
+        } else if kind == Kind::Splitter {
+            0.5
+        } else {
+            1.
+        },
+        mount: Some(Mount {
+            part: "Generic 30 mm mount".into(),
+            base_size: [30., 30.],
+            height_range: [40., 150.],
+        }),
+        index: None,
+        coating: None,
+        scatter: None,
+        ghosts: 0,
+        pixels: None,
+        retardance_waves: None,
+        fast_axis_deg: None,
+        extinction_ratio: None,
+        screw_tpi: None,
+        lever_arm_mm: None,
+    };
+    Bench {
+        name: "Split laser experiment".into(),
+        table_size: [900., 600.],
+        hole_pitch: 25.,
+        origin: [0.; 3],
+        elements: vec![
+            element("BS1", Kind::Splitter, [300., 200., 75.], -45.),
+            element("M1", Kind::Mirror, [300., 400., 75.], 45.),
+            element("L1", Kind::Lens, [500., 200., 75.], 0.),
+            element("D1", Kind::Detector, [600., 200., 75.], 0.),
+            element("D2", Kind::Detector, [100., 400., 75.], 0.),
+        ],
+        sources: vec![Source {
+            id: "S1".into(),
+            position: [100., 200., 75.],
+            direction: [1., 0., 0.],
+            wavelength: 532.,
+            power: 1.,
+            beam_radius: 3.,
+            rings: 1,
+            waist: None,
+            waist_offset: None,
+            m2: None,
+            polarization: None,
+        }],
+        connections: vec![
+            Connection {
+                from: "S1".into(),
+                port: "out".into(),
+                to: "BS1".into(),
+            },
+            Connection {
+                from: "BS1".into(),
+                port: "reflected".into(),
+                to: "M1".into(),
+            },
+            Connection {
+                from: "BS1".into(),
+                port: "transmitted".into(),
+                to: "L1".into(),
+            },
+            Connection {
+                from: "M1".into(),
+                port: "reflected".into(),
+                to: "D2".into(),
+            },
+            Connection {
+                from: "L1".into(),
+                port: "out".into(),
+                to: "D1".into(),
+            },
+        ],
+        max_interactions: 32,
+        min_power: 1e-8,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1829,8 +1922,8 @@ mod tests {
         assert_eq!(posed.segments.len(), original.segments.len());
         for (a, b) in original.segments.iter().zip(&posed.segments) {
             let expected = add(rotate(a.to, angles), offset);
-            for i in 0..3 {
-                close(expected[i], b.to[i]);
+            for (e, t) in expected.iter().zip(b.to) {
+                close(*e, t);
             }
         }
     }
@@ -2377,101 +2470,5 @@ mod tests {
         let mut invalid = b;
         invalid.max_interactions = 0;
         assert!(invalid.validate().is_err());
-    }
-}
-pub fn example() -> Bench {
-    let element = |id: &str, kind, position, yaw| Element {
-        id: id.into(),
-        label: id.into(),
-        kind,
-        position,
-        rotation: [0., 0., yaw],
-        aperture: 12.5,
-        body_radius: 15.,
-        focal_length: 100.,
-        reflectance: if kind == Kind::Mirror {
-            1.
-        } else if kind == Kind::Splitter {
-            0.5
-        } else {
-            0.
-        },
-        transmittance: if kind == Kind::Mirror {
-            0.
-        } else if kind == Kind::Splitter {
-            0.5
-        } else {
-            1.
-        },
-        mount: Some(Mount {
-            part: "Generic 30 mm mount".into(),
-            base_size: [30., 30.],
-            height_range: [40., 150.],
-        }),
-        index: None,
-        coating: None,
-        scatter: None,
-        ghosts: 0,
-        pixels: None,
-        retardance_waves: None,
-        fast_axis_deg: None,
-        extinction_ratio: None,
-        screw_tpi: None,
-        lever_arm_mm: None,
-    };
-    Bench {
-        name: "Split laser experiment".into(),
-        table_size: [900., 600.],
-        hole_pitch: 25.,
-        origin: [0.; 3],
-        elements: vec![
-            element("BS1", Kind::Splitter, [300., 200., 75.], -45.),
-            element("M1", Kind::Mirror, [300., 400., 75.], 45.),
-            element("L1", Kind::Lens, [500., 200., 75.], 0.),
-            element("D1", Kind::Detector, [600., 200., 75.], 0.),
-            element("D2", Kind::Detector, [100., 400., 75.], 0.),
-        ],
-        sources: vec![Source {
-            id: "S1".into(),
-            position: [100., 200., 75.],
-            direction: [1., 0., 0.],
-            wavelength: 532.,
-            power: 1.,
-            beam_radius: 3.,
-            rings: 1,
-            waist: None,
-            waist_offset: None,
-            m2: None,
-            polarization: None,
-        }],
-        connections: vec![
-            Connection {
-                from: "S1".into(),
-                port: "out".into(),
-                to: "BS1".into(),
-            },
-            Connection {
-                from: "BS1".into(),
-                port: "reflected".into(),
-                to: "M1".into(),
-            },
-            Connection {
-                from: "BS1".into(),
-                port: "transmitted".into(),
-                to: "L1".into(),
-            },
-            Connection {
-                from: "M1".into(),
-                port: "reflected".into(),
-                to: "D2".into(),
-            },
-            Connection {
-                from: "L1".into(),
-                port: "out".into(),
-                to: "D1".into(),
-            },
-        ],
-        max_interactions: 32,
-        min_power: 1e-8,
     }
 }

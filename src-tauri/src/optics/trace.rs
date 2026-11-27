@@ -30,7 +30,7 @@ pub(super) struct TraceFailure {
     pub kind: FailureKind,
     pub surface: Option<usize>,
     pub point: Option<V3>,
-    pub ray: Option<Ray>,
+    pub ray: Option<Box<Ray>>,
     pub message: String,
     pub endpoint: Option<&'static str>,
 }
@@ -56,7 +56,7 @@ impl TraceFailure {
             kind,
             surface,
             point,
-            ray: Some(ray),
+            ray: Some(Box::new(ray)),
             message,
             endpoint: None,
         }
@@ -115,19 +115,19 @@ impl System {
             entrance_opl,
             launch_direction: v,
         };
-        if check_apertures && self.object_surface.clear_aperture {
-            if let Some(point) = object_point {
-                if point[0].hypot(point[1]) > self.object_surface.aperture + 1e-9 {
-                    return Err(TraceFailure::path(
-                        FailureKind::Blocked,
-                        None,
-                        Some(point),
-                        ray,
-                        "Ray blocked at object aperture".into(),
-                    )
-                    .at("object"));
-                }
-            }
+        if check_apertures
+            && self.object_surface.clear_aperture
+            && let Some(point) = object_point
+            && point[0].hypot(point[1]) > self.object_surface.aperture + 1e-9
+        {
+            return Err(TraceFailure::path(
+                FailureKind::Blocked,
+                None,
+                Some(point),
+                ray,
+                "Ray blocked at object aperture".into(),
+            )
+            .at("object"));
         }
         let n0 = self.object_index(w).map_err(TraceFailure::launch)?;
         let (mut p, mut v, mut n) = (p, v, n0);
@@ -284,7 +284,11 @@ impl System {
         }
         if image {
             let (hit_point, hit_normal, hit_distance) = if frame.is_centered() {
-                let hit = match self.image_surface.profile().intersect(p, v, frame.origin[2]) {
+                let hit = match self
+                    .image_surface
+                    .profile()
+                    .intersect(p, v, frame.origin[2])
+                {
                     Ok(hit) => hit,
                     Err(e) => {
                         return Err(TraceFailure::path(
@@ -568,12 +572,14 @@ mod tests {
     use super::*;
     #[test]
     fn inverted_entrance_pupil_keeps_signed_stop_orientation() {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(1., 5., "N-BK7_SCHOTT", 0.5),
-            Surface::sphere(-10., 10., "AIR", 2.),
-        ];
-        s.stop_index = 1;
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(1., 5., "N-BK7_SCHOTT", 0.5),
+                Surface::sphere(-10., 10., "AIR", 2.),
+            ],
+            stop_index: 1,
+            ..Default::default()
+        };
         s.pupil.value = 0.2;
         s.fields = vec![Field::meridional(0.)];
         s.update().unwrap();
@@ -587,13 +593,15 @@ mod tests {
     }
     #[test]
     fn negative_gaps_and_virtual_image_keep_signed_optical_path() {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(0., 5., "AIR", 2.),
-            Surface::sphere(0., -3., "AIR", 2.),
-            Surface::sphere(0., -1., "AIR", 2.),
-        ];
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(0., 5., "AIR", 2.),
+                Surface::sphere(0., -3., "AIR", 2.),
+                Surface::sphere(0., -1., "AIR", 2.),
+            ],
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 1.;
         s.update().unwrap();
         let ray = s.trace_field(0., 0., &s.fields[0], s.reference()).unwrap();
@@ -607,12 +615,14 @@ mod tests {
     }
     #[test]
     fn negative_glass_gap_uses_prescribed_medium_and_signed_path() {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(0., -3., "N-BK7_SCHOTT", 2.),
-            Surface::sphere(0., 1., "AIR", 2.),
-        ];
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(0., -3., "N-BK7_SCHOTT", 2.),
+                Surface::sphere(0., 1., "AIR", 2.),
+            ],
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 1.;
         s.update().unwrap();
         let n = s.material_index("N-BK7_SCHOTT", s.reference()).unwrap();
@@ -624,10 +634,12 @@ mod tests {
     }
     #[test]
     fn reference_entrance_mapping_keeps_incident_geometry_across_wavelengths() {
-        let mut s = System::default();
-        s.stop_index = 1;
-        s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
-        s.fields = vec![Field::meridional(3.)];
+        let mut s = System {
+            stop_index: 1,
+            pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+            fields: vec![Field::meridional(3.)],
+            ..Default::default()
+        };
         s.update().unwrap();
         let f = &s.fields[0];
         let w = s.reference();
@@ -658,12 +670,14 @@ mod tests {
     }
     #[test]
     fn finite_reference_entrance_mapping_matches_plane_projection() {
-        let mut s = System::default();
-        s.object_distance = Some(200.);
-        s.stop_index = 1;
-        s.field_type = FieldType::ObjectHeight;
-        s.fields = vec![Field::meridional(0.4)];
-        s.pupil_mapping = PupilMapping::ReferenceEntrancePupil;
+        let mut s = System {
+            object_distance: Some(200.),
+            stop_index: 1,
+            field_type: FieldType::ObjectHeight,
+            fields: vec![Field::meridional(0.4)],
+            pupil_mapping: PupilMapping::ReferenceEntrancePupil,
+            ..Default::default()
+        };
         s.update().unwrap();
         let f = &s.fields[0];
         let w = s.reference();
@@ -722,8 +736,10 @@ mod tests {
     }
     #[test]
     fn return_after_decenter_shifts_only_perturbed_surface() {
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.surfaces[0].transform = Some(CoordinateTransform {
             decenter: [0., 0.5],
             tilt: [0., 0., 0.],

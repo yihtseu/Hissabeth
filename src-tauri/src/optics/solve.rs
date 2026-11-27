@@ -220,14 +220,14 @@ fn equation_step(
             *a /= divisor;
         }
         rhs[rank] /= divisor;
+        let pivot_row = matrix[rank].clone();
         for row in 0..rows {
             if row == rank {
                 continue;
             }
             let multiplier = matrix[row][column];
-            for col in 0..columns {
-                let pivot_value = matrix[rank][col];
-                matrix[row][col] -= multiplier * pivot_value;
+            for (x, p) in matrix[row].iter_mut().zip(&pivot_row).take(columns) {
+                *x -= multiplier * p;
             }
             let pivot_value = rhs[rank];
             rhs[row] -= multiplier * pivot_value;
@@ -404,13 +404,12 @@ fn resolve(s: &mut System, focus: Option<f64>) -> Result<(), String> {
         let mut fraction = 1.;
         let mut improved = None;
         for _ in 0..20 {
-            if let Ok(next) = apply_step(&work, &equations, &step, fraction) {
-                if let Ok(next_residual) = residuals(&next, &equations) {
-                    if score(&next, &equations, &next_residual) < current {
-                        improved = Some(next);
-                        break;
-                    }
-                }
+            if let Ok(next) = apply_step(&work, &equations, &step, fraction)
+                && let Ok(next_residual) = residuals(&next, &equations)
+                && score(&next, &equations, &next_residual) < current
+            {
+                improved = Some(next);
+                break;
             }
             fraction *= 0.5;
         }
@@ -486,9 +485,11 @@ mod tests {
     #[test]
     fn zero_zone_focuses_paraxial_axial_ray() {
         for distance in [None, Some(200.)] {
-            let mut s = System::default();
-            s.object_distance = distance;
-            s.stop_index = 1;
+            let s = System {
+                object_distance: distance,
+                stop_index: 1,
+                ..Default::default()
+            };
             let expected = s.paraxial(s.reference()).unwrap()["image_distance"]
                 .as_f64()
                 .unwrap();
@@ -506,8 +507,10 @@ mod tests {
     }
     #[test]
     fn real_zone_uses_first_prescribed_field() {
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(3.)];
+        let s = System {
+            fields: vec![Field::meridional(3.)],
+            ..Default::default()
+        };
         let target = 2.;
         let (solved, _) = apply(
             &s,
@@ -682,8 +685,10 @@ mod tests {
     }
     #[test]
     fn marginal_constraint_before_internal_stop_is_solved_implicitly() {
-        let mut s = System::default();
-        s.stop_index = 1;
+        let s = System {
+            stop_index: 1,
+            ..Default::default()
+        };
         let (mut s, _) = apply(
             &s,
             0,

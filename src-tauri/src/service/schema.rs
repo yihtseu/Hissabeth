@@ -91,26 +91,26 @@ pub fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), 
             ("exclusiveMinimum", false, true),
             ("exclusiveMaximum", false, false),
         ] {
-            if let Some(b) = schema[bound].as_f64() {
-                if if lower {
+            if let Some(b) = schema[bound].as_f64()
+                && if lower {
                     n < b || (!inclusive && n == b)
                 } else {
                     n > b || (!inclusive && n == b)
-                } {
-                    return Err(format!("Value outside range at {path}"));
                 }
+            {
+                return Err(format!("Value outside range at {path}"));
             }
         }
     }
-    if let Some(allowed) = schema["enum"].as_array() {
-        if !allowed.contains(value) {
-            return Err(format!("Unknown value at {path}"));
-        }
+    if let Some(allowed) = schema["enum"].as_array()
+        && !allowed.contains(value)
+    {
+        return Err(format!("Unknown value at {path}"));
     }
-    if let Some(text) = value.as_str() {
-        if text.len() > 8_000_000 {
-            return Err(format!("Text too large at {path}"));
-        }
+    if let Some(text) = value.as_str()
+        && text.len() > 8_000_000
+    {
+        return Err(format!("Text too large at {path}"));
     }
     if let Some(items) = value.as_array() {
         let min = schema["minItems"].as_u64().unwrap_or(0) as usize;

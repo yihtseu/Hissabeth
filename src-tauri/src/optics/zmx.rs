@@ -653,14 +653,18 @@ pub fn import(text: &str) -> Result<System, String> {
             })
             .collect();
         active_configuration = active - 1;
-        let mut groups: Vec<(String, usize, Vec<(usize, Vec<String>)>)> = vec![];
+        type OperandRows = Vec<(usize, Vec<String>)>;
+        let mut groups: Vec<(String, usize, OperandRows)> = vec![];
         for (code, surface, config, value) in mce {
             if config > count {
                 return Err(format!(
                     "ZMX operand {code} references configuration {config} above MNUM {count}"
                 ));
             }
-            match groups.iter_mut().find(|(c, s, _)| *c == code && *s == surface) {
+            match groups
+                .iter_mut()
+                .find(|(c, s, _)| *c == code && *s == surface)
+            {
                 Some((_, _, rows)) => rows.push((config, value)),
                 None => groups.push((code, surface, vec![(config, value)])),
             }
@@ -694,9 +698,7 @@ pub fn import(text: &str) -> Result<System, String> {
                     } else if surface > native.len() {
                         for (_, v) in &rows {
                             if num(v.first().map(String::as_str), "THIC value")? != 0. {
-                                return Err(
-                                    "ZMX image thickness operand must be zero".into()
-                                );
+                                return Err("ZMX image thickness operand must be zero".into());
                             }
                         }
                     } else {
@@ -709,9 +711,10 @@ pub fn import(text: &str) -> Result<System, String> {
                             if *c >= 2 {
                                 let value = num(v.first().map(String::as_str), "THIC")?;
                                 if value != base {
-                                    configurations[*c - 1]
-                                        .overrides
-                                        .push(Override::Thickness { surface: index, value });
+                                    configurations[*c - 1].overrides.push(Override::Thickness {
+                                        surface: index,
+                                        value,
+                                    });
                                 }
                             }
                         }
@@ -719,9 +722,7 @@ pub fn import(text: &str) -> Result<System, String> {
                 }
                 "CRVT" | "CONI" | "SDIA" => {
                     if surface == 0 || surface > native.len() {
-                        return Err(format!(
-                            "ZMX endpoint {code} operands are unsupported"
-                        ));
+                        return Err(format!("ZMX endpoint {code} operands are unsupported"));
                     }
                     let index = surface - 1;
                     let get = |s: &Surface| match code.as_str() {
@@ -783,9 +784,7 @@ pub fn import(text: &str) -> Result<System, String> {
                     if let Some((_, v)) = rows.iter().find(|(c, _)| *c == 1) {
                         let glass = name(v);
                         if glass.eq_ignore_ascii_case("mirror") {
-                            return Err(
-                                "ZMX mirror configuration operands are unsupported".into()
-                            );
+                            return Err("ZMX mirror configuration operands are unsupported".into());
                         }
                         native[index].material = resolve(&glass)
                             .map_err(|e| format!("ZMX GLSS operand glass {glass}: {e}"))?;
@@ -796,7 +795,7 @@ pub fn import(text: &str) -> Result<System, String> {
                             let glass = name(v);
                             if glass.eq_ignore_ascii_case("mirror") {
                                 return Err(
-                                    "ZMX mirror configuration operands are unsupported".into(),
+                                    "ZMX mirror configuration operands are unsupported".into()
                                 );
                             }
                             let material = resolve(&glass)
@@ -817,7 +816,7 @@ pub fn import(text: &str) -> Result<System, String> {
                         (None, _) => {
                             return Err(format!(
                                 "ZMX operand {code} references field {surface} outside the specification"
-                            ))
+                            ));
                         }
                     };
                     for (_, v) in &rows {
@@ -841,8 +840,7 @@ pub fn import(text: &str) -> Result<System, String> {
                         let value = snap_nm(num(v.first().map(String::as_str), "WAVE")? * 1000.);
                         if value != stored {
                             return Err(
-                                "ZMX per-configuration wavelength operands are unsupported"
-                                    .into(),
+                                "ZMX per-configuration wavelength operands are unsupported".into(),
                             );
                         }
                     }
@@ -1252,17 +1250,19 @@ pub fn export(s: &System) -> Result<String, String> {
         let flags = "0 0 0 1 1 1.000000000000E+000 0.000000000000E+000";
         for (kind, surface) in groups {
             for (c, configuration) in s.configurations.iter().enumerate() {
-                let covered = configuration.overrides.iter().find(|operand| {
-                    match (kind, operand) {
-                        ("THIC", Override::Thickness { surface: s2, .. }) => *s2 == surface,
-                        ("CRVT", Override::Radius { surface: s2, .. }) => *s2 == surface,
-                        ("CONI", Override::Conic { surface: s2, .. }) => *s2 == surface,
-                        ("SDIA", Override::Aperture { surface: s2, .. }) => *s2 == surface,
-                        ("GLSS", Override::Material { surface: s2, .. }) => *s2 == surface,
-                        ("THIC", Override::ObjectDistance { .. }) => surface == usize::MAX,
-                        _ => false,
-                    }
-                });
+                let covered =
+                    configuration
+                        .overrides
+                        .iter()
+                        .find(|operand| match (kind, operand) {
+                            ("THIC", Override::Thickness { surface: s2, .. }) => *s2 == surface,
+                            ("CRVT", Override::Radius { surface: s2, .. }) => *s2 == surface,
+                            ("CONI", Override::Conic { surface: s2, .. }) => *s2 == surface,
+                            ("SDIA", Override::Aperture { surface: s2, .. }) => *s2 == surface,
+                            ("GLSS", Override::Material { surface: s2, .. }) => *s2 == surface,
+                            ("THIC", Override::ObjectDistance { .. }) => surface == usize::MAX,
+                            _ => false,
+                        });
                 match (kind, covered) {
                     ("GLSS", _) => {
                         let medium = match covered {
@@ -1363,16 +1363,18 @@ mod tests {
 
     #[test]
     fn finite_object_asphere_and_model_glass_round_trip() {
-        let mut s = System::default();
-        s.object_distance = Some(300.);
-        s.fields = vec![Field {
-            x: 1.,
-            ..Field::meridional(2.)
-        }];
-        s.field_type = FieldType::ObjectHeight;
-        s.pupil = Pupil {
-            kind: PupilType::FNumber,
-            value: 4.,
+        let mut s = System {
+            object_distance: Some(300.),
+            fields: vec![Field {
+                x: 1.,
+                ..Field::meridional(2.)
+            }],
+            field_type: FieldType::ObjectHeight,
+            pupil: Pupil {
+                kind: PupilType::FNumber,
+                value: 4.,
+            },
+            ..Default::default()
         };
         s.surfaces[0].conic = -0.5;
         s.surfaces[0].even = vec![1e-5, -2e-8];
@@ -1390,11 +1392,13 @@ mod tests {
 
     #[test]
     fn mirror_system_round_trip_with_mended_medium() {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(-100., -30., "AIR", 20.),
-            Surface::sphere(0., 30., "AIR", 20.),
-        ];
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(-100., -30., "AIR", 20.),
+                Surface::sphere(0., 30., "AIR", 20.),
+            ],
+            ..Default::default()
+        };
         s.surfaces[0].interaction = Interaction::Reflect;
         s.surfaces[0].conic = -1.;
         s.update().unwrap();
@@ -1493,43 +1497,45 @@ mod tests {
     }
     #[test]
     fn multi_configuration_operands_round_trip() {
-        let mut s = System::default();
-        s.configurations = vec![
-            Configuration {
-                name: "Config 1".into(),
-                overrides: vec![],
-            },
-            Configuration {
-                name: "Config 2".into(),
-                overrides: vec![
-                    Override::Thickness {
-                        surface: 1,
-                        value: 20.,
-                    },
-                    Override::Radius {
-                        surface: 0,
-                        value: -80.,
-                    },
-                    Override::Conic {
-                        surface: 0,
-                        value: -0.5,
-                    },
-                    Override::Material {
-                        surface: 0,
-                        material: "N-SF6_SCHOTT".into(),
-                    },
-                    Override::Aperture {
-                        surface: 1,
-                        value: 8.,
-                    },
-                ],
-            },
-            Configuration {
-                name: "Config 3".into(),
-                overrides: vec![Override::ObjectDistance { value: Some(500.) }],
-            },
-        ];
-        s.active_configuration = 1;
+        let mut s = System {
+            configurations: vec![
+                Configuration {
+                    name: "Config 1".into(),
+                    overrides: vec![],
+                },
+                Configuration {
+                    name: "Config 2".into(),
+                    overrides: vec![
+                        Override::Thickness {
+                            surface: 1,
+                            value: 20.,
+                        },
+                        Override::Radius {
+                            surface: 0,
+                            value: -80.,
+                        },
+                        Override::Conic {
+                            surface: 0,
+                            value: -0.5,
+                        },
+                        Override::Material {
+                            surface: 0,
+                            material: "N-SF6_SCHOTT".into(),
+                        },
+                        Override::Aperture {
+                            surface: 1,
+                            value: 8.,
+                        },
+                    ],
+                },
+                Configuration {
+                    name: "Config 3".into(),
+                    overrides: vec![Override::ObjectDistance { value: Some(500.) }],
+                },
+            ],
+            active_configuration: 1,
+            ..Default::default()
+        };
         s.update().unwrap();
         let text = export(&s).unwrap();
         assert!(text.contains("CONF 2 0 0 0 0 0 0 0 0 0"));
@@ -1587,12 +1593,16 @@ mod tests {
         assert_eq!(resolved.surfaces[0].material, "N-SF6_SCHOTT");
         assert_eq!(resolved.surfaces[1].aperture, 8.);
         // Operand rows above MNUM and unsupported operand kinds fail clearly.
-        assert!(import(&text.replace("MNUM 3 2", "MNUM 2 2"))
-            .unwrap_err()
-            .contains("above MNUM"));
-        assert!(import(&text.replace("CONI 1 2 -0.5", "PAR3 1 2 -0.5"))
-            .unwrap_err()
-            .contains("PAR3"));
+        assert!(
+            import(&text.replace("MNUM 3 2", "MNUM 2 2"))
+                .unwrap_err()
+                .contains("above MNUM")
+        );
+        assert!(
+            import(&text.replace("CONI 1 2 -0.5", "PAR3 1 2 -0.5"))
+                .unwrap_err()
+                .contains("PAR3")
+        );
         assert!(
             import(&text.replace("THIC 0 3 500", "THIC 0 3 500\nTEMP 1 3 30 0 0"))
                 .unwrap_err()

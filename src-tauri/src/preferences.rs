@@ -169,7 +169,9 @@ impl Preferences {
         if self.display.decimals > 8 {
             return Err("Display decimals must be between 0 and 8".into());
         }
-        if !(3..=129).contains(&self.analysis.grid_size) || self.analysis.grid_size % 2 == 0 {
+        if !(3..=129).contains(&self.analysis.grid_size)
+            || self.analysis.grid_size.is_multiple_of(2)
+        {
             return Err("Grid size must be odd, between 3 and 129".into());
         }
         if !(1..=64).contains(&self.analysis.hex_rings) {
@@ -207,7 +209,7 @@ pub struct Error {
     pub code: &'static str,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<Snapshot>,
+    pub snapshot: Option<Box<Snapshot>>,
 }
 impl Error {
     pub fn storage(message: impl ToString) -> Self {
@@ -227,7 +229,7 @@ impl Snapshot {
         persist: impl FnOnce(&Snapshot) -> Result<(), String>,
     ) -> Result<Snapshot, Error> {
         if expected_revision != self.revision {
-            return Err(Error { code: "revision_conflict", message: "Settings changed in another window. Reload the current settings before applying edits.".into(), snapshot: Some(self.clone()) });
+            return Err(Error { code: "revision_conflict", message: "Settings changed in another window. Reload the current settings before applying edits.".into(), snapshot: Some(Box::new(self.clone())) });
         }
         preferences.validate().map_err(|message| Error {
             code: "validation",
@@ -352,7 +354,7 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(conflict.code, "revision_conflict");
-        assert_eq!(conflict.snapshot.unwrap(), saved);
+        assert_eq!(*conflict.snapshot.unwrap(), saved);
         let mut changed = first.clone();
         changed.display.decimals = 7;
         let error = current

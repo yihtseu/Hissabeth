@@ -103,7 +103,7 @@ pub(crate) fn inspect_report(
     let (ray, failure) = match result {
         Ok(ray) => (Some(ray), None),
         Err(e) => (
-            e.ray,
+            e.ray.map(|r| *r),
             Some(Failure {
                 kind: e.kind,
                 surface: e.surface,
@@ -274,9 +274,11 @@ mod tests {
     #[test]
     fn normalized_inspection_matches_saved_mapping_and_vignetting() {
         for mapping in [PupilMapping::RealStop, PupilMapping::ReferenceEntrancePupil] {
-            let mut s = System::default();
-            s.stop_index = 1;
-            s.pupil_mapping = mapping;
+            let mut s = System {
+                stop_index: 1,
+                pupil_mapping: mapping,
+                ..Default::default()
+            };
             s.fields[0].x = 1.;
             s.fields[0].y = 2.;
             s.fields[0].vignetting = [0.2, 0.1, 0.3, 0.4];
@@ -299,8 +301,10 @@ mod tests {
     }
     #[test]
     fn explicit_curved_source_and_glass_path_obey_snell_and_optical_path() {
-        let mut s = System::default();
-        s.object_distance = Some(100.);
+        let mut s = System {
+            object_distance: Some(100.),
+            ..Default::default()
+        };
         s.object_surface.radius = 20.;
         s.object_material = "1.500000:60.000000".into();
         s.wavelengths = vec![Wavelength::new(587.562, 1.)];
@@ -321,8 +325,8 @@ mod tests {
         let ray = &r["ray"];
         let source = [1., 2., -100. + 20. - 395_f64.sqrt()];
         assert_eq!(ray["points"][0], ray["object_point"]);
-        for axis in 0..3 {
-            close(v(&ray["object_point"])[axis], source[axis]);
+        for (p, s) in v(&ray["object_point"]).iter().zip(source) {
+            close(*p, s);
         }
         let incoming = unit([0.1, -0.05, 1.]).unwrap();
         let segment = &ray["segments"][0];
@@ -343,12 +347,14 @@ mod tests {
     }
     #[test]
     fn physical_failures_retain_partial_path_and_named_location() {
-        let mut s = System::default();
-        s.object_distance = Some(100.);
-        s.surfaces = vec![
-            Surface::sphere(0., 10., "AIR", 1.),
-            Surface::sphere(0., 10., "AIR", 0.2),
-        ];
+        let mut s = System {
+            object_distance: Some(100.),
+            surfaces: vec![
+                Surface::sphere(0., 10., "AIR", 1.),
+                Surface::sphere(0., 10., "AIR", 0.2),
+            ],
+            ..Default::default()
+        };
         s.pupil.value = 0.2;
         s.update().unwrap();
         let launch = InspectionLaunch::Object {
@@ -441,13 +447,15 @@ mod tests {
     }
     #[test]
     fn paraxial_rows_match_independent_interface_equation_and_signed_mirror() {
-        let mut s = System::default();
-        s.wavelengths = vec![Wavelength::new(587.562, 1.)];
-        s.reference_wavelength = 0;
-        s.surfaces = vec![
-            Surface::sphere(50., 5., "1.500000:60.000000", 20.),
-            Surface::sphere(-50., 47., "AIR", 20.),
-        ];
+        let mut s = System {
+            wavelengths: vec![Wavelength::new(587.562, 1.)],
+            reference_wavelength: 0,
+            surfaces: vec![
+                Surface::sphere(50., 5., "1.500000:60.000000", 20.),
+                Surface::sphere(-50., 47., "AIR", 20.),
+            ],
+            ..Default::default()
+        };
         s.pupil.value = 4.;
         let t = paraxial_trace(&s, &s.fields[0], s.reference()).unwrap();
         let axis = &t["axis"];
@@ -469,9 +477,11 @@ mod tests {
     #[test]
     fn paraxial_chief_aims_at_stop_for_skew_finite_and_infinite_fields() {
         for finite in [false, true] {
-            let mut s = System::default();
-            s.stop_index = 1;
-            s.object_distance = finite.then_some(200.);
+            let mut s = System {
+                stop_index: 1,
+                object_distance: finite.then_some(200.),
+                ..Default::default()
+            };
             s.object_surface.radius = if finite { 100. } else { 0. };
             s.field_type = if finite {
                 FieldType::ObjectHeight

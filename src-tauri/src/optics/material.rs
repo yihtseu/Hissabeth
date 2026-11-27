@@ -37,7 +37,7 @@ pub fn dispersion(formula: u8, c: &[f64], l: f64) -> Result<f64, String> {
         return Err("Finite positive wavelength and finite coefficients required".into());
     }
     let needed = match formula {
-        1 | 2 | 3 => 6,
+        1..=3 => 6,
         4 | 9 => 5,
         5 => 3,
         6 | 10 | 12 => 8,
@@ -131,7 +131,7 @@ impl Glass {
             return Err("Invalid glass metadata".into());
         }
         let minimum = match self.formula {
-            1 | 2 | 3 => 6,
+            1..=3 => 6,
             4 | 9 => 5,
             5 => 3,
             6 | 10 | 12 => 8,
@@ -146,15 +146,15 @@ impl Glass {
                 self.key()
             ));
         }
-        if let Some([lo, hi]) = self.wavelength_range {
-            if !lo.is_finite() || !hi.is_finite() || lo <= 0. || hi < lo {
-                return Err("Invalid glass wavelength range".into());
-            }
+        if let Some([lo, hi]) = self.wavelength_range
+            && (!lo.is_finite() || !hi.is_finite() || lo <= 0. || hi < lo)
+        {
+            return Err("Invalid glass wavelength range".into());
         }
-        if let Some(thermal) = self.thermal {
-            if thermal.iter().any(|v| !v.is_finite()) || thermal[6] <= -273.15 {
-                return Err("Invalid glass thermal coefficients".into());
-            }
+        if let Some(thermal) = self.thermal
+            && (thermal.iter().any(|v| !v.is_finite()) || thermal[6] <= -273.15)
+        {
+            return Err("Invalid glass thermal coefficients".into());
         }
         if self.transmission.iter().any(|p| {
             !p.iter().all(|v| v.is_finite())
@@ -171,15 +171,15 @@ impl Glass {
     }
     pub fn index(&self, nm: f64, environment: Option<(f64, f64)>) -> Result<f64, String> {
         let l = nm / 1000.;
-        if let Some([lo, hi]) = self.wavelength_range {
-            if l < lo || l > hi {
-                return Err(format!(
-                    "{} wavelength range is {}–{} nm",
-                    self.key(),
-                    lo * 1000.,
-                    hi * 1000.
-                ));
-            }
+        if let Some([lo, hi]) = self.wavelength_range
+            && (l < lo || l > hi)
+        {
+            return Err(format!(
+                "{} wavelength range is {}–{} nm",
+                self.key(),
+                lo * 1000.,
+                hi * 1000.
+            ));
         }
         let Some((temperature, pressure)) = environment else {
             return dispersion(self.formula, &self.coefficients, l);

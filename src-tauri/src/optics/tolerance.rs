@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Sequential optical tolerancing: sensitivity table and parallel Monte Carlo yield analysis.
-use super::{
-    CoordinateTransform, PupilSampling, System, analysis, material, parallel, solve,
-};
+use super::{CoordinateTransform, PupilSampling, System, analysis, material, parallel, solve};
 use serde::{Deserialize, Serialize};
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -246,15 +244,15 @@ fn validate_tolerances(s: &System, list: &[ToleranceOperand]) -> Result<(), Stri
                 if delta_percent.is_none() && delta_mm.is_none() {
                     return Err("Radius tolerance requires delta_percent or delta_mm".into());
                 }
-                if let Some(p) = delta_percent {
-                    if !p.is_finite() || p <= 0. || p >= 90. {
-                        return Err("Radius delta_percent must be in (0, 90)".into());
-                    }
+                if let Some(p) = delta_percent
+                    && (!p.is_finite() || p <= 0. || p >= 90.)
+                {
+                    return Err("Radius delta_percent must be in (0, 90)".into());
                 }
-                if let Some(d) = delta_mm {
-                    if !d.is_finite() || d <= 0. {
-                        return Err("Radius delta_mm must be positive".into());
-                    }
+                if let Some(d) = delta_mm
+                    && (!d.is_finite() || d <= 0.)
+                {
+                    return Err("Radius delta_mm must be positive".into());
                 }
             }
             ToleranceOperand::Thickness { surface, delta }
@@ -273,7 +271,10 @@ fn validate_tolerances(s: &System, list: &[ToleranceOperand]) -> Result<(), Stri
                 surface,
                 delta_percent,
             } => {
-                if surface >= n || !delta_percent.is_finite() || delta_percent <= 0. || delta_percent >= 50.
+                if surface >= n
+                    || !delta_percent.is_finite()
+                    || delta_percent <= 0.
+                    || delta_percent >= 50.
                 {
                     return Err("Abbe delta_percent must be in (0, 50)".into());
                 }
@@ -288,7 +289,11 @@ fn validate_tolerances(s: &System, list: &[ToleranceOperand]) -> Result<(), Stri
                 last,
                 delta_deg,
             } => {
-                if first > last || last >= n || !delta_deg.is_finite() || delta_deg <= 0. || delta_deg > 45.
+                if first > last
+                    || last >= n
+                    || !delta_deg.is_finite()
+                    || delta_deg <= 0.
+                    || delta_deg > 45.
                 {
                     return Err("Invalid ElementTilt range or delta_deg".into());
                 }
@@ -301,7 +306,9 @@ fn validate_tolerances(s: &System, list: &[ToleranceOperand]) -> Result<(), Stri
 fn glass_nd_vd(s: &System, surface: usize) -> Result<(f64, f64), String> {
     let mat = &s.surfaces[surface].material;
     if mat == "AIR" {
-        return Err(format!("Surface {surface} is AIR; cannot perturb glass index/Abbe"));
+        return Err(format!(
+            "Surface {surface} is AIR; cannot perturb glass index/Abbe"
+        ));
     }
     if let Some((nd, vd)) = mat.split_once(':') {
         let nd: f64 = nd.trim().parse().map_err(|_| "Invalid model glass nd")?;
@@ -319,12 +326,14 @@ fn glass_nd_vd(s: &System, surface: usize) -> Result<(f64, f64), String> {
 }
 
 fn add_local_perturbation(s: &mut System, surface: usize, dx: f64, dy: f64, rx: f64, ry: f64) {
-    let tr = s.surfaces[surface].transform.get_or_insert_with(|| CoordinateTransform {
-        decenter: [0., 0.],
-        tilt: [0., 0., 0.],
-        tilt_first: false,
-        return_after: true,
-    });
+    let tr = s.surfaces[surface]
+        .transform
+        .get_or_insert(CoordinateTransform {
+            decenter: [0., 0.],
+            tilt: [0., 0., 0.],
+            tilt_first: false,
+            return_after: true,
+        });
     tr.decenter[0] += dx;
     tr.decenter[1] += dy;
     tr.tilt[0] += rx;
@@ -471,13 +480,14 @@ fn apply_compensator(s: &mut System, comp: &Compensator) -> Result<Option<f64>, 
             let focused = solve::autofocus(s, w)?;
             let after = focused.surfaces.last().unwrap().thickness;
             let mut delta = after - before;
-            if let Some(limit) = max_delta {
-                if limit.is_finite() && limit >= 0. {
-                    delta = delta.clamp(-limit, limit);
-                    s.surfaces.last_mut().unwrap().thickness = before + delta;
-                    s.update()?;
-                    return Ok(Some(delta));
-                }
+            if let Some(limit) = max_delta
+                && limit.is_finite()
+                && limit >= 0.
+            {
+                delta = delta.clamp(-limit, limit);
+                s.surfaces.last_mut().unwrap().thickness = before + delta;
+                s.update()?;
+                return Ok(Some(delta));
             }
             *s = focused;
             Ok(Some(delta))
@@ -582,15 +592,16 @@ fn evaluate_criterion(s: &System, criterion: &Criterion) -> Result<f64, String> 
             let origin = bundle.centroid()?;
             let total = bundle.transmitted_weight();
             let ax = if axis.as_deref() == Some("x") { 0 } else { 1 };
-            let (re, im) = bundle
-                .points
-                .iter()
-                .zip(&bundle.weights)
-                .fold((0., 0.), |(re, im), (pt, wt)| {
-                    let angle = std::f64::consts::TAU * frequency * (pt[ax] - origin[ax]);
-                    let (sin, cos) = angle.sin_cos();
-                    (re + wt * cos / total, im - wt * sin / total)
-                });
+            let (re, im) =
+                bundle
+                    .points
+                    .iter()
+                    .zip(&bundle.weights)
+                    .fold((0., 0.), |(re, im), (pt, wt)| {
+                        let angle = std::f64::consts::TAU * frequency * (pt[ax] - origin[ax]);
+                        let (sin, cos) = angle.sin_cos();
+                        (re + wt * cos / total, im - wt * sin / total)
+                    });
             Ok(re.hypot(im))
         }
     }
@@ -609,45 +620,46 @@ pub fn sensitivity(source: &System, req: &SensitivityRequest) -> Result<Sensitiv
         }
     }
 
-    let entries_raw: Vec<SensitivityEntry> = parallel::par_map(&tasks, 1, |&(idx, axis, ref label, ref axis_name)| {
-        let tol = &req.tolerances[idx];
-        let eval_dir = |sign: f64| -> Result<f64, String> {
-            let mut trial = base.clone();
-            apply_single_perturbation(&mut trial, tol, axis, sign)?;
-            trial.update()?;
-            apply_compensator(&mut trial, &req.compensator)?;
-            evaluate_criterion(&trial, &req.criterion)
-        };
-        let plus = eval_dir(1.);
-        let minus = eval_dir(-1.);
-        let (plus_value, plus_error) = match plus {
-            Ok(v) => (Some(v), None),
-            Err(e) => (None, Some(e)),
-        };
-        let (minus_value, minus_error) = match minus {
-            Ok(v) => (Some(v), None),
-            Err(e) => (None, Some(e)),
-        };
-        let plus_change = plus_value.map(|v| v - nominal);
-        let minus_change = minus_value.map(|v| v - nominal);
-        let worst_change = [plus_change, minus_change]
-            .into_iter()
-            .flatten()
-            .map(f64::abs)
-            .fold(0., f64::max);
-        SensitivityEntry {
-            operand_index: idx,
-            label: label.clone(),
-            axis: axis_name.clone(),
-            plus_value,
-            minus_value,
-            plus_change,
-            minus_change,
-            worst_change,
-            plus_error,
-            minus_error,
-        }
-    });
+    let entries_raw: Vec<SensitivityEntry> =
+        parallel::par_map(&tasks, 1, |&(idx, axis, ref label, ref axis_name)| {
+            let tol = &req.tolerances[idx];
+            let eval_dir = |sign: f64| -> Result<f64, String> {
+                let mut trial = base.clone();
+                apply_single_perturbation(&mut trial, tol, axis, sign)?;
+                trial.update()?;
+                apply_compensator(&mut trial, &req.compensator)?;
+                evaluate_criterion(&trial, &req.criterion)
+            };
+            let plus = eval_dir(1.);
+            let minus = eval_dir(-1.);
+            let (plus_value, plus_error) = match plus {
+                Ok(v) => (Some(v), None),
+                Err(e) => (None, Some(e)),
+            };
+            let (minus_value, minus_error) = match minus {
+                Ok(v) => (Some(v), None),
+                Err(e) => (None, Some(e)),
+            };
+            let plus_change = plus_value.map(|v| v - nominal);
+            let minus_change = minus_value.map(|v| v - nominal);
+            let worst_change = [plus_change, minus_change]
+                .into_iter()
+                .flatten()
+                .map(f64::abs)
+                .fold(0., f64::max);
+            SensitivityEntry {
+                operand_index: idx,
+                label: label.clone(),
+                axis: axis_name.clone(),
+                plus_value,
+                minus_value,
+                plus_change,
+                minus_change,
+                worst_change,
+                plus_error,
+                minus_error,
+            }
+        });
 
     let mut entries = entries_raw;
     entries.sort_by(|a, b| b.worst_change.total_cmp(&a.worst_change));
@@ -724,13 +736,11 @@ pub fn monte_carlo(source: &System, req: &MonteCarloRequest) -> Result<MonteCarl
     let outcomes: Vec<Result<(f64, Option<f64>), String>> =
         parallel::par_map_index(req.trials, 4, |trial_idx| {
             let mut rng = Rng::new(
-                req.seed
-                    .wrapping_mul(0x517c_c1b7_2722_0a95)
-                    .wrapping_add(
-                        (trial_idx as u64)
-                            .wrapping_add(1)
-                            .wrapping_mul(0x9e37_79b9_7f4a_7c15),
-                    ),
+                req.seed.wrapping_mul(0x517c_c1b7_2722_0a95).wrapping_add(
+                    (trial_idx as u64)
+                        .wrapping_add(1)
+                        .wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                ),
             );
             let mut trial = base.clone();
             for tol in &req.tolerances {

@@ -397,12 +397,14 @@ mod tests {
         assert!((grid.iter().map(|p| p.weight).sum::<f64>() - 1.).abs() < 1e-12);
     }
     fn planes(aperture: f64) -> System {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(0., 10., "AIR", 2.),
-            Surface::sphere(0., 10., "AIR", aperture),
-        ];
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(0., 10., "AIR", 2.),
+                Surface::sphere(0., 10., "AIR", aperture),
+            ],
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.pupil.value = 2.;
         s.update().unwrap();
         s
@@ -429,14 +431,16 @@ mod tests {
     }
     #[test]
     fn zero_weight_wavelength_is_not_traced_and_spectral_power_is_retained() {
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(0.)];
-        s.wavelengths = vec![
-            Wavelength::new(587.5618, 1.),
-            Wavelength::new(587.5618, 3.),
-            Wavelength::new(435.834, 0.),
-        ];
-        s.reference_wavelength = 0;
+        let mut s = System {
+            fields: vec![Field::meridional(0.)],
+            wavelengths: vec![
+                Wavelength::new(587.5618, 1.),
+                Wavelength::new(587.5618, 3.),
+                Wavelength::new(435.834, 0.),
+            ],
+            reference_wavelength: 0,
+            ..Default::default()
+        };
         s.update().unwrap();
         let sampling = PupilSampling::Hexapolar { rings: 3 };
         let (bundle, components) = s

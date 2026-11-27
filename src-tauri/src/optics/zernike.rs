@@ -20,13 +20,13 @@ pub fn noll(j: usize) -> Result<(usize, i32), String> {
         if k == 0 {
             0
         } else {
-            let mag = 2 * ((k + 1) / 2) as i32;
+            let mag = 2 * k.div_ceil(2) as i32;
             let positive = (k % 2 == 1) != negative_first;
             if positive { mag } else { -mag }
         }
     } else {
         let mag = (2 * (k / 2) + 1) as i32;
-        let positive = (k % 2 == 0) != negative_first;
+        let positive = k.is_multiple_of(2) != negative_first;
         if positive { mag } else { -mag }
     };
     Ok((n, m))
@@ -148,8 +148,12 @@ pub(crate) fn fit_report(wf: &Wavefront, terms: usize) -> Result<ZernikeFit, Str
         for row in column + 1..terms {
             let factor = gram[row][column] / gram[column][column];
             gram[row][column] = 0.;
-            for k in column + 1..terms {
-                gram[row][k] -= factor * gram[column][k];
+            let (pivot_rows, rest) = gram.split_at_mut(row);
+            for (x, p) in rest[0][column + 1..terms]
+                .iter_mut()
+                .zip(&pivot_rows[column][column + 1..terms])
+            {
+                *x -= factor * p;
             }
             rhs[row] -= factor * rhs[column];
         }

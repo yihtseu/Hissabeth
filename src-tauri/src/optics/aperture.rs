@@ -94,10 +94,10 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
             frame.sagittal.map(|v| -v),
         ];
         for pupil in pupils {
-            if s.object_distance.is_some() {
-                if let Ok(point) = s.object_point(field, w) {
-                    object.include(point);
-                }
+            if s.object_distance.is_some()
+                && let Ok(point) = s.object_point(field, w)
+            {
+                object.include(point);
             }
             let options = TraceOptions {
                 last: s.surfaces.len() - 1,
@@ -113,13 +113,14 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
                         accumulate(ray, &mut surfaces, &mut image);
                         reached = ray.segments.len();
                     }
-                    if let (Some(i), Some(point)) = (failure.surface, failure.point) {
-                        if i >= reached && i < surfaces.len() {
-                            surfaces[i].semi_diameter =
-                                surfaces[i].semi_diameter.max(point[0].hypot(point[1]));
-                            surfaces[i].reached_rays += 1;
-                            reached = i + 1;
-                        }
+                    if let (Some(i), Some(point)) = (failure.surface, failure.point)
+                        && i >= reached
+                        && i < surfaces.len()
+                    {
+                        surfaces[i].semi_diameter =
+                            surfaces[i].semi_diameter.max(point[0].hypot(point[1]));
+                        surfaces[i].reached_rays += 1;
+                        reached = i + 1;
                     }
                     let local_pupil = [
                         FieldFrame::project(frame.tangential, pupil),
@@ -285,7 +286,7 @@ fn calculate(s: &System) -> Result<Vec<FieldVignetting>, String> {
             }
         } else {
             boundaries.extend(DIRECTIONS.iter().map(|(direction, _)| Boundary {
-                direction: *direction,
+                direction,
                 pupil_scale: 1.,
                 limiting_surface: None,
                 limiting_endpoint: None,
@@ -374,11 +375,13 @@ pub fn update_vignetting(system: &System) -> Result<(System, VignettingReport), 
 mod tests {
     use super::*;
     fn planes(radius: f64, pupil: f64) -> System {
-        let mut s = System::default();
-        s.surfaces = vec![
-            Surface::sphere(0., 10., "AIR", 1.),
-            Surface::sphere(0., 10., "AIR", radius),
-        ];
+        let mut s = System {
+            surfaces: vec![
+                Surface::sphere(0., 10., "AIR", 1.),
+                Surface::sphere(0., 10., "AIR", radius),
+            ],
+            ..Default::default()
+        };
         s.surfaces[0].clear_aperture = false;
         s.fields = vec![Field::meridional(0.1_f64.atan().to_degrees())];
         s.pupil.value = pupil;
@@ -431,8 +434,10 @@ mod tests {
         let before = serde_json::to_value(&s).unwrap();
         assert!(update_vignetting(&s).unwrap_err().contains("chief ray"));
         assert_eq!(serde_json::to_value(&s).unwrap(), before);
-        let mut s = System::default();
-        s.fields = vec![Field::meridional(0.)];
+        let mut s = System {
+            fields: vec![Field::meridional(0.)],
+            ..Default::default()
+        };
         s.surfaces[0].clear_aperture = false;
         s.surfaces[1].aperture = 40.;
         s.update().unwrap();

@@ -1,6 +1,7 @@
 fn execute() -> Result<(), String> {
     let args: Vec<_> = std::env::args().collect();
-    let result = if args.iter().any(|a| a == "--detect-agents") {
+
+    if args.iter().any(|a| a == "--detect-agents") {
         println!("{}", hissabeth_lib::agents::detect());
         Ok(())
     } else if args.iter().any(|a| a == "--configure-agents") {
@@ -32,8 +33,7 @@ fn execute() -> Result<(), String> {
         {
             Err("Use --engine or --mcp".into())
         }
-    };
-    result
+    }
 }
 
 fn main() {
