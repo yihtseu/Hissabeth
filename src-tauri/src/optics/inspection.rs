@@ -3,14 +3,47 @@
 use super::*;
 use trace::{Launch, TraceOptions};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InspectionLaunch {
-    Pupil { pupil: [f64; 2], field_index: usize },
-    Object { point: [f64; 2], tangent: [f64; 2] },
+    Pupil {
+        pupil: [f64; 2],
+        #[schemars(range(min = 0, max = 63))]
+        field_index: usize,
+    },
+    Object {
+        point: [f64; 2],
+        tangent: [f64; 2],
+    },
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct Failure {
+    kind: trace::FailureKind,
+    surface: Option<usize>,
+    endpoint: Option<&'static str>,
+    point: Option<V3>,
+    message: String,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Inspection {
+    launch: InspectionLaunch,
+    wavelength: f64,
+    ray: Option<Ray>,
+    failure: Option<Failure>,
+    coordinates: &'static str,
+    optical_path: &'static str,
 }
 
 pub fn inspect(s: &System, launch: InspectionLaunch, w: f64) -> Result<Value, String> {
+    serde_json::to_value(inspect_report(s, launch, w)?).map_err(|e| e.to_string())
+}
+pub(crate) fn inspect_report(
+    s: &System,
+    launch: InspectionLaunch,
+    w: f64,
+) -> Result<Inspection, String> {
     if !w.is_finite() || !(100. ..=20000.).contains(&w) {
         return Err("Wavelength outside 100–20000 nm".into());
     }
@@ -68,20 +101,29 @@ pub fn inspect(s: &System, launch: InspectionLaunch, w: f64) -> Result<Value, St
         }
     };
     let (ray, failure) = match result {
-        Ok(ray) => (Some(ray), Value::Null),
+        Ok(ray) => (Some(ray), None),
         Err(e) => (
             e.ray,
-            json!({"kind":e.kind,"surface":e.surface,"endpoint":e.endpoint,"point":e.point,"message":e.message}),
+            Some(Failure {
+                kind: e.kind,
+                surface: e.surface,
+                endpoint: e.endpoint,
+                point: e.point,
+                message: e.message,
+            }),
         ),
     };
-    Ok(
-        json!({"launch":launch,"wavelength":w,"ray":ray,"failure":failure,
-        "coordinates":"global x, y, z in mm; directions are unit vectors",
-        "optical_path":"segment OPL is signed from ray.points[0]; entrance_opl locates that launch relative to the source or incident plane-wave reference"}),
-    )
+    Ok(Inspection {
+        launch,
+        wavelength: w,
+        ray,
+        failure,
+        coordinates: "global x, y, z in mm; directions are unit vectors",
+        optical_path: "segment OPL is signed from ray.points[0]; entrance_opl locates that launch relative to the source or incident plane-wave reference",
+    })
 }
 
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 struct ParaxialRow {
     endpoint: &'static str,
     surface_index: Option<usize>,
@@ -157,7 +199,25 @@ fn table(
     Ok(rows)
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ParaxialTrace {
+    wavelength: f64,
+    field: [f64; 2],
+    entrance_pupil_radius: f64,
+    axis: Vec<ParaxialRow>,
+    chief: Vec<ParaxialRow>,
+    model: &'static str,
+    basis: &'static str,
+}
+
 pub fn paraxial_trace(s: &System, f: &Field, w: f64) -> Result<Value, String> {
+    serde_json::to_value(paraxial_trace_report(s, f, w)?).map_err(|e| e.to_string())
+}
+pub(crate) fn paraxial_trace_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+) -> Result<ParaxialTrace, String> {
     let n0 = s.object_index(w)?;
     let radius = s.pupil_radius(w)?;
     let shift = s.entrance_pupil_distance(w)?;
@@ -191,13 +251,15 @@ pub fn paraxial_trace(s: &System, f: &Field, w: f64) -> Result<Value, String> {
         chief_height[axis] = height;
         chief_q[axis] = n0 * slope;
     }
-    Ok(
-        json!({"wavelength":w,"field":[f.x,f.y],"entrance_pupil_radius":radius,
-        "axis":table(s,axis_height,axis_q,axis_object,w)?,
-        "chief":table(s,chief_height,chief_q,object,w)?,
-        "model":"Linearized refraction and reflection at internal vertex planes; image row is the image vertex plane. Finite chief starts at the actual source point; axial ray starts at the source vertex. Physical apertures, field vignetting, conic and polynomial terms do not affect these tables.",
-        "basis":"height (mm), q = direction_sign * physical_index * (dx/dz, dy/dz); slope is global dx/dz, dy/dz"}),
-    )
+    Ok(ParaxialTrace {
+        wavelength: w,
+        field: [f.x, f.y],
+        entrance_pupil_radius: radius,
+        axis: table(s, axis_height, axis_q, axis_object, w)?,
+        chief: table(s, chief_height, chief_q, object, w)?,
+        model: "Linearized refraction and reflection at internal vertex planes; image row is the image vertex plane. Finite chief starts at the actual source point; axial ray starts at the source vertex. Physical apertures, field vignetting, conic and polynomial terms do not affect these tables.",
+        basis: "height (mm), q = direction_sign * physical_index * (dx/dz, dy/dz); slope is global dx/dz, dy/dz",
+    })
 }
 
 #[cfg(test)]

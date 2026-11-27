@@ -244,7 +244,40 @@ fn kind_name(kind: Kind) -> String {
     serde_json::to_value(kind).unwrap().as_str().unwrap().into()
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct CatalogItem {
+    part: &'static str,
+    name: &'static str,
+    category: &'static str,
+    kind: String,
+    aperture: f64,
+    body_radius: f64,
+    focal_length: f64,
+    reflectance: f64,
+    transmittance: f64,
+    retardance_waves: Option<f64>,
+    fast_axis_deg: Option<f64>,
+    extinction_ratio: Option<f64>,
+    screw_tpi: Option<f64>,
+    lever_arm_mm: Option<f64>,
+    clamping_style: &'static str,
+    fork_reach_mm: f64,
+    mount: Mount,
+    typical_price_usd: u32,
+    notes: &'static str,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Catalog {
+    items: Vec<CatalogItem>,
+    units: &'static str,
+    price_basis: &'static str,
+}
+
 pub fn catalog(query: Option<&str>, kind: Option<&str>) -> Value {
+    json!(catalog_report(query, kind))
+}
+pub(crate) fn catalog_report(query: Option<&str>, kind: Option<&str>) -> Catalog {
     let query = query.unwrap_or_default().trim().to_ascii_lowercase();
     let items: Vec<_> = HARDWARE
         .iter()
@@ -259,19 +292,38 @@ pub fn catalog(query: Option<&str>, kind: Option<&str>) -> Value {
             {
                 return None;
             }
-            Some(json!({
-                "part": item.part, "name": item.name, "category": item.category, "kind": name,
-                "aperture": item.aperture, "body_radius": item.body_radius, "focal_length": item.focal_length,
-                "reflectance": item.reflectance, "transmittance": item.transmittance,
-                "retardance_waves": item.retardance_waves, "fast_axis_deg": item.fast_axis_deg,
-                "extinction_ratio": item.extinction_ratio, "screw_tpi": item.screw_tpi,
-                "lever_arm_mm": item.lever_arm_mm, "clamping_style": item.clamping_style,
-                "fork_reach_mm": if item.clamping_style == "direct_hole" { 0. } else { FORK_REACH },
-                "mount": item.mount(), "typical_price_usd": item.typical_price_usd, "notes": item.notes
-            }))
+            Some(CatalogItem {
+                part: item.part,
+                name: item.name,
+                category: item.category,
+                kind: name,
+                aperture: item.aperture,
+                body_radius: item.body_radius,
+                focal_length: item.focal_length,
+                reflectance: item.reflectance,
+                transmittance: item.transmittance,
+                retardance_waves: item.retardance_waves,
+                fast_axis_deg: item.fast_axis_deg,
+                extinction_ratio: item.extinction_ratio,
+                screw_tpi: item.screw_tpi,
+                lever_arm_mm: item.lever_arm_mm,
+                clamping_style: item.clamping_style,
+                fork_reach_mm: if item.clamping_style == "direct_hole" {
+                    0.
+                } else {
+                    FORK_REACH
+                },
+                mount: item.mount(),
+                typical_price_usd: item.typical_price_usd,
+                notes: item.notes,
+            })
         })
         .collect();
-    json!({"items":items, "units":"mm", "price_basis":"Approximate USD planning estimates; mount footprints include assumed posts and bases."})
+    Catalog {
+        items,
+        units: "mm",
+        price_basis: "Approximate USD planning estimates; mount footprints include assumed posts and bases.",
+    }
 }
 
 pub(crate) const TEMPLATES: &[&str] = &[
@@ -445,6 +497,21 @@ fn reflective(kind: Kind) -> bool {
 }
 
 pub fn auto_aim(bench: &Bench, snap_holes: bool, uniform_z: Option<f64>) -> Result<Value, String> {
+    serde_json::to_value(aim(bench, snap_holes, uniform_z)?).map_err(|e| e.to_string())
+}
+
+#[derive(schemars::JsonSchema, Serialize)]
+pub(crate) struct AimResult {
+    pub bench: Bench,
+    adjusted_elements: Vec<String>,
+    warnings: Vec<String>,
+}
+
+pub(crate) fn aim(
+    bench: &Bench,
+    snap_holes: bool,
+    uniform_z: Option<f64>,
+) -> Result<AimResult, String> {
     bench.validate()?;
     if uniform_z.is_some_and(|z| !z.is_finite() || z <= 0.) {
         return Err("Uniform Z must be finite and positive".into());
@@ -543,9 +610,13 @@ pub fn auto_aim(bench: &Bench, snap_holes: bool, uniform_z: Option<f64>) -> Resu
         .iter()
         .zip(&bench.elements)
         .filter(|(new, old)| new.rotation != old.rotation || new.position != old.position)
-        .map(|(e, _)| &e.id)
+        .map(|(e, _)| e.id.clone())
         .collect();
-    Ok(json!({"bench":scene, "adjusted_elements":adjusted, "warnings":warnings}))
+    Ok(AimResult {
+        bench: scene,
+        adjusted_elements: adjusted,
+        warnings,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -590,21 +661,21 @@ impl Q {
     }
 }
 
-#[derive(Serialize)]
-struct EnvelopeSegment<'a> {
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+struct EnvelopeSegment {
     from: V3,
     to: V3,
     w_from: f64,
     w_to: f64,
-    branch: &'a str,
-    source: &'a str,
+    branch: String,
+    source: String,
 }
 
-#[derive(Serialize)]
-struct Clearance<'a> {
-    element_id: &'a str,
-    branch: &'a str,
-    source: &'a str,
+#[derive(Clone, Serialize, schemars::JsonSchema)]
+struct Clearance {
+    element_id: String,
+    branch: String,
+    source: String,
     beam_radius_mm: f64,
     beam_diameter_mm: f64,
     aperture_radius_mm: f64,
@@ -626,14 +697,25 @@ struct GroupState {
 }
 
 struct Envelope<'a> {
-    segments: Vec<EnvelopeSegment<'a>>,
-    hits: Vec<Clearance<'a>>,
+    segments: Vec<EnvelopeSegment>,
+    hits: Vec<Clearance>,
     links: Vec<Connection>,
     source_radii: BTreeMap<&'a str, f64>,
 }
+#[derive(Serialize, schemars::JsonSchema)]
+struct GaussianEnvelope {
+    segments: Vec<EnvelopeSegment>,
+    hits: Vec<Clearance>,
+    units: &'static str,
+}
+
 impl Envelope<'_> {
-    fn json(&self) -> Value {
-        json!({"segments":self.segments,"hits":self.hits,"units":"mm"})
+    fn report(&self) -> GaussianEnvelope {
+        GaussianEnvelope {
+            segments: self.segments.clone(),
+            hits: self.hits.clone(),
+            units: "mm",
+        }
     }
 }
 
@@ -728,9 +810,9 @@ fn envelope<'a>(
                 {
                     let ratio = e.aperture / to;
                     out.hits.push(Clearance {
-                        element_id: &e.id,
-                        branch: &segment.branch,
-                        source: &segment.source,
+                        element_id: e.id.clone(),
+                        branch: segment.branch.clone(),
+                        source: segment.source.clone(),
                         beam_radius_mm: to,
                         beam_diameter_mm: 2. * to,
                         aperture_radius_mm: e.aperture,
@@ -802,8 +884,8 @@ fn envelope<'a>(
             to: segment.to,
             w_from,
             w_to,
-            branch: key.1,
-            source: key.0,
+            branch: key.1.to_owned(),
+            source: key.0.to_owned(),
         });
     }
     Ok(out)
@@ -811,7 +893,7 @@ fn envelope<'a>(
 
 pub fn gaussian_envelope(bench: &Bench, system: &System) -> Result<Value, String> {
     let trace = center_trace(bench, system)?;
-    Ok(envelope(bench, system, &trace)?.json())
+    Ok(json!(envelope(bench, system, &trace)?.report()))
 }
 
 struct Grid {
@@ -924,7 +1006,7 @@ fn clamping_hole(grid: &Grid, element: &Element, others: &[&Element]) -> Option<
     best
 }
 
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 struct Issue {
     severity: &'static str,
     code: &'static str,
@@ -984,13 +1066,53 @@ fn dump_position(bench: &Bench, start: V3, direction: V3) -> Option<V3> {
 }
 
 pub fn lab_check(bench: &Bench, system: &System) -> Result<Value, String> {
+    serde_json::to_value(check(bench, system)?).map_err(|e| e.to_string())
+}
+pub(crate) fn check(bench: &Bench, system: &System) -> Result<LabCheck, String> {
     let trace = bench.trace(system)?;
     let center = center_trace(bench, system)?;
     let gaussian = envelope(bench, system, &center)?;
     lab_report(bench, &trace, &gaussian)
 }
 
-fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<Value, String> {
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct IssueCounts {
+    errors: u32,
+    warnings: u32,
+    info: u32,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct BeamDump {
+    branch: String,
+    source: String,
+    position: [f64; 3],
+    direction: [f64; 3],
+    power: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct Clamping {
+    element_id: String,
+    hole: [i64; 2],
+    offset_mm: f64,
+    style: &'static str,
+    clamping_hole: Option<[i64; 2]>,
+    clamping_offset_mm: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct LabCheck {
+    readiness_score: u32,
+    passed: bool,
+    counts: IssueCounts,
+    issues: Vec<Issue>,
+    gaussian: GaussianEnvelope,
+    recommended_beam_dumps: Vec<BeamDump>,
+    clamping: Vec<Clamping>,
+}
+
+fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<LabCheck, String> {
     let grid = Grid::new(bench)?;
     let mut issues = Vec::new();
     let mut dumps = Vec::new();
@@ -1035,7 +1157,13 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<V
             if let Some(segment) = last {
                 if let Ok(direction) = unit(sub(segment.to, segment.from)) {
                     if let Some(position) = dump_position(bench, segment.from, direction) {
-                        dumps.push(json!({"branch":end.branch,"source":end.source,"position":position,"direction":direction,"power":end.power}));
+                        dumps.push(BeamDump {
+                            branch: end.branch.clone(),
+                            source: end.source.clone(),
+                            position,
+                            direction,
+                            power: end.power,
+                        });
                     }
                 }
             }
@@ -1051,8 +1179,8 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<V
             issues.push(issue(
                 severity,
                 "gaussian_clearance",
-                Some(hit.element_id),
-                Some(hit.branch),
+                Some(&hit.element_id),
+                Some(&hit.branch),
                 format!(
                     "{}: Gaussian aperture clearance is {:.2} beam radii ({})",
                     hit.element_id, hit.clearance_ratio, hit.status
@@ -1131,10 +1259,14 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<V
                 "unreachable"
             }
         };
-        clamping.push(json!({
-            "element_id":element.id, "hole":nearest, "offset_mm":offset, "style":style,
-            "clamping_hole":free.map(|(hole, _)| hole), "clamping_offset_mm":free.map(|(_, d)| d),
-        }));
+        clamping.push(Clamping {
+            element_id: element.id.clone(),
+            hole: nearest,
+            offset_mm: offset,
+            style,
+            clamping_hole: free.map(|(hole, _)| hole),
+            clamping_offset_mm: free.map(|(_, d)| d),
+        });
     }
     let count = |severity| {
         issues
@@ -1144,46 +1276,54 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<V
     };
     let (errors, warnings, info) = (count("error"), count("warning"), count("info"));
     let readiness_score = 100u32.saturating_sub(20 * errors + 7 * warnings);
-    Ok(json!({
-        "readiness_score":readiness_score, "passed":errors == 0,
-        "counts":{"errors":errors,"warnings":warnings,"info":info},
-        "issues":issues, "gaussian":gaussian.json(), "recommended_beam_dumps":dumps, "clamping":clamping,
-    }))
+    Ok(LabCheck {
+        readiness_score,
+        passed: errors == 0,
+        counts: IssueCounts {
+            errors,
+            warnings,
+            info,
+        },
+        issues,
+        gaussian: gaussian.report(),
+        recommended_beam_dumps: dumps,
+        clamping,
+    })
 }
 
-#[derive(Serialize)]
-struct Step<'a> {
+#[derive(schemars::JsonSchema, Serialize)]
+struct Step {
     step: usize,
-    id: &'a str,
+    id: String,
     kind: String,
-    label: &'a str,
+    label: String,
     position: V3,
     hole: [i64; 2],
     hole_offset: f64,
-    mount_part: Option<&'a str>,
+    mount_part: Option<String>,
     beam_height_z: f64,
     expected_beam_radius_mm: Option<f64>,
-    target_next: Option<&'a str>,
+    target_next: Option<String>,
     instruction: String,
 }
-#[derive(Serialize)]
-struct Sensitivity<'a> {
-    element_id: &'a str,
+#[derive(schemars::JsonSchema, Serialize)]
+struct Sensitivity {
+    element_id: String,
     screw_tpi: f64,
     lever_arm_mm: f64,
     mrad_per_quarter_turn: f64,
-    targets: Vec<SpotShift<'a>>,
+    targets: Vec<SpotShift>,
 }
-#[derive(Serialize)]
-struct SpotShift<'a> {
-    target_id: &'a str,
+#[derive(schemars::JsonSchema, Serialize)]
+struct SpotShift {
+    target_id: String,
     distance_mm: f64,
     spot_shift_mm_per_quarter_turn: f64,
 }
-#[derive(Serialize)]
-struct Guide<'a> {
-    steps: Vec<Step<'a>>,
-    sensitivities: Vec<Sensitivity<'a>>,
+#[derive(schemars::JsonSchema, Serialize)]
+pub(crate) struct Guide {
+    steps: Vec<Step>,
+    sensitivities: Vec<Sensitivity>,
     safety_notes: &'static [&'static str],
 }
 
@@ -1193,7 +1333,7 @@ const SAFETY_NOTES: &[&str] = &[
     "Verify each path and detector reading before opening the next branch.",
 ];
 
-fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, String> {
+fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide, String> {
     let grid = Grid::new(bench)?;
     let mut outgoing: HashMap<&str, Vec<&Connection>> = HashMap::new();
     let mut links = HashSet::new();
@@ -1222,7 +1362,7 @@ fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, 
     );
     let mut radii = HashMap::<&str, f64>::new();
     for hit in &gaussian.hits {
-        let max = radii.entry(hit.element_id).or_default();
+        let max = radii.entry(&hit.element_id).or_default();
         *max = max.max(hit.beam_radius_mm);
     }
     let mut steps = Vec::with_capacity(ids.len());
@@ -1266,7 +1406,7 @@ fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, 
                     let item = elements[target];
                     if first || item.kind == Kind::Detector {
                         shifts.push(SpotShift {
-                            target_id: target,
+                            target_id: target.to_owned(),
                             distance_mm: distance,
                             spot_shift_mm_per_quarter_turn: distance * deflection,
                         });
@@ -1281,7 +1421,7 @@ fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, 
                     }));
                 }
                 sensitivities.push(Sensitivity {
-                    element_id: id,
+                    element_id: id.to_owned(),
                     screw_tpi,
                     lever_arm_mm,
                     mrad_per_quarter_turn: 1000. * deflection,
@@ -1323,16 +1463,16 @@ fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, 
         let hole = grid.hole(position);
         steps.push(Step {
             step: steps.len() + 1,
-            id,
+            id: id.to_owned(),
             kind,
-            label,
+            label: label.to_owned(),
             position,
             hole,
             hole_offset: grid.offset(hole, position),
-            mount_part,
+            mount_part: mount_part.map(str::to_owned),
             beam_height_z: position[2] - bench.origin[2],
             expected_beam_radius_mm: radius,
-            target_next: next,
+            target_next: next.map(str::to_owned),
             instruction: format!("{instruction}{target_note}"),
         });
     }
@@ -1344,9 +1484,12 @@ fn guide<'a>(bench: &'a Bench, gaussian: &'a Envelope<'_>) -> Result<Guide<'a>, 
 }
 
 pub fn alignment_guide(bench: &Bench, system: &System) -> Result<Value, String> {
+    serde_json::to_value(alignment(bench, system)?).map_err(|e| e.to_string())
+}
+pub(crate) fn alignment(bench: &Bench, system: &System) -> Result<Guide, String> {
     let trace = center_trace(bench, system)?;
     let gaussian = envelope(bench, system, &trace)?;
-    Ok(json!(guide(bench, &gaussian)?))
+    guide(bench, &gaussian)
 }
 
 pub(crate) const FORMATS: &[&str] = &["svg", "dxf", "stl", "alignment_md"];
@@ -1751,7 +1894,7 @@ fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Resu
         writeln!(
             out,
             "| {} | {col} | {row} | {:.2} | {:.2} |",
-            markdown_cell(step.id),
+            markdown_cell(&step.id),
             step.hole_offset,
             step.beam_height_z
         )
@@ -1763,14 +1906,14 @@ fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Resu
             out,
             "{}. [ ] **{}**. {}",
             step.step,
-            markdown_cell(step.label),
+            markdown_cell(&step.label),
             markdown_cell(&step.instruction)
         )
         .unwrap();
     }
     out.push_str("\n## Kinematic screw sensitivity\n\n| Mount | Target | TPI | mrad / quarter turn | mm / quarter turn |\n| --- | --- | ---: | ---: | ---: |\n");
     for sensitivity in &guide.sensitivities {
-        let id = markdown_cell(sensitivity.element_id);
+        let id = markdown_cell(&sensitivity.element_id);
         let tpi = sensitivity.screw_tpi;
         let angle = sensitivity.mrad_per_quarter_turn;
         if sensitivity.targets.is_empty() {
@@ -1780,18 +1923,17 @@ fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Resu
             writeln!(
                 out,
                 "| {id} | {} | {tpi:.1} | {angle:.3} | {:.3} |",
-                markdown_cell(target.target_id),
+                markdown_cell(&target.target_id),
                 target.spot_shift_mm_per_quarter_turn
             )
             .unwrap();
         }
     }
     out.push_str("\n## Lab clearance warnings\n\n");
-    let mut findings = check["issues"]
-        .as_array()
-        .unwrap()
+    let mut findings = check
+        .issues
         .iter()
-        .filter(|issue| issue["severity"] != "info")
+        .filter(|issue| issue.severity != "info")
         .peekable();
     if findings.peek().is_none() {
         out.push_str("No clearance warnings or errors were reported.\n");
@@ -1800,21 +1942,20 @@ fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Resu
         writeln!(
             out,
             "- **{}** — {}",
-            item["severity"].as_str().unwrap(),
-            markdown_cell(item["message"].as_str().unwrap())
+            item.severity,
+            markdown_cell(&item.message)
         )
         .unwrap();
     }
-    let dumps = check["recommended_beam_dumps"].as_array().unwrap();
+    let dumps = &check.recommended_beam_dumps;
     if !dumps.is_empty() {
         out.push_str("\n### Recommended beam stops\n\n");
         for dump in dumps {
-            let p: V3 =
-                serde_json::from_value(dump["position"].clone()).map_err(|e| e.to_string())?;
+            let p = dump.position;
             writeln!(
                 out,
                 "- {} at ({:.1}, {:.1}, {:.1}) mm in world coordinates.",
-                markdown_cell(dump["branch"].as_str().unwrap()),
+                markdown_cell(&dump.branch),
                 p[0],
                 p[1],
                 p[2]
@@ -1825,7 +1966,22 @@ fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Resu
     Ok(out)
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Blueprint {
+    format: String,
+    filename: String,
+    mime: &'static str,
+    content: String,
+}
+
 pub fn export_blueprint(bench: &Bench, system: &System, format: &str) -> Result<Value, String> {
+    serde_json::to_value(export_blueprint_report(bench, system, format)?).map_err(|e| e.to_string())
+}
+pub(crate) fn export_blueprint_report(
+    bench: &Bench,
+    system: &System,
+    format: &str,
+) -> Result<Blueprint, String> {
     if !FORMATS.contains(&format) {
         return Err(format!(
             "Unknown blueprint format {format:?}. Choose {}",
@@ -1856,9 +2012,12 @@ pub fn export_blueprint(bench: &Bench, system: &System, format: &str) -> Result<
             ),
         }
     };
-    Ok(
-        json!({"format":format,"filename":format!("hissabeth-bench.{extension}"),"mime":mime,"content":content}),
-    )
+    Ok(Blueprint {
+        format: format.to_owned(),
+        filename: format!("hissabeth-bench.{extension}"),
+        mime,
+        content,
+    })
 }
 
 #[cfg(test)]

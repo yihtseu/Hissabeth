@@ -2,6 +2,37 @@
 // One workspace lease spans loaded systems and recoverable startup failures.
 use super::*;
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct ProjectList {
+    active_file: Option<PathBuf>,
+    workspace_file: PathBuf,
+    projects_dir: PathBuf,
+    saved_projects: Vec<PathBuf>,
+    recent: Vec<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(super) enum Status {
+    Ready {
+        revision: u64,
+        path: String,
+    },
+    Recovery {
+        revision: u64,
+        path: String,
+        reason: String,
+        source_text: Option<String>,
+        source_bytes: Option<usize>,
+    },
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct Recovered {
+    revision: u64,
+    preserved_path: Option<String>,
+}
+
 const PROJECT_META: &str = "workspace-meta.json";
 
 #[derive(Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -92,7 +123,7 @@ impl ProjectFiles {
         self.recent_projects.insert(0, path);
     }
 
-    pub fn list(&self, workspace_file: &Path) -> Value {
+    pub fn list(&self, workspace_file: &Path) -> ProjectList {
         let projects_dir = workspace_dir(workspace_file).join("projects");
         let mut saved_projects: Vec<_> = std::fs::read_dir(&projects_dir)
             .into_iter()
@@ -106,13 +137,13 @@ impl ProjectFiles {
             })
             .collect();
         saved_projects.sort();
-        json!({
-            "active_file": self.linked_path,
-            "workspace_file": workspace_file,
-            "projects_dir": projects_dir,
-            "saved_projects": saved_projects,
-            "recent": self.recent_projects,
-        })
+        ProjectList {
+            active_file: self.linked_path.clone(),
+            workspace_file: workspace_file.to_owned(),
+            projects_dir,
+            saved_projects,
+            recent: self.recent_projects.clone(),
+        }
     }
 }
 
@@ -247,11 +278,14 @@ pub struct Workspace {
     lease: Arc<std::fs::File>,
     state: State,
 }
-#[derive(serde::Deserialize)]
+#[derive(schemars::JsonSchema, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Source {
+pub(super) enum Source {
     Default {},
-    Project { format: String, text: String },
+    Project {
+        format: params::ProjectFormat,
+        text: String,
+    },
 }
 struct Pending(PathBuf);
 impl Drop for Pending {
@@ -344,17 +378,28 @@ impl Workspace {
         }
     }
     pub fn status(&self) -> Value {
+        json!(self.status_report())
+    }
+
+    pub(super) fn status_report(&self) -> Status {
         match &self.state {
-            State::Ready(e) => {
-                json!({"state":"ready","revision":e.revision,"path":self.path.display().to_string()})
-            }
+            State::Ready(e) => Status::Ready {
+                revision: e.revision,
+                path: self.path.display().to_string(),
+            },
             State::Recovery(r) => {
                 let (text, bytes) = match &r.observed {
                     Observed::Bytes(b) => (std::str::from_utf8(b).ok(), Some(b.len())),
                     Observed::Absent => (None, Some(0)),
                     Observed::Unreadable(_) => (None, None),
                 };
-                json!({"state":"recovery","revision":r.revision,"path":self.path.display().to_string(),"reason":r.reason,"source_text":text,"source_bytes":bytes})
+                Status::Recovery {
+                    revision: r.revision,
+                    path: self.path.display().to_string(),
+                    reason: r.reason.clone(),
+                    source_text: text.map(str::to_owned),
+                    source_bytes: bytes,
+                }
             }
         }
     }
@@ -367,7 +412,7 @@ impl Workspace {
         }
         Ok(r)
     }
-    fn retry(&mut self, revision: u64) -> Result<Value, String> {
+    pub(super) fn retry(&mut self, revision: u64) -> Result<Status, String> {
         self.recovery(revision)?;
         let next = revision
             .checked_add(1)
@@ -388,7 +433,7 @@ impl Workspace {
                 observed,
             }),
         };
-        Ok(self.status())
+        Ok(self.status_report())
     }
     fn unique_file(&self, suffix: &str) -> Result<(PathBuf, std::fs::File), String> {
         let mut nonce = [0u8; 16];
@@ -409,7 +454,7 @@ impl Workspace {
             .map_err(|e| e.to_string())?;
         Ok((path, file))
     }
-    fn recover(&mut self, revision: u64, source: Source) -> Result<Value, String> {
+    pub(super) fn recover(&mut self, revision: u64, source: Source) -> Result<Recovered, String> {
         let observed = self.recovery(revision)?.observed.clone();
         if let Observed::Unreadable(reason) = &observed {
             return Err(format!(
@@ -418,12 +463,11 @@ impl Workspace {
         }
         let mut system: System = match source {
             Source::Default {} => System::default(),
-            Source::Project { format, text } => match format.as_str() {
-                "hissabeth" => serde_json::from_str(&text)
+            Source::Project { format, text } => match format {
+                params::ProjectFormat::Hissabeth => serde_json::from_str(&text)
                     .map_err(|e| format!("Invalid optical project: {e}"))?,
-                "geopter" => project::import(&text)?,
-                "zmx" => crate::optics::zmx::import(&text)?,
-                _ => return Err("Unknown project format".into()),
+                params::ProjectFormat::Geopter => project::import(&text)?,
+                params::ProjectFormat::Zmx => zmx::import(&text)?,
             },
         };
         system.update()?;
@@ -491,23 +535,13 @@ impl Workspace {
             system,
             ProjectFiles::load(&self.path),
         ));
-        Ok(json!({"revision":next,"preserved_path":preserved.map(|p|p.display().to_string())}))
+        Ok(Recovered {
+            revision: next,
+            preserved_path: preserved.map(|p| p.display().to_string()),
+        })
     }
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        validate_args(name, &args)?;
-        self.call_validated(name, args)
-    }
-
-    pub(super) fn call_validated(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        match name {
-            "workspace_status" => Ok(self.status()),
-            "workspace_retry" => self.retry(args["revision"].as_u64().unwrap()),
-            "workspace_recover" => self.recover(
-                args["revision"].as_u64().unwrap(),
-                serde_json::from_value(args["source"].clone()).map_err(|e| e.to_string())?,
-            ),
-            _ => self.engine_mut()?.call_validated(name, args),
-        }
+        registry::call(registry::Target::Workspace(self), name, args)
     }
 }
 impl ToolCaller for Workspace {

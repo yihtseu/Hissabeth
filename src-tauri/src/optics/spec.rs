@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize)]
 pub struct FieldFrame {
     pub sagittal: [f64; 2],
     pub tangential: [f64; 2],
@@ -9,13 +9,18 @@ impl FieldFrame {
         axis[0] * vector[0] + axis[1] * vector[1]
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub x: f64,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub y: f64,
+    #[schemars(range(min = 0.0, max = 1e15))]
     pub weight: f64,
+    #[schemars(extend("items" = {"type": "number", "exclusiveMaximum": 1.0}))]
     pub vignetting: [f64; 4],
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
     pub color: [f64; 4],
 }
 impl Field {
@@ -29,11 +34,14 @@ impl Field {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wavelength {
+    #[schemars(range(min = 100.0, max = 20000.0))]
     pub value: f64,
+    #[schemars(range(min = 0.0, max = 1e15))]
     pub weight: f64,
+    #[schemars(inner(range(min = 0.0, max = 1.0)))]
     pub color: [f64; 4],
 }
 impl Wavelength {
@@ -76,20 +84,20 @@ pub fn wavelength_color(nm: f64) -> [f64; 4] {
     let component = |x: f64| (x * edge).powf(0.8) * 0.85;
     [component(r), component(g), component(b), 1.]
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     Angle,
     ObjectHeight,
     ImageHeight,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PupilMapping {
     ReferenceEntrancePupil,
     RealStop,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PupilType {
     EntrancePupilDiameter,
@@ -97,13 +105,14 @@ pub enum PupilType {
     ObjectNa,
     ImageNa,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pupil {
     pub kind: PupilType,
+    #[schemars(range(min = 1e-12, max = 1e9))]
     pub value: f64,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Interaction {
     Refract,

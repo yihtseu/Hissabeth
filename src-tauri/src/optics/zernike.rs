@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Noll-ordered Zernike decomposition of masked pupil wavefront maps.
 use super::analysis::Wavefront;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub const MAX_TERMS: usize = 45;
 
@@ -80,7 +80,32 @@ fn name(j: usize) -> String {
 }
 // Least squares over the valid wavefront samples; normal equations solved by
 // Gaussian elimination with partial pivoting.
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ZernikeTerm {
+    j: usize,
+    n: usize,
+    m: i32,
+    name: String,
+    coefficient: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ZernikeFit {
+    terms: Vec<ZernikeTerm>,
+    fit_residual_rms: f64,
+    valid: usize,
+    grid: usize,
+    wavelength: f64,
+    units: &'static str,
+    ordering: &'static str,
+    normalization: &'static str,
+}
+
 pub fn fit(wf: &Wavefront, terms: usize) -> Result<Value, String> {
+    serde_json::to_value(fit_report(wf, terms)?).map_err(|e| e.to_string())
+}
+pub(crate) fn fit_report(wf: &Wavefront, terms: usize) -> Result<ZernikeFit, String> {
     if terms == 0 || terms > MAX_TERMS {
         return Err(format!("Zernike terms must be 1–{MAX_TERMS}"));
     }
@@ -142,17 +167,28 @@ pub fn fit(wf: &Wavefront, terms: usize) -> Result<Value, String> {
         residual += (w - model).powi(2);
     }
     residual = (residual / samples.len() as f64).sqrt();
-    let terms_json: Vec<_> = (1..=terms)
+    let coefficients_by_term: Vec<_> = (1..=terms)
         .map(|j| {
             let (n, m) = noll(j).unwrap();
-            json!({"j":j,"n":n,"m":m,"name":name(j),"coefficient":coefficients[j-1]})
+            ZernikeTerm {
+                j,
+                n,
+                m,
+                name: name(j),
+                coefficient: coefficients[j - 1],
+            }
         })
         .collect();
-    Ok(
-        json!({"terms":terms_json,"fit_residual_rms":residual,"valid":samples.len(),
-        "grid":wf.grid,"wavelength":wf.wavelength,"units":"waves","ordering":"noll",
-        "normalization":"unit RMS over the unit disk; theta from pupil x axis; least squares over valid masked samples"}),
-    )
+    Ok(ZernikeFit {
+        terms: coefficients_by_term,
+        fit_residual_rms: residual,
+        valid: samples.len(),
+        grid: wf.grid,
+        wavelength: wf.wavelength,
+        units: "waves",
+        ordering: "noll",
+        normalization: "unit RMS over the unit disk; theta from pupil x axis; least squares over valid masked samples",
+    })
 }
 
 // Fringe (University of Arizona) ordering as used by ZEMAX surface sag:

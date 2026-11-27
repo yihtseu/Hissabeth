@@ -3,7 +3,7 @@
 use super::*;
 use std::fmt::Write;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionId {
     General,
@@ -23,7 +23,7 @@ impl SectionId {
         }
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Cell {
     Number { value: f64, text: String },
@@ -83,32 +83,32 @@ impl Cell {
         }
     }
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct Column {
     pub id: String,
     pub label: String,
     pub unit: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct Row {
     pub id: String,
     pub cells: Vec<Cell>,
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct Table {
     pub id: String,
     pub title: String,
     pub columns: Vec<Column>,
     pub rows: Vec<Row>,
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct Section {
     pub id: SectionId,
     pub title: String,
     pub paragraphs: Vec<String>,
     pub tables: Vec<Table>,
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct Diagnostic {
     pub section: SectionId,
     pub table: String,
@@ -116,7 +116,7 @@ pub struct Diagnostic {
     pub column: String,
     pub message: String,
 }
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 pub struct PrescriptionReport {
     pub revision: u64,
     pub name: String,

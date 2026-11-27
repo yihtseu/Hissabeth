@@ -5,16 +5,16 @@ use super::{
     sag,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Axis2 {
     X,
     Y,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Axis3 {
     X,
@@ -22,7 +22,9 @@ pub enum Axis3 {
     Z,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintMode {
     #[default]
@@ -31,262 +33,364 @@ pub enum ConstraintMode {
     Gt,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Variable {
     Radius {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     Thickness {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     Conic {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     EvenAsphere {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 0, max = 15))]
         index: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     OddAsphere {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 0, max = 19))]
         index: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     ModelGlassNd {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     ModelGlassVd {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     Decenter {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         axis: Axis2,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     Tilt {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         axis: Axis3,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     ConfigThickness {
+        #[schemars(range(min = 0, max = 63))]
         configuration: usize,
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
     ConfigRadius {
+        #[schemars(range(min = 0, max = 63))]
         configuration: usize,
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         min: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         max: Option<f64>,
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operand {
     RmsSpot {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         field_index: Option<usize>,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
         sampling: Option<PupilSampling>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     RmsWavefront {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = 5, max = 65))]
         grid: Option<usize>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     Efl {
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     Bfl {
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     WorkingFNumber {
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     TotalTrack {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 127))]
         first: Option<usize>,
         #[serde(default)]
+        #[schemars(range(min = 1, max = 128))]
         last: Option<usize>,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     CenterThickness {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     EdgeThickness {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = 0.0, max = 1e6))]
         height: Option<f64>,
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     Distortion {
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     AxialColor {
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wave1: f64,
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wave2: f64,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     LateralColor {
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wave1: f64,
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wave2: f64,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     ChiefRayAngle {
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
     RayIntercept {
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
+        #[schemars(range(min = -2.0, max = 2.0))]
         px: f64,
+        #[schemars(range(min = -2.0, max = 2.0))]
         py: f64,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         axis: Axis2,
         #[serde(default)]
+        #[schemars(range(min = -1e12, max = 1e12))]
         target: f64,
         #[serde(default = "default_weight")]
+        #[schemars(range(min = 0.0, max = 1e9))]
         weight: f64,
         #[serde(default)]
         mode: ConstraintMode,
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         configuration: Option<usize>,
     },
 }
@@ -304,20 +408,25 @@ fn default_tolerance() -> f64 {
     1e-7
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[schemars(length(min = 1, max = 64))]
     pub variables: Vec<Variable>,
+    #[schemars(length(min = 1, max = 256))]
     pub operands: Vec<Operand>,
     #[serde(default = "default_max_iterations")]
+    #[schemars(range(min = 1, max = 200))]
     pub max_iterations: usize,
     #[serde(default = "default_damping")]
+    #[schemars(extend("maximum" = 1e6, "exclusiveMinimum" = 0.0))]
     pub initial_damping: f64,
     #[serde(default = "default_tolerance")]
+    #[schemars(extend("maximum" = 1.0, "exclusiveMinimum" = 0.0))]
     pub tolerance: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct OperandReport {
     pub index: usize,
     pub label: String,
@@ -329,7 +438,7 @@ pub struct OperandReport {
     pub contribution_after: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct VariableReport {
     pub index: usize,
     pub label: String,
@@ -337,7 +446,7 @@ pub struct VariableReport {
     pub after: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct IterationRecord {
     pub iteration: usize,
     pub merit: f64,
@@ -345,7 +454,7 @@ pub struct IterationRecord {
     pub accepted: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct OptimizationResult {
     pub system: System,
     pub initial_merit: f64,
@@ -1383,7 +1492,59 @@ pub fn run(source: &System, request: &Request) -> Result<OptimizationResult, Str
 }
 
 /// High-density diagnostic summary designed for AI agents and quick engineering review.
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ParaxialMetrics {
+    efl: Option<f64>,
+    bfl: Option<f64>,
+    f_number: Option<f64>,
+    image_distance: Option<f64>,
+    entrance_pupil_radius: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AxialColor {
+    min_nm: f64,
+    max_nm: f64,
+    shift_mm: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ThicknessMinimum {
+    surface: usize,
+    mm: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct DesignField {
+    field_index: usize,
+    x: f64,
+    y: f64,
+    weight: f64,
+    rms_spot_mm: Option<f64>,
+    geo_radius_mm: Option<f64>,
+    distortion_percent: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct DesignSummary {
+    name: String,
+    surfaces: usize,
+    configurations: usize,
+    active_configuration: usize,
+    has_transforms: bool,
+    total_track_mm: f64,
+    paraxial: ParaxialMetrics,
+    axial_color: Option<AxialColor>,
+    min_center_thickness: Option<ThicknessMinimum>,
+    min_edge_thickness: Option<ThicknessMinimum>,
+    fields: Vec<DesignField>,
+}
+
 pub fn design_summary(s: &System) -> Result<Value, String> {
+    serde_json::to_value(design_summary_report(s)?).map_err(|e| e.to_string())
+}
+pub(crate) fn design_summary_report(s: &System) -> Result<DesignSummary, String> {
     let w_ref = s.reference();
     let paraxial = s.paraxial(w_ref)?;
     let samp = PupilSampling::Hexapolar { rings: 4 };
@@ -1393,15 +1554,15 @@ pub fn design_summary(s: &System) -> Result<Value, String> {
         let distortion = analysis::distortion(s, f, w_ref)
             .ok()
             .and_then(|d| d["percent"].as_f64());
-        fields.push(json!({
-            "field_index": i,
-            "x": f.x,
-            "y": f.y,
-            "weight": f.weight,
-            "rms_spot_mm": spot.as_ref().and_then(|v| v["rms_radius"].as_f64()),
-            "geo_radius_mm": spot.as_ref().and_then(|v| v["geo_radius"].as_f64()),
-            "distortion_percent": distortion,
-        }));
+        fields.push(DesignField {
+            field_index: i,
+            x: f.x,
+            y: f.y,
+            weight: f.weight,
+            rms_spot_mm: spot.as_ref().and_then(|v| v["rms_radius"].as_f64()),
+            geo_radius_mm: spot.as_ref().and_then(|v| v["geo_radius"].as_f64()),
+            distortion_percent: distortion,
+        });
     }
     let min_center_thickness = s
         .surfaces
@@ -1446,29 +1607,34 @@ pub fn design_summary(s: &System) -> Result<Value, String> {
         if let (Ok(p1), Ok(p2)) = (s.paraxial(w_min), s.paraxial(w_max)) {
             if let (Some(f1), Some(f2)) = (p1["image_distance"].as_f64(), p2["image_distance"].as_f64())
             {
-                axial_color = Some(json!({"min_nm": w_min, "max_nm": w_max, "shift_mm": f1 - f2}));
+                axial_color = Some(AxialColor {
+                    min_nm: w_min,
+                    max_nm: w_max,
+                    shift_mm: f1 - f2,
+                });
             }
         }
     }
-    Ok(json!({
-        "name": s.name,
-        "surfaces": s.surfaces.len(),
-        "configurations": s.configurations.len(),
-        "active_configuration": s.active_configuration,
-        "has_transforms": s.has_transforms(),
-        "total_track_mm": s.surfaces.iter().map(|x| x.thickness).sum::<f64>(),
-        "paraxial": {
-            "efl": paraxial["efl"],
-            "bfl": paraxial["bfl"],
-            "f_number": paraxial["f_number"],
-            "image_distance": paraxial["image_distance"],
-            "entrance_pupil_radius": paraxial["entrance_pupil_radius"],
+    Ok(DesignSummary {
+        name: s.name.clone(),
+        surfaces: s.surfaces.len(),
+        configurations: s.configurations.len(),
+        active_configuration: s.active_configuration,
+        has_transforms: s.has_transforms(),
+        total_track_mm: s.surfaces.iter().map(|x| x.thickness).sum::<f64>(),
+        paraxial: ParaxialMetrics {
+            efl: paraxial["efl"].as_f64(),
+            bfl: paraxial["bfl"].as_f64(),
+            f_number: paraxial["f_number"].as_f64(),
+            image_distance: paraxial["image_distance"].as_f64(),
+            entrance_pupil_radius: paraxial["entrance_pupil_radius"].as_f64(),
         },
-        "axial_color": axial_color,
-        "min_center_thickness": min_center_thickness.map(|(i, v)| json!({"surface": i, "mm": v})),
-        "min_edge_thickness": min_edge.map(|(i, v)| json!({"surface": i, "mm": v})),
-        "fields": fields,
-    }))
+        axial_color,
+        min_center_thickness: min_center_thickness
+            .map(|(i, v)| ThicknessMinimum { surface: i, mm: v }),
+        min_edge_thickness: min_edge.map(|(i, v)| ThicknessMinimum { surface: i, mm: v }),
+        fields,
+    })
 }
 
 #[cfg(test)]

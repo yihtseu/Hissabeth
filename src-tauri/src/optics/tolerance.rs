@@ -5,98 +5,131 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToleranceOperand {
     Radius {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
         #[serde(default)]
+        #[schemars(range(min = 1e-09, max = 90.0))]
         delta_percent: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = 1e-09, max = 1e6))]
         delta_mm: Option<f64>,
     },
     Thickness {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 1e-09, max = 10000.0))]
         delta: f64,
     },
     Decenter {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 1e-09, max = 10000.0))]
         delta: f64,
     },
     Tilt {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 1e-09, max = 45.0))]
         delta_deg: f64,
     },
     Index {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 1e-09, max = 0.5))]
         delta: f64,
     },
     Abbe {
+        #[schemars(range(min = 0, max = 127))]
         surface: usize,
+        #[schemars(range(min = 1e-09, max = 50.0))]
         delta_percent: f64,
     },
     ElementDecenter {
+        #[schemars(range(min = 0, max = 127))]
         first: usize,
+        #[schemars(range(min = 0, max = 127))]
         last: usize,
+        #[schemars(range(min = 1e-09, max = 10000.0))]
         delta: f64,
     },
     ElementTilt {
+        #[schemars(range(min = 0, max = 127))]
         first: usize,
+        #[schemars(range(min = 0, max = 127))]
         last: usize,
+        #[schemars(range(min = 1e-09, max = 45.0))]
         delta_deg: f64,
     },
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Compensator {
     #[default]
     None,
     Autofocus {
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = 0.0, max = 1e5))]
         max_delta: Option<f64>,
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Criterion {
     RmsSpot {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         field_index: Option<usize>,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
         sampling: Option<PupilSampling>,
     },
     RmsWavefront {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
+        #[schemars(range(min = 5, max = 65))]
         grid: Option<usize>,
     },
     Efl {
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
     },
     GeometricMtf {
         #[serde(default)]
+        #[schemars(range(min = 0, max = 63))]
         field_index: usize,
+        #[schemars(range(min = 1e-06, max = 10000.0))]
         frequency: f64,
         #[serde(default)]
+        #[schemars(extend("enum" = ["x", "y", null]))]
         axis: Option<String>,
         #[serde(default)]
+        #[schemars(range(min = 100.0, max = 20000.0))]
         wavelength: Option<f64>,
         #[serde(default)]
         sampling: Option<PupilSampling>,
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Distribution {
     #[default]
@@ -104,16 +137,17 @@ pub enum Distribution {
     Uniform,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SensitivityRequest {
+    #[schemars(length(min = 1, max = 256))]
     pub tolerances: Vec<ToleranceOperand>,
     #[serde(default)]
     pub compensator: Compensator,
     pub criterion: Criterion,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct SensitivityEntry {
     pub operand_index: usize,
     pub label: String,
@@ -127,7 +161,7 @@ pub struct SensitivityEntry {
     pub minus_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct SensitivityResult {
     pub nominal: f64,
     pub criterion_unit: String,
@@ -143,33 +177,37 @@ fn default_seed() -> u64 {
     42
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MonteCarloRequest {
+    #[schemars(length(min = 1, max = 256))]
     pub tolerances: Vec<ToleranceOperand>,
     #[serde(default)]
     pub compensator: Compensator,
     pub criterion: Criterion,
     #[serde(default = "default_trials")]
+    #[schemars(range(min = 10, max = 2000))]
     pub trials: usize,
     #[serde(default)]
     pub distribution: Distribution,
     #[serde(default = "default_seed")]
+    #[schemars(range(min = 0, max = 9_007_199_254_740_991_u64))]
     pub seed: u64,
     #[serde(default)]
+    #[schemars(range(min = -1e12, max = 1e12))]
     pub pass_threshold: Option<f64>,
     #[serde(default)]
     pub lower_is_better: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct HistogramBin {
     pub low: f64,
     pub high: f64,
     pub count: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct MonteCarloResult {
     pub nominal: f64,
     pub criterion_unit: String,

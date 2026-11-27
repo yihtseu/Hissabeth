@@ -38,38 +38,51 @@ pub use spec::*;
 /// parallel to Y at sagittal distance `revolution`. `even_y` holds even
 /// polynomial coefficients on y: y^4, y^6, ... (y^2 folds into `radius`).
 /// revolution = 0 makes the X section flat (a cylinder about Y).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Toroid {
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub revolution: f64,
     #[serde(default)]
+    #[schemars(length(min = 0, max = 8), inner(range(min = -1e15, max = 1e15)))]
     pub even_y: Vec<f64>,
 }
 /// Zernike Fringe sag (ZEMAX ZERNFRIN): additional sag
 /// Σ c_j·Z_j(x/normalize, y/normalize) in mm, Z_j in Fringe order (max 37).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SagZernike {
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     pub normalize: f64,
     #[serde(default)]
+    #[schemars(length(min = 0, max = 37), inner(range(min = -1e15, max = 1e15)))]
     pub coefficients: Vec<f64>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Surface {
     pub label: String,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub radius: f64,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub thickness: f64,
     pub material: String,
+    #[schemars(range(min = 1e-12, max = 1e9))]
     pub aperture: f64,
+    #[schemars(range(min = 0.0, max = 1e15))]
     pub semi_diameter: f64,
     pub clear_aperture: bool,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub conic: f64,
+    #[schemars(length(min = 0, max = 16), inner(range(min = -1e15, max = 1e15)))]
     pub even: Vec<f64>,
+    #[schemars(length(min = 0, max = 20), inner(range(min = -1e15, max = 1e15)))]
     pub odd: Vec<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default, with = "Toroid")]
     pub toroid: Option<Toroid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default, with = "SagZernike")]
     pub zernike: Option<SagZernike>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<CoordinateTransform>,
@@ -100,50 +113,89 @@ impl Surface {
 /// One multi-configuration operand: a per-configuration override of a shared
 /// prescription value. `surface` indexes the internal surfaces; object
 /// distance is a separate kind (ZEMAX THIC on the object surface).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Override {
-    Thickness { surface: usize, value: f64 },
-    Radius { surface: usize, value: f64 },
-    Conic { surface: usize, value: f64 },
-    Aperture { surface: usize, value: f64 },
-    Material { surface: usize, material: String },
-    ObjectDistance { value: Option<f64> },
+    Thickness {
+        #[schemars(range(min = 0, max = 127))]
+        surface: usize,
+        #[schemars(range(min = -1e15, max = 1e15))]
+        value: f64,
+    },
+    Radius {
+        #[schemars(range(min = 0, max = 127))]
+        surface: usize,
+        #[schemars(range(min = -1e15, max = 1e15))]
+        value: f64,
+    },
+    Conic {
+        #[schemars(range(min = 0, max = 127))]
+        surface: usize,
+        #[schemars(range(min = -1e15, max = 1e15))]
+        value: f64,
+    },
+    Aperture {
+        #[schemars(range(min = 0, max = 127))]
+        surface: usize,
+        #[schemars(extend("maximum" = 1e9, "exclusiveMinimum" = 0.0))]
+        value: f64,
+    },
+    Material {
+        #[schemars(range(min = 0, max = 127))]
+        surface: usize,
+        material: String,
+    },
+    ObjectDistance {
+        #[schemars(schema_with = "schemars::SchemaGenerator::subschema_for::<Option<f64>>", extend("exclusiveMinimum" = 0.0))]
+        value: Option<f64>,
+    },
 }
 /// A named configuration: the base prescription plus these overrides.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     pub name: String,
     #[serde(default)]
+    #[schemars(!default, length(min = 0, max = 256))]
     pub overrides: Vec<Override>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct System {
     pub bench: Option<bench::Bench>,
     pub name: String,
     pub note: String,
+    #[schemars(length(min = 1, max = 128))]
     pub surfaces: Vec<Surface>,
+    #[schemars(length(min = 1, max = 32))]
     pub wavelengths: Vec<Wavelength>,
+    #[schemars(range(min = 0, max = 31))]
     pub reference_wavelength: usize,
+    #[schemars(length(min = 1, max = 64))]
     pub fields: Vec<Field>,
     pub field_type: FieldType,
     pub pupil: Pupil,
     pub pupil_mapping: PupilMapping,
+    #[schemars(schema_with = "schemars::SchemaGenerator::subschema_for::<Option<f64>>", extend("exclusiveMinimum" = 0.0))]
     pub object_distance: Option<f64>,
     pub object_material: String,
     pub object_label: String,
     pub image_label: String,
     pub object_surface: EndpointSurface,
     pub image_surface: EndpointSurface,
+    #[schemars(range(min = 0, max = 127))]
     pub stop_index: usize,
+    #[schemars(range(min = -200.0, max = 500.0))]
     pub temperature: f64,
+    #[schemars(range(min = 0.0, max = 1e8))]
     pub pressure: f64,
+    #[schemars(length(min = 0, max = 10000))]
     pub custom_glasses: Vec<material::Glass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(min = 0, max = 64))]
     pub configurations: Vec<Configuration>,
     #[serde(default, skip_serializing_if = "is_zero")]
+    #[schemars(range(min = 0, max = 63))]
     pub active_configuration: usize,
 }
 fn is_zero(v: &usize) -> bool {
@@ -270,7 +322,7 @@ impl System {
         Ok(s)
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Segment {
     pub point: V3,
     pub incoming: V3,
@@ -280,7 +332,7 @@ pub struct Segment {
     pub n_after: f64,
     pub opl: f64,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Ray {
     pub object_point: Option<V3>,
     pub image_hit: Option<Segment>,
@@ -302,6 +354,42 @@ impl Ray {
         self.segments.last().unwrap()
     }
 }
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Paraxial {
+    efl: Option<f64>,
+    bfl: Option<f64>,
+    f_number: Option<f64>,
+    matrix: [f64; 4],
+    matrix_basis: &'static str,
+    image_direction: f64,
+    image_distance: Option<f64>,
+    magnification: Option<f64>,
+    entrance_pupil_distance: f64,
+    entrance_pupil_radius: f64,
+    stop_radius: f64,
+    exit_pupil_distance: Option<f64>,
+    exit_pupil_radius: Option<f64>,
+    image_index: f64,
+    object_index: f64,
+    object_na: Option<f64>,
+    image_na: f64,
+    front_focal_distance: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct RejectedRay {
+    field: usize,
+    pupil: f64,
+    error: String,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Layout {
+    rays: Vec<Ray>,
+    field_indices: Vec<usize>,
+    rejected: Vec<RejectedRay>,
+}
+
 impl System {
     pub fn field_frame(&self, field: &Field) -> FieldFrame {
         let direction = if self.field_type == FieldType::Angle {
@@ -723,6 +811,9 @@ impl System {
         Ok(r * (ep_ref.a / ep.a).abs())
     }
     pub fn paraxial(&self, w: f64) -> Result<Value, String> {
+        serde_json::to_value(self.paraxial_report(w)?).map_err(|e| e.to_string())
+    }
+    pub(crate) fn paraxial_report(&self, w: f64) -> Result<Paraxial, String> {
         let (m, n) = self.matrix(w, 0, self.surfaces.len())?;
         let n0 = self.object_index(w)?;
         let entrance_distance = self.entrance_pupil_distance(w)?;
@@ -772,9 +863,26 @@ impl System {
         } else {
             None
         };
-        Ok(
-            json!({"efl":efl,"bfl":bfl,"f_number":f_number,"matrix":[m.a,m.b,m.c,m.d],"matrix_basis":"height, direction_sign * physical_index * dy/dz","image_direction":n.signum(),"image_distance":image_distance,"magnification":magnification,"entrance_pupil_distance":entrance_distance,"entrance_pupil_radius":r,"stop_radius":stop_radius,"exit_pupil_distance":exit_distance,"exit_pupil_radius":exit_radius,"image_index":n.abs(),"object_index":n0,"object_na":object_na,"image_na":image_na,"front_focal_distance":powered.then(||n0*m.d/m.c)}),
-        )
+        Ok(Paraxial {
+            efl,
+            bfl,
+            f_number,
+            matrix: [m.a, m.b, m.c, m.d],
+            matrix_basis: "height, direction_sign * physical_index * dy/dz",
+            image_direction: n.signum(),
+            image_distance,
+            magnification,
+            entrance_pupil_distance: entrance_distance,
+            entrance_pupil_radius: r,
+            stop_radius,
+            exit_pupil_distance: exit_distance,
+            exit_pupil_radius: exit_radius,
+            image_index: n.abs(),
+            object_index: n0,
+            object_na,
+            image_na,
+            front_focal_distance: powered.then(|| n0 * m.d / m.c),
+        })
     }
     fn object_point(&self, field: &Field, _w: f64) -> Result<V3, String> {
         let d = self.object_distance.ok_or("No finite object")?;
@@ -869,6 +977,9 @@ impl System {
         self.sample_pupil(field, w, sampling)?.json()
     }
     pub fn layout(&self) -> Value {
+        json!(self.layout_report())
+    }
+    pub(crate) fn layout_report(&self) -> Layout {
         let mut rays = vec![];
         let mut rejected = vec![];
         let mut field_indices = vec![];
@@ -881,11 +992,19 @@ impl System {
                         rays.push(r);
                         field_indices.push(fi);
                     }
-                    Err(e) => rejected.push(json!({"field":fi,"pupil":i as f64/3.,"error":e})),
+                    Err(e) => rejected.push(RejectedRay {
+                        field: fi,
+                        pupil: i as f64 / 3.,
+                        error: e,
+                    }),
                 }
             }
         }
-        json!({"rays":rays,"field_indices":field_indices,"rejected":rejected})
+        Layout {
+            rays,
+            field_indices,
+            rejected,
+        }
     }
 }
 #[cfg(test)]

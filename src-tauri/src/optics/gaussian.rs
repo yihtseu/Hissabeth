@@ -2,7 +2,7 @@
 // Paraxial Gaussian beam (q parameter) propagation through the system matrix
 // and Gaussian overlap fiber coupling. Unclipped, unaberrated, on-axis model.
 use super::{System, math::Matrix};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Clone, Copy)]
 struct Q {
@@ -54,15 +54,25 @@ impl Beam {
     fn radius(&self) -> f64 {
         self.q.radius(self.index, self.wavelength_mm)
     }
-    fn json(&self) -> Value {
+    fn image(&self) -> ImageBeam {
         let q = self.q;
         let waist = (self.wavelength_mm * q.im / (std::f64::consts::PI * self.index.abs())).sqrt();
-        json!({"radius":self.radius(),"curvature":q.curvature(),
-        "waist":waist,"waist_offset":-q.re,"rayleigh_range":q.im,
-        "divergence":self.wavelength_mm/(std::f64::consts::PI*self.index.abs()*waist)})
+        ImageBeam {
+            radius: self.radius(),
+            curvature: q.curvature(),
+            waist,
+            waist_offset: -q.re,
+            rayleigh_range: q.im,
+            divergence: self.wavelength_mm / (std::f64::consts::PI * self.index.abs() * waist),
+        }
     }
 }
-fn propagate(s: &System, w: f64, waist: f64, waist_z: f64) -> Result<(Vec<Value>, Beam), String> {
+fn propagate(
+    s: &System,
+    w: f64,
+    waist: f64,
+    waist_z: f64,
+) -> Result<(Vec<BeamSurface>, Beam), String> {
     if !waist.is_finite() || waist <= 0. {
         return Err("Input waist must be positive".into());
     }
@@ -85,8 +95,12 @@ fn propagate(s: &System, w: f64, waist: f64, waist_z: f64) -> Result<(Vec<Value>
             wavelength_mm,
         };
         let z: f64 = s.surfaces.iter().take(i).map(|s| s.thickness).sum();
-        table
-            .push(json!({"surface":i,"z":z,"radius":beam.radius(),"curvature":beam.q.curvature()}));
+        table.push(BeamSurface {
+            surface: i,
+            z,
+            radius: beam.radius(),
+            curvature: beam.q.curvature(),
+        });
     }
     let (m, n) = s.matrix(w, 0, s.surfaces.len())?;
     let last = s.surfaces.last().unwrap();
@@ -97,15 +111,79 @@ fn propagate(s: &System, w: f64, waist: f64, waist_z: f64) -> Result<(Vec<Value>
     };
     Ok((table, image))
 }
-pub fn gaussian_beam(s: &System, w: f64, waist: f64, waist_z: f64) -> Result<Value, String> {
-    let (table, image) = propagate(s, w, waist, waist_z)?;
-    Ok(
-        json!({"wavelength":w,"input":{"waist":waist,"waist_z":waist_z,
-        "rayleigh_range":std::f64::consts::PI*waist*waist*s.object_index(w)?/(w*1e-6)},
-        "surfaces":table,"image":image.json(),"units":"mm",
-        "model":"unclipped paraxial q-parameter propagation through the reduced system matrix; no aberration or aperture truncation"}),
-    )
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct InputWaist {
+    waist: f64,
+    waist_z: f64,
+    rayleigh_range: f64,
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct BeamSurface {
+    surface: usize,
+    z: f64,
+    radius: f64,
+    curvature: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ImageBeam {
+    radius: f64,
+    curvature: Option<f64>,
+    waist: f64,
+    waist_offset: f64,
+    rayleigh_range: f64,
+    divergence: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct GaussianBeam {
+    wavelength: f64,
+    input: InputWaist,
+    surfaces: Vec<BeamSurface>,
+    image: ImageBeam,
+    units: &'static str,
+    model: &'static str,
+}
+
+pub fn gaussian_beam(s: &System, w: f64, waist: f64, waist_z: f64) -> Result<Value, String> {
+    serde_json::to_value(gaussian_beam_report(s, w, waist, waist_z)?).map_err(|e| e.to_string())
+}
+pub(crate) fn gaussian_beam_report(
+    s: &System,
+    w: f64,
+    waist: f64,
+    waist_z: f64,
+) -> Result<GaussianBeam, String> {
+    let (table, image) = propagate(s, w, waist, waist_z)?;
+    Ok(GaussianBeam {
+        wavelength: w,
+        input: InputWaist {
+            waist,
+            waist_z,
+            rayleigh_range: std::f64::consts::PI * waist * waist * s.object_index(w)? / (w * 1e-6),
+        },
+        surfaces: table,
+        image: image.image(),
+        units: "mm",
+        model: "unclipped paraxial q-parameter propagation through the reduced system matrix; no aberration or aperture truncation",
+    })
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct FiberCoupling {
+    wavelength: f64,
+    mode_field_diameter: f64,
+    beam_radius: f64,
+    wavefront_curvature: Option<f64>,
+    efficiency: f64,
+    optimal_mode_field_diameter: f64,
+    optimal_efficiency: f64,
+    units: &'static str,
+    model: &'static str,
+}
+
 pub fn fiber_coupling(
     s: &System,
     w: f64,
@@ -113,6 +191,22 @@ pub fn fiber_coupling(
     waist_z: f64,
     mode_field_diameter: f64,
 ) -> Result<Value, String> {
+    serde_json::to_value(fiber_coupling_report(
+        s,
+        w,
+        waist,
+        waist_z,
+        mode_field_diameter,
+    )?)
+    .map_err(|e| e.to_string())
+}
+pub(crate) fn fiber_coupling_report(
+    s: &System,
+    w: f64,
+    waist: f64,
+    waist_z: f64,
+    mode_field_diameter: f64,
+) -> Result<FiberCoupling, String> {
     if !mode_field_diameter.is_finite() || mode_field_diameter <= 0. {
         return Err("Mode field diameter must be positive".into());
     }
@@ -138,13 +232,17 @@ pub fn fiber_coupling(
     };
     let optimal_efficiency =
         4. / ((beam / optimal_fiber + optimal_fiber / beam).powi(2) + optimal_phase);
-    Ok(
-        json!({"wavelength":w,"mode_field_diameter":mode_field_diameter,"beam_radius":beam,
-        "wavefront_curvature":image.q.curvature(),"efficiency":efficiency,
-        "optimal_mode_field_diameter":2.*optimal_fiber,"optimal_efficiency":optimal_efficiency,
-        "units":"mm",
-        "model":"Gaussian overlap at the stored image plane; fiber mode is a flat-phase Gaussian; no offsets, tilt or aberration"}),
-    )
+    Ok(FiberCoupling {
+        wavelength: w,
+        mode_field_diameter,
+        beam_radius: beam,
+        wavefront_curvature: image.q.curvature(),
+        efficiency,
+        optimal_mode_field_diameter: 2. * optimal_fiber,
+        optimal_efficiency,
+        units: "mm",
+        model: "Gaussian overlap at the stored image plane; fiber mode is a flat-phase Gaussian; no offsets, tilt or aberration",
+    })
 }
 
 #[cfg(test)]

@@ -7,18 +7,28 @@ pub const D_LINE: f64 = 587.5618;
 pub const F_LINE: f64 = 486.1327;
 pub const C_LINE: f64 = 656.2725;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Glass {
     pub name: String,
     pub catalog: String,
+    #[schemars(range(min = 1, max = 13))]
     pub formula: u8,
+    #[schemars(length(min = 0, max = 20), inner(range(min = -1e15, max = 1e15)))]
     pub coefficients: Vec<f64>,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub nd: f64,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub vd: f64,
+    #[schemars(
+        schema_with = "schemars::SchemaGenerator::subschema_for::<Option<[f64; 2]>>",
+        inner(range(min = 0.0, max = 100.0))
+    )]
     pub wavelength_range: Option<[f64; 2]>, // micrometers
-    pub thermal: Option<[f64; 7]>,          // D0,D1,D2,E0,E1,Ltk,Tref
-    pub transmission: Vec<[f64; 3]>,        // micrometers, internal transmission, thickness mm
+    #[schemars(schema_with = "schemars::SchemaGenerator::subschema_for::<Option<[f64; 7]>>", inner(range(min = -1e15, max = 1e15)))]
+    pub thermal: Option<[f64; 7]>, // D0,D1,D2,E0,E1,Ltk,Tref
+    #[schemars(length(min = 0, max = 10000), inner(inner(range(min = -1e15, max = 1e15))))]
+    pub transmission: Vec<[f64; 3]>, // micrometers, internal transmission, thickness mm
     pub comment: String,
 }
 
@@ -205,7 +215,7 @@ impl Glass {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct CatalogWarning {
     pub catalog: String,
     pub glass: String,

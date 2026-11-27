@@ -6,27 +6,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bench {
     pub name: String,
+    #[schemars(inner(range(min = 1e-09, max = 1e6)))]
     pub table_size: [f64; 2],
+    #[schemars(range(min = 1e-09, max = 1e6))]
     pub hole_pitch: f64,
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub origin: V3,
+    #[schemars(length(min = 0, max = 128))]
     pub elements: Vec<Element>,
+    #[schemars(length(min = 1, max = 16))]
     pub sources: Vec<Source>,
+    #[schemars(length(min = 0, max = 384))]
     pub connections: Vec<Connection>,
+    #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub min_power: f64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
     pub part: String,
+    #[schemars(inner(range(min = 1e-09, max = 1e5)))]
     pub base_size: [f64; 2],
+    #[schemars(inner(range(min = 0.0, max = 1e6)))]
     pub height_range: [f64; 2],
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Mirror,
@@ -41,23 +51,32 @@ pub enum Kind {
     Aperture,
     Blocker,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Element {
     pub id: String,
     pub label: String,
     pub kind: Kind,
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub position: V3,
     /// Degrees: [roll about X, pitch about Y, yaw about Z].
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub rotation: V3,
+    #[schemars(range(min = 1e-09, max = 1e5))]
     pub aperture: f64,
+    #[schemars(range(min = 1e-09, max = 1e5))]
     pub body_radius: f64,
+    #[schemars(range(min = -1e6, max = 1e6))]
     pub focal_length: f64,
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub reflectance: f64,
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub transmittance: f64,
+    #[schemars(schema_with = "schemars::SchemaGenerator::subschema_for::<Option<Mount>>")]
     pub mount: Option<Mount>,
     /// Splitter substrate index; replaces scalar R/T with Fresnel splitting.
     #[serde(default)]
+    #[schemars(range(min = 1.0, max = 4.0))]
     pub index: Option<f64>,
     /// Thin-film stack on a mirror or splitter face, replacing scalar R/T.
     #[serde(default)]
@@ -67,41 +86,67 @@ pub struct Element {
     pub scatter: Option<Scatter>,
     /// Lens group: internal Fresnel ghost bounces to enumerate (0-2).
     #[serde(default)]
+    #[schemars(range(min = 0, max = 2))]
     pub ghosts: usize,
     /// Detector irradiance map resolution [columns, rows].
     #[serde(default)]
+    #[schemars(inner(range(min = 2, max = 128)))]
     pub pixels: Option<[usize; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 10.0))]
     pub retardance_waves: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -360.0, max = 360.0))]
     pub fast_axis_deg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1.0, max = 1e9))]
     pub extinction_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 10.0, max = 500.0))]
     pub screw_tpi: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 2.0, max = 200.0))]
     pub lever_arm_mm: Option<f64>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Coating {
+    #[schemars(length(min = 0, max = 32))]
     pub layers: Vec<Layer>,
+    #[schemars(range(min = 1.0, max = 4.0))]
     pub substrate_index: f64,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
+    #[schemars(range(min = 1.0, max = 4.0))]
     pub index: f64,
     /// Film thickness in nm.
+    #[schemars(range(min = 0.0, max = 1e5))]
     pub thickness: f64,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "model", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
 pub enum Scatter {
-    Lambertian { fraction: f64, rays: usize },
-    Abg { a: f64, b: f64, g: f64, rays: usize },
+    Lambertian {
+        #[schemars(range(min = 0.0, max = 1.0))]
+        fraction: f64,
+        #[schemars(range(min = 1, max = 64))]
+        rays: usize,
+    },
+    Abg {
+        #[schemars(range(min = 0.0, max = 1000.0))]
+        a: f64,
+        #[schemars(extend("maximum" = 1000.0, "exclusiveMinimum" = 0.0))]
+        b: f64,
+        #[schemars(extend("maximum" = 10.0, "exclusiveMinimum" = 0.0))]
+        g: f64,
+        #[schemars(range(min = 1, max = 64))]
+        rays: usize,
+    },
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Polarization {
     Unpolarized {},
@@ -115,29 +160,38 @@ pub enum Polarization {
         angle_deg: f64,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     pub id: String,
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub position: V3,
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub direction: V3,
+    #[schemars(range(min = 100.0, max = 20000.0))]
     pub wavelength: f64,
+    #[schemars(range(min = 1e-12, max = 1e6))]
     pub power: f64,
+    #[schemars(range(min = 0.0, max = 1e5))]
     pub beam_radius: f64,
+    #[schemars(range(min = 0, max = 8))]
     pub rings: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     pub waist: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waist_offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("minimum" = 1.0))]
     pub m2: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polarization: Option<Polarization>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
     pub from: String,
+    #[schemars(extend("enum" = ["out", "reflected", "transmitted"]))]
     pub port: String,
     pub to: String,
 }
@@ -439,7 +493,7 @@ impl Bench {
         Ok(())
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Segment {
     pub source: String,
     pub branch: String,
@@ -451,7 +505,7 @@ pub struct Segment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jones: Option<[[f64; 2]; 2]>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Termination {
     pub source: String,
     pub branch: String,
@@ -460,7 +514,7 @@ pub struct Termination {
     pub power: f64,
     pub reason: String,
 }
-#[derive(Default, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Default, Debug, Serialize)]
 pub struct Ledger {
     pub launched: f64,
     pub detected: f64,
@@ -469,7 +523,7 @@ pub struct Ledger {
     pub escaped: f64,
     pub truncated: f64,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct DetectorMap {
     pub id: String,
     pub bins: [usize; 2],
@@ -482,7 +536,7 @@ pub struct DetectorMap {
     pub centroid: [f64; 2],
     pub rms: [f64; 2],
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct Trace {
     pub segments: Vec<Segment>,
     pub terminations: Vec<Termination>,
@@ -1429,6 +1483,9 @@ impl Bench {
         Ok(out)
     }
     pub fn assembly(&self) -> Value {
+        json!(self.assembly_report())
+    }
+    pub(crate) fn assembly_report(&self) -> Assembly {
         let mut warnings = vec![];
         let mut bom: HashMap<String, usize> = HashMap::new();
         let items:Vec<_>=self.elements.iter().map(|e| {
@@ -1443,7 +1500,7 @@ impl Bench {
             }
             let part=e.mount.as_ref().map(|m|m.part.as_str()).unwrap_or("unspecified");
             *bom.entry(format!("{:?} / {}",e.kind,part)).or_default()+=1;
-            json!({"id":e.id,"label":e.label,"kind":e.kind,"position":p,"rotation":e.rotation,"normal":rotate([1.,0.,0.],e.rotation),"hole":holes,"hole_offset":[p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch],"mount":e.mount,"lens_model":match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None }})
+            AssemblyElement { id: e.id.clone(), label: e.label.clone(), kind: e.kind, position: p, rotation: e.rotation, normal: rotate([1.,0.,0.],e.rotation), hole: holes, hole_offset: [p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch], mount: e.mount.clone(), lens_model: match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None } }
         }).collect();
         for (i, a) in self.elements.iter().enumerate() {
             for b in &self.elements[i + 1..] {
@@ -1479,10 +1536,102 @@ impl Bench {
             .map(|e| (e.id.as_str(), e.position))
             .chain(self.sources.iter().map(|s| (s.id.as_str(), s.position)))
             .collect();
-        let connections:Vec<_>=self.connections.iter().map(|c|json!({"from":c.from,"port":c.port,"to":c.to,"distance_mm":norm(sub(positions[c.from.as_str()],positions[c.to.as_str()]))})).collect();
-        let sources:Vec<_>=self.sources.iter().map(|s|json!({"id":s.id,"position":sub(s.position,self.origin),"direction":unit(s.direction).unwrap_or([0.;3]),"wavelength":s.wavelength,"power":s.power,"mount":null})).collect();
-        json!({"name":self.name,"units":{"length":"mm","angle":"degrees","wavelength":"nm","power":"relative source units"},"axes":"table XY; Z height; rotations [roll,pitch,yaw], Rz Ry Rx; local normal +X","origin":self.origin,"hole_pitch":self.hole_pitch,"items":items,"sources":sources,"bom":parts,"connections":connections,"warnings":warnings,"scope":"geometric rays; ideal thin lenses and current-prescription lens groups; scalar group/splitter power; upright mount boxes; connection distances join component centers"})
+        let connections: Vec<_> = self
+            .connections
+            .iter()
+            .map(|c| AssemblyConnection {
+                from: c.from.clone(),
+                port: c.port.clone(),
+                to: c.to.clone(),
+                distance_mm: norm(sub(positions[c.from.as_str()], positions[c.to.as_str()])),
+            })
+            .collect();
+        let sources: Vec<_> = self
+            .sources
+            .iter()
+            .map(|s| AssemblySource {
+                id: s.id.clone(),
+                position: sub(s.position, self.origin),
+                direction: unit(s.direction).unwrap_or([0.; 3]),
+                wavelength: s.wavelength,
+                power: s.power,
+                mount: (),
+            })
+            .collect();
+        Assembly {
+            name: self.name.clone(),
+            units: AssemblyUnits {
+                length: "mm",
+                angle: "degrees",
+                wavelength: "nm",
+                power: "relative source units",
+            },
+            axes: "table XY; Z height; rotations [roll,pitch,yaw], Rz Ry Rx; local normal +X",
+            origin: self.origin,
+            hole_pitch: self.hole_pitch,
+            items,
+            sources,
+            bom: parts,
+            connections,
+            warnings,
+            scope: "geometric rays; ideal thin lenses and current-prescription lens groups; scalar group/splitter power; upright mount boxes; connection distances join component centers",
+        }
     }
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AssemblyUnits {
+    length: &'static str,
+    angle: &'static str,
+    wavelength: &'static str,
+    power: &'static str,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AssemblyElement {
+    id: String,
+    label: String,
+    kind: Kind,
+    position: [f64; 3],
+    rotation: [f64; 3],
+    normal: [f64; 3],
+    hole: [f64; 2],
+    hole_offset: [f64; 2],
+    mount: Option<Mount>,
+    lens_model: Option<&'static str>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AssemblySource {
+    id: String,
+    position: [f64; 3],
+    direction: [f64; 3],
+    wavelength: f64,
+    power: f64,
+    mount: (),
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AssemblyConnection {
+    from: String,
+    port: String,
+    to: String,
+    distance_mm: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Assembly {
+    name: String,
+    units: AssemblyUnits,
+    axes: &'static str,
+    origin: [f64; 3],
+    hole_pitch: f64,
+    items: Vec<AssemblyElement>,
+    sources: Vec<AssemblySource>,
+    bom: Vec<(String, usize)>,
+    connections: Vec<AssemblyConnection>,
+    warnings: Vec<String>,
+    scope: &'static str,
 }
 
 #[cfg(test)]

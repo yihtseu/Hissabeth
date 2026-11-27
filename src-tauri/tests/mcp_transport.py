@@ -1235,20 +1235,23 @@ import json, os, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 base = Path(os.environ["HISSABETH_AGENT_TEST_ROOT"])
-state = base / (name + ".json")
+state = base / (".claude.json" if name == "claude" else "codex.json")
+entries = json.loads(state.read_text())["mcpServers"] if state.exists() else {}
 with (base / "commands.jsonl").open("a") as log:
     log.write(json.dumps({"name": name, "args": sys.argv[1:]}) + "\n")
 operation = sys.argv[2]
-if operation == "get":
-    if not state.exists(): sys.exit(1)
-    print(state.read_text())
+if operation == "list":
+    print(json.dumps([{"name": key, "transport": value} for key, value in entries.items()]))
 elif operation == "remove":
-    state.unlink(missing_ok=True)
+    entries.pop(sys.argv[-1], None)
+    state.write_text(json.dumps({"mcpServers": entries}))
 elif operation == "add":
     arguments = sys.argv[1:]
     separator = arguments.index("--")
     command = arguments[separator+1]
-    state.write_text(json.dumps({"command": command, "args": arguments[separator+2:], "env": arguments[arguments.index("--env")+1]}))
+    env_key, env_value = arguments[arguments.index("--env") + 1].split("=", 1)
+    entries[arguments[2]] = {"command": command, "args": arguments[separator+2:], "env": {env_key: env_value}}
+    state.write_text(json.dumps({"mcpServers": entries}))
     print("Registered")
 else:
     sys.exit(2)
@@ -1257,9 +1260,9 @@ else:
         file = fake_dir / name
         file.write_text(fake_program)
         file.chmod(0o755)
-        (fake_dir / (name + ".json")).unlink(missing_ok=True)
+        (fake_dir / (".claude.json" if name == "claude" else "codex.json")).unlink(missing_ok=True)
     (fake_dir / "commands.jsonl").unlink(missing_ok=True)
-    registration_env = dict(ENV, PATH=str(fake_dir) + os.pathsep + os.environ["PATH"], HISSABETH_AGENT_TEST_ROOT=str(fake_dir))
+    registration_env = dict(ENV, PATH=str(fake_dir) + os.pathsep + os.environ["PATH"], HISSABETH_AGENT_TEST_ROOT=str(fake_dir), CLAUDE_CONFIG_DIR=str(fake_dir))
     for _ in range(2):
         registration = json.loads(subprocess.run([str(BINARY), "--configure-agents"], env=registration_env, capture_output=True, text=True, check=True, timeout=15).stdout)
         assert len(registration) == 2 and all(r["success"] for r in registration), registration

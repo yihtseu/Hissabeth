@@ -3,14 +3,24 @@
 use super::{Interaction, Surface, System, solve::GapSolve};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    Insert { before: usize, count: usize },
-    Remove { first: usize, count: usize },
+    Insert {
+        #[schemars(range(min = 0, max = 128))]
+        before: usize,
+        #[schemars(range(min = 1, max = 128))]
+        count: usize,
+    },
+    Remove {
+        #[schemars(range(min = 0, max = 127))]
+        first: usize,
+        #[schemars(range(min = 1, max = 128))]
+        count: usize,
+    },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct Edit {
     pub system: System,
     pub old_to_new: Vec<Option<usize>>,

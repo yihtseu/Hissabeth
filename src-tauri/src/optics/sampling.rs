@@ -2,11 +2,17 @@
 // Normalized nominal-pupil quadratures for geometric ray analyses.
 use super::*;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PupilSampling {
-    Grid { count: usize },
-    Hexapolar { rings: usize },
+    Grid {
+        #[schemars(range(min = 3, max = 129))]
+        count: usize,
+    },
+    Hexapolar {
+        #[schemars(range(min = 1, max = 64))]
+        rings: usize,
+    },
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PupilPoint {
@@ -96,6 +102,9 @@ impl RayBundle {
         Ok(center)
     }
     pub fn json(&self) -> Result<Value, String> {
+        serde_json::to_value(self.spot()?).map_err(|e| e.to_string())
+    }
+    pub(crate) fn spot(&self) -> Result<Spot, String> {
         let center = self.centroid()?;
         let mut variance = 0.;
         let mut radius = 0_f64;
@@ -104,13 +113,21 @@ impl RayBundle {
             variance += weight * r * r;
             radius = radius.max(r);
         }
-        Ok(
-            json!({"sampling":self.sampling,"points":self.points,"weights":self.weights,
-            "sampled_rays":self.sampled_rays,"transmitted_weight":self.transmitted_weight(),
-            "centroid":center,"rms_radius":(variance/self.transmitted_weight()).sqrt(),"geometric_radius":radius,
-            "blocked":self.blocked,"missed":self.missed,"total_internal_reflection":self.total_internal_reflection,
-            "backend":"cpu","units":"mm"}),
-        )
+        Ok(Spot {
+            sampling: self.sampling,
+            points: self.points.clone(),
+            weights: self.weights.clone(),
+            sampled_rays: self.sampled_rays,
+            transmitted_weight: self.transmitted_weight(),
+            centroid: center,
+            rms_radius: (variance / self.transmitted_weight()).sqrt(),
+            geometric_radius: radius,
+            blocked: self.blocked,
+            missed: self.missed,
+            total_internal_reflection: self.total_internal_reflection,
+            backend: "cpu",
+            units: "mm",
+        })
     }
 }
 impl System {
@@ -167,10 +184,13 @@ impl System {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Spectrum {
-    Monochromatic { wavelength: f64 },
+    Monochromatic {
+        #[schemars(range(min = 100.0, max = 20000.0))]
+        wavelength: f64,
+    },
     Polychromatic {},
 }
 impl Spectrum {
@@ -198,7 +218,7 @@ impl Spectrum {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct SpectralComponent {
     pub wavelength: f64,
     pub weight: f64,
@@ -259,6 +279,23 @@ impl System {
         }
         Ok((combined, components))
     }
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Spot {
+    sampling: PupilSampling,
+    points: Vec<[f64; 2]>,
+    weights: Vec<f64>,
+    sampled_rays: usize,
+    transmitted_weight: f64,
+    centroid: [f64; 2],
+    rms_radius: f64,
+    geometric_radius: f64,
+    blocked: usize,
+    missed: usize,
+    total_internal_reflection: usize,
+    backend: &'static str,
+    units: &'static str,
 }
 
 #[cfg(test)]

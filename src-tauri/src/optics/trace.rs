@@ -3,7 +3,7 @@
 use super::*;
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum FailureKind {
     Invalid,

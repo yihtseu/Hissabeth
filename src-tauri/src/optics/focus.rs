@@ -3,7 +3,7 @@
 use super::*;
 use trace::TraceOptions;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct FocusFailure {
     stage: &'static str,
     kind: &'static str,
@@ -24,7 +24,7 @@ impl FocusFailure {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Serialize)]
 pub struct FocusValue {
     pub focus_z: Option<f64>,
     pub shift: Option<f64>,
@@ -251,11 +251,51 @@ pub fn chief_foci(s: &System, field: &Field, w: f64) -> FocalPair {
     }
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct FieldFocus {
+    fraction: f64,
+    field: [f64; 2],
+    radius: f64,
+    sagittal: FocusValue,
+    tangential: FocusValue,
+    chief_image: Option<V3>,
+    frame: FieldFrame,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct FieldCurve {
+    wavelength_index: usize,
+    wavelength: f64,
+    weight: f64,
+    color: [f64; 4],
+    points: Vec<FieldFocus>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct FieldCurvature {
+    field_end: [f64; 2],
+    max_field: f64,
+    samples: usize,
+    field_type: FieldType,
+    field_units: &'static str,
+    image_vertex: f64,
+    curves: Vec<FieldCurve>,
+    units: &'static str,
+    model: &'static str,
+}
+
 pub fn field_curvature(
     s: &System,
     field_end: Option<[f64; 2]>,
     samples: usize,
 ) -> Result<Value, String> {
+    serde_json::to_value(field_curvature_report(s, field_end, samples)?).map_err(|e| e.to_string())
+}
+pub(crate) fn field_curvature_report(
+    s: &System,
+    field_end: Option<[f64; 2]>,
+    samples: usize,
+) -> Result<FieldCurvature, String> {
     if !(2..=257).contains(&samples) {
         return Err("Field samples must be 2–257".into());
     }
@@ -268,21 +308,49 @@ pub fn field_curvature(
     }
     let mut curves = vec![];
     for (index, w) in s.wavelengths.iter().enumerate() {
-        let points:Vec<_> = (0..samples).map(|i| {
-            let fraction = i as f64/(samples-1) as f64;
-            let field = Field {x:end[0]*fraction,y:end[1]*fraction,..Field::meridional(0.)};
-            let pair = chief_foci(s,&field,w.value);
-            json!({"fraction":fraction,"field":[field.x,field.y],"radius":field.x.hypot(field.y),
-                "sagittal":pair.sagittal,"tangential":pair.tangential,"chief_image":pair.chief_image,"frame":pair.frame})
-        }).collect();
-        curves.push(json!({"wavelength_index":index,"wavelength":w.value,"weight":w.weight,"color":w.color,"points":points}));
+        let points: Vec<_> = (0..samples)
+            .map(|i| {
+                let fraction = i as f64 / (samples - 1) as f64;
+                let field = Field {
+                    x: end[0] * fraction,
+                    y: end[1] * fraction,
+                    ..Field::meridional(0.)
+                };
+                let pair = chief_foci(s, &field, w.value);
+                FieldFocus {
+                    fraction,
+                    field: [field.x, field.y],
+                    radius: field.x.hypot(field.y),
+                    sagittal: pair.sagittal,
+                    tangential: pair.tangential,
+                    chief_image: pair.chief_image,
+                    frame: pair.frame,
+                }
+            })
+            .collect();
+        curves.push(FieldCurve {
+            wavelength_index: index,
+            wavelength: w.value,
+            weight: w.weight,
+            color: w.color,
+            points,
+        });
     }
-    Ok(
-        json!({"field_end":end,"max_field":end[0].hypot(end[1]),"samples":samples,
-        "field_type":s.field_type,"field_units":if s.field_type==FieldType::Angle {"degrees"} else {"mm"},
-        "image_vertex":s.surfaces.iter().map(|v|v.thickness).sum::<f64>(),"curves":curves,"units":"mm",
-        "model":"Analytic infinitesimal bundles along each real chief ray, differentiating surface intersections, normals, Snell refraction and reflection. Focus z and shift use global axial coordinates; every shift is relative to the stored image vertex, including curved images. Physical apertures check the chief only; off-chief bundle clipping is not modeled. All stored wavelengths are diagnostic, including duplicate and zero-weight entries. Temporary fields have zero vignetting and follow the saved pupil mapping."}),
-    )
+    Ok(FieldCurvature {
+        field_end: end,
+        max_field: end[0].hypot(end[1]),
+        samples,
+        field_type: s.field_type,
+        field_units: if s.field_type == FieldType::Angle {
+            "degrees"
+        } else {
+            "mm"
+        },
+        image_vertex: s.surfaces.iter().map(|v| v.thickness).sum::<f64>(),
+        curves,
+        units: "mm",
+        model: "Analytic infinitesimal bundles along each real chief ray, differentiating surface intersections, normals, Snell refraction and reflection. Focus z and shift use global axial coordinates; every shift is relative to the stored image vertex, including curved images. Physical apertures check the chief only; off-chief bundle clipping is not modeled. All stored wavelengths are diagnostic, including duplicate and zero-weight entries. Temporary fields have zero vignetting and follow the saved pupil mapping.",
+    })
 }
 
 #[cfg(test)]

@@ -2,25 +2,34 @@
 // Persistent gap constraints derived from Geopter's solve subsystem.
 use super::*;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GapSolve {
     Fixed {},
     Pickup {
+        #[schemars(range(min = 0, max = 127))]
         source: usize,
+        #[schemars(range(min = -1e15, max = 1e15))]
         scale: f64,
+        #[schemars(range(min = -1e15, max = 1e15))]
         offset: f64,
     },
     EdgeThickness {
+        #[schemars(range(min = 0.0, max = 1e6))]
         height: f64,
+        #[schemars(range(min = -1e15, max = 1e15))]
         value: f64,
     },
     OverallLength {
+        #[schemars(range(min = 0, max = 127))]
         first: usize,
+        #[schemars(range(min = 1, max = 128))]
         last: usize,
+        #[schemars(range(min = -1e15, max = 1e15))]
         value: f64,
     },
     MarginalHeight {
+        #[schemars(range(min = -1e15, max = 1e15))]
         value: f64,
         zone: f64,
     },
@@ -421,25 +430,53 @@ pub fn autofocus(system: &System, w: f64) -> Result<System, String> {
     next.update_semi_diameters()?;
     Ok(next)
 }
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct State {
+    gap: usize,
+    thickness: f64,
+    definition: GapSolve,
+}
+
 pub fn state(s: &System, gap: usize) -> Value {
-    json!({"gap":gap,"thickness":s.surfaces[gap].thickness,"definition":s.surfaces[gap].gap_solve})
+    json!(state_report(s, gap))
+}
+
+fn state_report(s: &System, gap: usize) -> State {
+    State {
+        gap,
+        thickness: s.surfaces[gap].thickness,
+        definition: s.surfaces[gap].gap_solve,
+    }
 }
 pub fn states(s: &System) -> Vec<Value> {
+    state_reports(s).iter().map(|state| json!(state)).collect()
+}
+
+pub(crate) fn state_reports(s: &System) -> Vec<State> {
     s.surfaces
         .iter()
         .enumerate()
         .filter(|(_, g)| !g.gap_solve.is_fixed())
-        .map(|(i, _)| state(s, i))
+        .map(|(i, _)| state_report(s, i))
         .collect()
 }
 pub fn apply(system: &System, gap: usize, definition: GapSolve) -> Result<(System, Value), String> {
+    let (system, state) = apply_solve(system, gap, definition)?;
+    Ok((system, json!(state)))
+}
+
+pub(crate) fn apply_solve(
+    system: &System,
+    gap: usize,
+    definition: GapSolve,
+) -> Result<(System, State), String> {
     if gap >= system.surfaces.len() {
         return Err("Gap index outside prescription".into());
     }
     let mut next = system.clone();
     next.surfaces[gap].gap_solve = definition;
     next.update()?;
-    let result = state(&next, gap);
+    let result = state_report(&next, gap);
     Ok((next, result))
 }
 

@@ -2,9 +2,100 @@
 // Bounded in-memory revision history stack and Before/After optical diff.
 use crate::optics::{PupilSampling, System, analysis};
 use serde::Serialize;
-use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub(super) struct HistoryList {
+    current_revision: u64,
+    cursor: usize,
+    can_undo: bool,
+    can_redo: bool,
+    entries: Vec<HistorySummary>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct Metrics {
+    name: String,
+    surfaces: usize,
+    total_track: f64,
+    efl: Option<f64>,
+    bfl: Option<f64>,
+    f_number: Option<f64>,
+    rms_spot_mm: Vec<Option<f64>>,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+struct ComparedEntry {
+    index: usize,
+    revision: u64,
+    action: String,
+    timestamp_ms: u64,
+    metrics: Metrics,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+struct Deltas {
+    total_track: f64,
+    efl: Option<f64>,
+    bfl: Option<f64>,
+    f_number: Option<f64>,
+    rms_spot_mm: Vec<Option<f64>>,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum SurfaceChange {
+    Modified {
+        surface: usize,
+        changes: Vec<FieldChange>,
+    },
+    Added {
+        surface: usize,
+        label: String,
+    },
+    Removed {
+        surface: usize,
+        label: String,
+    },
+}
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(tag = "field", rename_all = "snake_case")]
+enum FieldChange {
+    Radius {
+        before: f64,
+        after: f64,
+    },
+    Thickness {
+        before: f64,
+        after: f64,
+    },
+    Conic {
+        before: f64,
+        after: f64,
+    },
+    Aperture {
+        before: f64,
+        after: f64,
+    },
+    Material {
+        before: String,
+        after: String,
+    },
+    Asphere {
+        before: bool,
+        after: bool,
+    },
+    Transform {
+        before: Option<crate::optics::CoordinateTransform>,
+        after: Option<crate::optics::CoordinateTransform>,
+    },
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub(super) struct Comparison {
+    from: ComparedEntry,
+    to: ComparedEntry,
+    deltas: Deltas,
+    surface_changes: Vec<SurfaceChange>,
+}
 
 const MAX_HISTORY: usize = 64;
 
@@ -17,7 +108,7 @@ pub struct HistoryEntry {
     pub linked_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct HistorySummary {
     pub index: usize,
     pub revision: u64,
@@ -130,18 +221,15 @@ impl History {
 
     pub fn pair(
         &self,
-        args: &Value,
+        from: Option<usize>,
+        to: Option<usize>,
     ) -> Result<(&HistoryEntry, &HistoryEntry, usize, usize), String> {
-        let from = args["from_index"]
-            .as_u64()
-            .map_or(self.cursor.saturating_sub(1), |i| i as usize);
-        let to = args["to_index"]
-            .as_u64()
-            .map_or(self.cursor, |i| i as usize);
+        let from = from.unwrap_or(self.cursor.saturating_sub(1));
+        let to = to.unwrap_or(self.cursor);
         Ok((self.entry(from)?, self.entry(to)?, from, to))
     }
 
-    pub fn list(&self, current_revision: u64) -> Value {
+    pub fn list(&self, current_revision: u64) -> HistoryList {
         let items: Vec<HistorySummary> = self
             .entries
             .iter()
@@ -156,17 +244,17 @@ impl History {
                 current: i == self.cursor,
             })
             .collect();
-        json!({
-            "current_revision": current_revision,
-            "cursor": self.cursor,
-            "can_undo": self.can_undo(),
-            "can_redo": self.can_redo(),
-            "entries": items,
-        })
+        HistoryList {
+            current_revision,
+            cursor: self.cursor,
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+            entries: items,
+        }
     }
 }
 
-fn metrics(system: &System) -> Value {
+fn metrics(system: &System) -> Metrics {
     let resolved = system.resolved().unwrap_or_else(|_| system.clone());
     let w = resolved.reference();
     let p = resolved.paraxial(w).ok();
@@ -180,15 +268,15 @@ fn metrics(system: &System) -> Value {
                 .and_then(|v| v["rms_radius"].as_f64())
         })
         .collect();
-    json!({
-        "name": resolved.name,
-        "surfaces": resolved.surfaces.len(),
-        "total_track": resolved.surfaces.iter().map(|s| s.thickness).sum::<f64>(),
-        "efl": p.as_ref().and_then(|v| v["efl"].as_f64()),
-        "bfl": p.as_ref().and_then(|v| v["bfl"].as_f64()),
-        "f_number": p.as_ref().and_then(|v| v["f_number"].as_f64()),
-        "rms_spot_mm": spots,
-    })
+    Metrics {
+        name: resolved.name,
+        surfaces: resolved.surfaces.len(),
+        total_track: resolved.surfaces.iter().map(|s| s.thickness).sum::<f64>(),
+        efl: p.as_ref().and_then(|v| v["efl"].as_f64()),
+        bfl: p.as_ref().and_then(|v| v["bfl"].as_f64()),
+        f_number: p.as_ref().and_then(|v| v["f_number"].as_f64()),
+        rms_spot_mm: spots,
+    }
 }
 
 pub fn compare(
@@ -196,14 +284,11 @@ pub fn compare(
     to: &HistoryEntry,
     from_index: usize,
     to_index: usize,
-) -> Value {
+) -> Comparison {
     let m_from = metrics(&from.system);
     let m_to = metrics(&to.system);
 
-    let sub_opt = |a: &Value, b: &Value| match (a.as_f64(), b.as_f64()) {
-        (Some(x), Some(y)) => json!(y - x),
-        _ => Value::Null,
-    };
+    let delta = |a: Option<f64>, b: Option<f64>| Some(b? - a?);
 
     let mut surface_changes = vec![];
     let max_len = from.system.surfaces.len().max(to.system.surfaces.len());
@@ -212,75 +297,93 @@ pub fn compare(
             (Some(a), Some(b)) => {
                 let mut diffs = vec![];
                 if (a.radius - b.radius).abs() > 1e-12 {
-                    diffs.push(json!({"field":"radius","before":a.radius,"after":b.radius}));
+                    diffs.push(FieldChange::Radius {
+                        before: a.radius,
+                        after: b.radius,
+                    });
                 }
                 if (a.thickness - b.thickness).abs() > 1e-12 {
-                    diffs.push(
-                        json!({"field":"thickness","before":a.thickness,"after":b.thickness}),
-                    );
+                    diffs.push(FieldChange::Thickness {
+                        before: a.thickness,
+                        after: b.thickness,
+                    });
                 }
                 if a.material != b.material {
-                    diffs.push(json!({"field":"material","before":a.material,"after":b.material}));
+                    diffs.push(FieldChange::Material {
+                        before: a.material.clone(),
+                        after: b.material.clone(),
+                    });
                 }
                 if (a.conic - b.conic).abs() > 1e-12 {
-                    diffs.push(json!({"field":"conic","before":a.conic,"after":b.conic}));
+                    diffs.push(FieldChange::Conic {
+                        before: a.conic,
+                        after: b.conic,
+                    });
                 }
                 if (a.aperture - b.aperture).abs() > 1e-12 {
-                    diffs.push(json!({"field":"aperture","before":a.aperture,"after":b.aperture}));
+                    diffs.push(FieldChange::Aperture {
+                        before: a.aperture,
+                        after: b.aperture,
+                    });
                 }
                 if a.even != b.even || a.odd != b.odd {
-                    diffs.push(json!({"field":"asphere","before":true,"after":true}));
+                    diffs.push(FieldChange::Asphere {
+                        before: true,
+                        after: true,
+                    });
                 }
                 if a.transform != b.transform {
-                    diffs.push(
-                        json!({"field":"transform","before":a.transform,"after":b.transform}),
-                    );
+                    diffs.push(FieldChange::Transform {
+                        before: a.transform.clone(),
+                        after: b.transform.clone(),
+                    });
                 }
                 if !diffs.is_empty() {
-                    surface_changes
-                        .push(json!({"surface": i, "status": "modified", "changes": diffs}));
+                    surface_changes.push(SurfaceChange::Modified {
+                        surface: i,
+                        changes: diffs,
+                    });
                 }
             }
             (None, Some(b)) => {
-                surface_changes.push(json!({"surface": i, "status": "added", "label": b.label}));
+                surface_changes.push(SurfaceChange::Added {
+                    surface: i,
+                    label: b.label.clone(),
+                });
             }
             (Some(a), None) => {
-                surface_changes.push(json!({"surface": i, "status": "removed", "label": a.label}));
+                surface_changes.push(SurfaceChange::Removed {
+                    surface: i,
+                    label: a.label.clone(),
+                });
             }
             (None, None) => {}
         }
     }
 
-    let spot_deltas: Vec<Value> = match (
-        m_from["rms_spot_mm"].as_array(),
-        m_to["rms_spot_mm"].as_array(),
-    ) {
-        (Some(a), Some(b)) => a.iter().zip(b.iter()).map(|(x, y)| sub_opt(x, y)).collect(),
-        _ => vec![],
+    let deltas = Deltas {
+        total_track: m_to.total_track - m_from.total_track,
+        efl: delta(m_from.efl, m_to.efl),
+        bfl: delta(m_from.bfl, m_to.bfl),
+        f_number: delta(m_from.f_number, m_to.f_number),
+        rms_spot_mm: m_from
+            .rms_spot_mm
+            .iter()
+            .zip(&m_to.rms_spot_mm)
+            .map(|(&a, &b)| delta(a, b))
+            .collect(),
     };
-
-    json!({
-        "from": {
-            "index": from_index,
-            "revision": from.revision,
-            "action": from.action,
-            "timestamp_ms": from.timestamp_ms,
-            "metrics": m_from,
-        },
-        "to": {
-            "index": to_index,
-            "revision": to.revision,
-            "action": to.action,
-            "timestamp_ms": to.timestamp_ms,
-            "metrics": m_to,
-        },
-        "deltas": {
-            "efl": sub_opt(&m_from["efl"], &m_to["efl"]),
-            "bfl": sub_opt(&m_from["bfl"], &m_to["bfl"]),
-            "f_number": sub_opt(&m_from["f_number"], &m_to["f_number"]),
-            "total_track": sub_opt(&m_from["total_track"], &m_to["total_track"]),
-            "rms_spot_mm": spot_deltas,
-        },
-        "surface_changes": surface_changes,
-    })
+    let snapshot = |e: &HistoryEntry, index, metrics| ComparedEntry {
+        index,
+        revision: e.revision,
+        action: e.action.clone(),
+        timestamp_ms: e.timestamp_ms,
+        metrics,
+    };
+    Comparison {
+        from: snapshot(from, from_index, m_from),
+        to: snapshot(to, to_index, m_to),
+        deltas,
+        surface_changes,
+    }
 }

@@ -4,15 +4,21 @@ use super::zernike::{fringe, fringe_derivatives};
 use super::{SagZernike, Surface, Toroid, math::*};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointSurface {
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub radius: f64,
+    #[schemars(range(min = -1e15, max = 1e15))]
     pub conic: f64,
+    #[schemars(length(min = 0, max = 16), inner(range(min = -1e15, max = 1e15)))]
     pub even: Vec<f64>,
+    #[schemars(length(min = 0, max = 20), inner(range(min = -1e15, max = 1e15)))]
     pub odd: Vec<f64>,
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     pub aperture: f64,
     pub clear_aperture: bool,
+    #[schemars(range(min = 0.0, max = 1e15))]
     pub semi_diameter: f64,
 }
 impl EndpointSurface {

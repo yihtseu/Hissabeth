@@ -4,14 +4,16 @@ use super::math::*;
 use serde::{Deserialize, Serialize};
 
 /// 3D tilt and decenter applied at a sequential surface (coordinate break).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinateTransform {
     /// Local lateral decenter [dx, dy] in mm.
     #[serde(default)]
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub decenter: [f64; 2],
     /// Local Euler tilt angles [rx, ry, rz] in degrees (about local X, Y, Z).
     #[serde(default)]
+    #[schemars(inner(range(min = -360.0, max = 360.0)))]
     pub tilt: [f64; 3],
     /// When false (default, Zemax order 0), decenter is applied before tilt.
     /// When true (Zemax order 1), tilt is applied before decenter.

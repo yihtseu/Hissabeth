@@ -11,12 +11,16 @@ use std::{
 };
 
 mod broker;
+mod commands;
 mod history;
+mod params;
+pub mod registry;
 mod schema;
 mod workspace;
 
 pub use broker::{relay, rpc, rpc_shared, serve, serve_with_notifier};
-pub use schema::{bench_schema, system_schema, tools, validate_args};
+pub use registry::{tools, validate_args};
+pub use schema::{bench_schema, system_schema};
 pub use workspace::Workspace;
 use workspace::{ProjectFiles, persist_system};
 
@@ -33,17 +37,31 @@ pub struct Engine {
 }
 
 pub fn field_argument(s: &System, args: &Value) -> Result<Field, String> {
-    if let Some(i) = args["field_index"].as_u64() {
+    select_field(
+        s,
+        args["field_index"].as_u64().map(|v| v as usize),
+        args["field"].as_f64(),
+        args["field_x"].as_f64(),
+    )
+}
+
+fn select_field(
+    s: &System,
+    index: Option<usize>,
+    y: Option<f64>,
+    x: Option<f64>,
+) -> Result<Field, String> {
+    if let Some(i) = index {
         return s
             .fields
-            .get(i as usize)
+            .get(i)
             .cloned()
             .ok_or_else(|| "Field index outside prescription".into());
     }
-    if args.get("field").is_some() || args.get("field_x").is_some() {
+    if x.is_some() || y.is_some() {
         return Ok(Field {
-            x: args["field_x"].as_f64().unwrap_or(0.),
-            y: args["field"].as_f64().unwrap_or(0.),
+            x: x.unwrap_or(0.),
+            y: y.unwrap_or(0.),
             weight: 1.,
             vignetting: [0.; 4],
             color: Field::meridional(0.).color,
@@ -77,6 +95,30 @@ impl ToolCaller for Engine {
         self.call(name, args)
     }
 }
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct Revision {
+    revision: u64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct HistoryStep {
+    revision: u64,
+    cursor: usize,
+    can_undo: bool,
+    can_redo: bool,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct OpenProject {
+    revision: u64,
+    path: PathBuf,
+    linked: bool,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct SavedProject {
+    revision: u64,
+    path: PathBuf,
+}
+
 impl Engine {
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let lease = acquire_lease(&path)?;
@@ -138,7 +180,12 @@ impl Engine {
         check_revision(self.revision, expected)
     }
 
-    fn replace(&mut self, mut next: System, expected: u64, action: &str) -> Result<Value, String> {
+    fn replace(
+        &mut self,
+        mut next: System,
+        expected: u64,
+        action: &str,
+    ) -> Result<Revision, String> {
         self.check_revision(expected)?;
         next.update()?;
         self.commit_with_action(next, expected, action)
@@ -149,7 +196,7 @@ impl Engine {
         next: System,
         expected: u64,
         action: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Revision, String> {
         self.commit_project(next, expected, action, self.projects.clone())
     }
 
@@ -159,7 +206,7 @@ impl Engine {
         expected: u64,
         action: &str,
         projects: ProjectFiles,
-    ) -> Result<Value, String> {
+    ) -> Result<Revision, String> {
         self.check_revision(expected)?;
         self.persist(next, &projects)?;
         self.projects = projects;
@@ -169,7 +216,9 @@ impl Engine {
             self.system.clone(),
             self.projects.linked_path.clone(),
         );
-        Ok(json!({"revision":self.revision}))
+        Ok(Revision {
+            revision: self.revision,
+        })
     }
 
     fn persist(&mut self, next: System, projects: &ProjectFiles) -> Result<(), String> {
@@ -183,7 +232,7 @@ impl Engine {
         Ok(())
     }
 
-    fn step_history(&mut self, expected: u64, undo: bool) -> Result<Value, String> {
+    fn step_history(&mut self, expected: u64, undo: bool) -> Result<HistoryStep, String> {
         self.check_revision(expected)?;
         let entry = if undo {
             self.history.peek_undo()?
@@ -199,15 +248,15 @@ impl Engine {
         } else {
             self.history.step_redo(self.revision);
         }
-        Ok(json!({
-            "revision": self.revision,
-            "cursor": self.history.cursor(),
-            "can_undo": self.history.can_undo(),
-            "can_redo": self.history.can_redo(),
-        }))
+        Ok(HistoryStep {
+            revision: self.revision,
+            cursor: self.history.cursor(),
+            can_undo: self.history.can_undo(),
+            can_redo: self.history.can_redo(),
+        })
     }
 
-    fn project_open(&mut self, path: &str, expected: u64) -> Result<Value, String> {
+    fn project_open(&mut self, path: &str, expected: u64) -> Result<OpenProject, String> {
         self.check_revision(expected)?;
         let path = ProjectFiles::resolve(&self.path, path, false)?;
         let text =
@@ -222,197 +271,29 @@ impl Engine {
         next.validate()?;
         let mut projects = self.projects.clone();
         projects.select(&path, linked);
-        let mut result = self.commit_project(next, expected, "project_open", projects)?;
-        result["path"] = json!(path);
-        result["linked"] = json!(linked);
-        Ok(result)
+        let result = self.commit_project(next, expected, "project_open", projects)?;
+        Ok(OpenProject {
+            revision: result.revision,
+            path,
+            linked,
+        })
     }
 
-    fn project_save_as(&mut self, path: &str, expected: u64) -> Result<Value, String> {
+    fn project_save_as(&mut self, path: &str, expected: u64) -> Result<SavedProject, String> {
         self.check_revision(expected)?;
         let path = ProjectFiles::resolve(&self.path, path, true)?;
         let mut projects = self.projects.clone();
         projects.select(&path, true);
-        let mut result =
+        let result =
             self.commit_project(self.system.clone(), expected, "project_save_as", projects)?;
-        result["path"] = json!(path);
-        Ok(result)
+        Ok(SavedProject {
+            revision: result.revision,
+            path,
+        })
     }
 
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        validate_args(name, &args)?;
-        self.call_validated(name, args)
-    }
-
-    fn call_validated(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        match name {
-            "history_list" => Ok(self.history.list(self.revision)),
-            "history_compare" => {
-                let (from, to, from_index, to_index) = self.history.pair(&args)?;
-                Ok(history::compare(from, to, from_index, to_index))
-            }
-            "project_list" => Ok(self.projects.list(&self.path)),
-            "optimize" if args["apply"] == true => {
-                let expected = args["revision"].as_u64().unwrap();
-                self.check_revision(expected)?;
-                let result = run_optimization(&self.system, args)?;
-                self.apply_optimization(result, expected)
-            }
-            _ if is_mutating(name, &args) => self.mutate(name, args),
-            _ => read_system(&self.system, self.revision, name, args),
-        }
-    }
-
-    fn apply_optimization(
-        &mut self,
-        result: optimize::OptimizationResult,
-        expected: u64,
-    ) -> Result<Value, String> {
-        let mut response = optimization_response(&result, true, expected)?;
-        let committed = self.commit_with_action(result.system, expected, "optimize")?;
-        response["revision"] = committed["revision"].clone();
-        Ok(response)
-    }
-
-    fn mutate(&mut self, name: &str, args: Value) -> Result<Value, String> {
-        let expected = args["revision"].as_u64().unwrap();
-        self.check_revision(expected)?;
-        match name {
-            "bench_set" => {
-                let scene: bench::Bench =
-                    serde_json::from_value(args["bench"].clone()).map_err(|e| e.to_string())?;
-                scene.validate()?;
-                let mut next = self.system.clone();
-                next.bench = Some(scene);
-                self.commit_with_action(next, expected, name)
-            }
-            "bench_template" | "bench_auto_aim" => {
-                let mut result = bench_preview(&self.system, name, &args)?;
-                let scene = serde_json::from_value::<bench::Bench>(result["bench"].clone())
-                    .map_err(|e| e.to_string())?;
-                scene.validate_groups(&self.system)?;
-                let mut next = self.system.clone();
-                next.bench = Some(scene);
-                let committed = self.commit_with_action(next, expected, name)?;
-                result["revision"] = committed["revision"].clone();
-                result["applied"] = json!(true);
-                Ok(result)
-            }
-            "system_set" => {
-                let s: System =
-                    serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-                self.replace(s, expected, name)
-            }
-            "configuration_activate" => {
-                let index = args["index"].as_u64().unwrap() as usize;
-                if index >= self.system.configurations.len().max(1) {
-                    return Err("Configuration index outside the configuration table".into());
-                }
-                let mut next = self.system.clone();
-                next.active_configuration = index;
-                self.replace(next, expected, name)
-            }
-            "catalog_import" => {
-                let mut next = self.system.clone();
-                let catalog = args["catalog"].as_str().unwrap();
-                let glasses = material::parse_agf(catalog, args["text"].as_str().unwrap())?;
-                let count = glasses.glasses.len();
-                next.custom_glasses
-                    .retain(|g| g.catalog != catalog.to_uppercase());
-                next.custom_glasses.extend(glasses.glasses);
-                let mut r = self.replace(next, expected, name)?;
-                r["glasses_imported"] = json!(count);
-                r["warnings"] = json!(glasses.warnings);
-                Ok(r)
-            }
-            "autofocus" => {
-                let resolved = self.system.resolved()?;
-                let w = args["wavelength"]
-                    .as_f64()
-                    .unwrap_or(self.system.reference());
-                let s = solve::autofocus(&resolved, w)?;
-                let mut next = self.system.clone();
-                for (i, surface) in s.surfaces.iter().enumerate() {
-                    if surface.thickness == resolved.surfaces[i].thickness {
-                        continue;
-                    }
-                    let covered = next
-                        .configurations
-                        .get_mut(next.active_configuration)
-                        .and_then(|c| {
-                            c.overrides.iter_mut().find_map(|o| match o {
-                                crate::optics::Override::Thickness { surface: k, value }
-                                    if *k == i =>
-                                {
-                                    Some(value)
-                                }
-                                _ => None,
-                            })
-                        });
-                    match covered {
-                        Some(value) => *value = surface.thickness,
-                        None => next.surfaces[i].thickness = surface.thickness,
-                    }
-                }
-                self.commit_with_action(next, expected, name)
-            }
-            "solve" => {
-                let definition = serde_json::from_value(args["definition"].clone())
-                    .map_err(|e| e.to_string())?;
-                let (next, result) = solve::apply(
-                    &self.system,
-                    args["gap"].as_u64().unwrap() as usize,
-                    definition,
-                )?;
-                let mut r = self.commit_with_action(next, expected, name)?;
-                r["solve"] = result;
-                Ok(r)
-            }
-            "solve_recalculate" => {
-                let mut r = self.replace(self.system.clone(), expected, name)?;
-                r["solves"] = json!(solve::states(&self.system));
-                Ok(r)
-            }
-            "vignetting_update" => {
-                let resolved = self.system.resolved()?;
-                let (solved, report) = aperture::update_vignetting(&resolved)?;
-                let mut next = self.system.clone();
-                next.fields = solved.fields;
-                let mut result = serde_json::to_value(report).map_err(|e| e.to_string())?;
-                let committed = self.commit_with_action(next, expected, name)?;
-                result["revision"] = committed["revision"].clone();
-                Ok(result)
-            }
-            "project_import" => {
-                let text = args["text"].as_str().unwrap();
-                let next = match args["format"].as_str().unwrap() {
-                    "geopter" => project::import(text)?,
-                    "zmx" => zmx::import(text)?,
-                    "hissabeth" => serde_json::from_str(text).map_err(|e| e.to_string())?,
-                    _ => unreachable!(),
-                };
-                self.replace(next, expected, name)
-            }
-            "project_new" => {
-                let mut next = project::blank();
-                next.update()?;
-                let mut projects = self.projects.clone();
-                projects.linked_path = None;
-                self.commit_project(next, expected, name, projects)
-            }
-            "project_open" => self.project_open(args["path"].as_str().unwrap(), expected),
-            "project_save_as" => self.project_save_as(args["path"].as_str().unwrap(), expected),
-            "history_undo" => self.step_history(expected, true),
-            "history_redo" => self.step_history(expected, false),
-            "history_restore" => {
-                let index = args["index"].as_u64().unwrap() as usize;
-                let entry = self.history.entry(index)?;
-                let mut projects = self.projects.clone();
-                projects.linked_path = entry.linked_path.clone();
-                self.commit_project(entry.system.clone(), expected, "restore", projects)
-            }
-            _ => Err(format!("Unknown mutating tool {name}")),
-        }
+        registry::call(registry::Target::Engine(self), name, args)
     }
 }
 
@@ -423,540 +304,13 @@ fn check_revision(current: u64, expected: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn run_optimization(
-    system: &System,
-    mut args: Value,
-) -> Result<optimize::OptimizationResult, String> {
-    let fields = args.as_object_mut().unwrap();
-    fields.remove("apply");
-    fields.remove("revision");
-    let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    optimize::run(system, &request)
-}
-
-fn optimization_response(
-    result: &optimize::OptimizationResult,
-    applied: bool,
-    revision: u64,
-) -> Result<Value, String> {
-    let mut response = serde_json::to_value(result).map_err(|e| e.to_string())?;
-    response["applied"] = json!(applied);
-    response["revision"] = json!(revision);
-    Ok(response)
-}
-
-fn is_mutating(name: &str, args: &Value) -> bool {
-    matches!(
-        name,
-        "system_set"
-            | "bench_set"
-            | "configuration_activate"
-            | "catalog_import"
-            | "autofocus"
-            | "solve"
-            | "solve_recalculate"
-            | "vignetting_update"
-            | "project_new"
-            | "project_open"
-            | "project_save_as"
-            | "project_import"
-            | "workspace_retry"
-            | "workspace_recover"
-            | "history_undo"
-            | "history_redo"
-            | "history_restore"
-    ) || (matches!(name, "optimize" | "bench_template" | "bench_auto_aim") && args["apply"] == true)
-}
-
 pub fn dispatch(
     workspace: &SharedWorkspace,
     name: &str,
     args: Value,
     on_change: Option<&ChangeNotifier>,
 ) -> Result<Value, String> {
-    schema::validate_args(name, &args)?;
-    if !is_mutating(name, &args) {
-        return dispatch_read(workspace, name, args);
-    }
-    let optimization = if name == "optimize" {
-        let expected = args["revision"].as_u64().unwrap();
-        let system = {
-            let guard = workspace.read().map_err(|e| e.to_string())?;
-            let engine = guard.engine()?;
-            engine.check_revision(expected)?;
-            engine.system.clone()
-        };
-        Some((run_optimization(&system, args.clone())?, expected))
-    } else {
-        None
-    };
-    let (result, before, after) = {
-        let mut guard = workspace.write().map_err(|e| e.to_string())?;
-        let before = guard.revision();
-        let result = if let Some((result, expected)) = optimization {
-            guard.engine_mut()?.apply_optimization(result, expected)?
-        } else {
-            guard.call_validated(name, args)?
-        };
-        (result, before, guard.revision())
-    };
-    if let Some(notify) = on_change.filter(|_| before != after) {
-        notify(after);
-    }
-    Ok(result)
-}
-
-fn supplied_bench(args: &Value) -> Result<Option<bench::Bench>, String> {
-    args.get("bench")
-        .map(|value| serde_json::from_value(value.clone()).map_err(|e| e.to_string()))
-        .transpose()
-}
-
-fn selected_bench<'a>(
-    system: &'a System,
-    supplied: &'a Option<bench::Bench>,
-) -> Result<&'a bench::Bench, String> {
-    supplied
-        .as_ref()
-        .or(system.bench.as_ref())
-        .ok_or_else(|| "Create a free-space bench first".into())
-}
-
-fn bench_template_preview(args: &Value) -> Result<Value, String> {
-    let scene = bench_lab::template(args["name"].as_str().unwrap())?;
-    Ok(json!({"bench":scene,"applied":false}))
-}
-
-fn bench_aim_preview(scene: &bench::Bench, args: &Value) -> Result<Value, String> {
-    let mut result = bench_lab::auto_aim(
-        scene,
-        args["snap_holes"].as_bool().unwrap_or(false),
-        args["uniform_z"].as_f64(),
-    )?;
-    result["applied"] = json!(false);
-    Ok(result)
-}
-
-fn bench_preview(system: &System, name: &str, args: &Value) -> Result<Value, String> {
-    if name == "bench_template" {
-        bench_template_preview(args)
-    } else {
-        bench_aim_preview(selected_bench(system, &supplied_bench(args)?)?, args)
-    }
-}
-
-fn lab_catalog(args: &Value) -> Value {
-    bench_lab::catalog(args["query"].as_str(), args["kind"].as_str())
-}
-
-fn dispatch_read(workspace: &SharedWorkspace, name: &str, args: Value) -> Result<Value, String> {
-    match name {
-        "bench_catalog" => return Ok(lab_catalog(&args)),
-        "bench_template" => return bench_template_preview(&args),
-        "bench_auto_aim" if args.get("bench").is_some() => {
-            return bench_aim_preview(&supplied_bench(&args)?.unwrap(), &args);
-        }
-        _ => {}
-    }
-    let guard = workspace.read().map_err(|e| e.to_string())?;
-    if name == "workspace_status" {
-        return Ok(guard.status());
-    }
-    let engine = guard.engine()?;
-    match name {
-        "history_list" => Ok(engine.history.list(engine.revision)),
-        "history_compare" => {
-            let (from, to, from_index, to_index) = engine.history.pair(&args)?;
-            let (from, to) = (from.clone(), to.clone());
-            drop(guard);
-            Ok(history::compare(&from, &to, from_index, to_index))
-        }
-        "project_list" => {
-            let (path, projects) = (engine.path.clone(), engine.projects.clone());
-            drop(guard);
-            Ok(projects.list(&path))
-        }
-        _ => {
-            let (system, revision) = (engine.system.clone(), engine.revision);
-            drop(guard);
-            read_system(&system, revision, name, args)
-        }
-    }
-}
-
-fn read_system(system: &System, revision: u64, name: &str, args: Value) -> Result<Value, String> {
-    let w = args["wavelength"].as_f64().unwrap_or(system.reference());
-    let field = || field_argument(system, &args);
-    let resolved = || system.resolved();
-    let grid = args["grid"].as_u64().unwrap_or(17) as usize;
-    let samples = args["samples"].as_u64().unwrap_or(33) as usize;
-    let mut result = match name {
-        "bench_get" => Ok(json!({"bench":system.bench,"revision":revision})),
-        "bench_example" => Ok(json!({"bench":bench::example()})),
-        "bench_catalog" => Ok(lab_catalog(&args)),
-        "bench_template" => bench_template_preview(&args),
-        "bench_auto_aim" => {
-            let mut result = bench_preview(system, name, &args)?;
-            if args.get("bench").is_none() {
-                result["revision"] = json!(revision);
-            }
-            Ok(result)
-        }
-        "bench_trace"
-        | "bench_assembly"
-        | "bench_lab_check"
-        | "bench_alignment_guide"
-        | "bench_export_blueprint" => {
-            let supplied = supplied_bench(&args)?;
-            let scene = selected_bench(system, &supplied)?;
-            let mut value = match name {
-                "bench_trace" => {
-                    serde_json::to_value(scene.trace(system)?).map_err(|e| e.to_string())?
-                }
-                "bench_assembly" => {
-                    scene.validate()?;
-                    scene.assembly()
-                }
-                "bench_lab_check" => bench_lab::lab_check(scene, system)?,
-                "bench_alignment_guide" => bench_lab::alignment_guide(scene, system)?,
-                _ => bench_lab::export_blueprint(scene, system, args["format"].as_str().unwrap())?,
-            };
-            value["revision"] = json!(revision);
-            value["saved"] = json!(supplied.is_none());
-            Ok(value)
-        }
-        "system_get" => Ok(json!({"system":system,"revision":revision})),
-        "system_validate" => {
-            let mut s: System =
-                serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-            s.update()?;
-            Ok(json!({"valid":true,"system":s}))
-        }
-        "system_resolved" => Ok(json!({"system":resolved()?,"revision":revision})),
-        "surface_edit" => {
-            let system: System =
-                serde_json::from_value(args["system"].clone()).map_err(|e| e.to_string())?;
-            let operation: editing::Operation =
-                serde_json::from_value(args["operation"].clone()).map_err(|e| e.to_string())?;
-            if system
-                .configurations
-                .iter()
-                .any(|c| !c.overrides.is_empty())
-            {
-                return Err(
-                    "Remove configuration overrides before inserting or removing surfaces".into(),
-                );
-            }
-            serde_json::to_value(editing::apply(&system, operation)?).map_err(|e| e.to_string())
-        }
-        "materials_list" => {
-            let mut names: Vec<String> = material::catalogs()
-                .iter()
-                .chain(&system.custom_glasses)
-                .map(|g| g.key())
-                .collect();
-            names.extend(["AIR".into(), "FUSED_SILICA".into()]);
-            names.sort();
-            names.dedup();
-            Ok(json!(names))
-        }
-        "material_search" => {
-            let query = args["query"].as_str().unwrap_or("").to_uppercase();
-            let catalog = args["catalog"].as_str().unwrap_or("").to_uppercase();
-            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-            let matches: Vec<_> = material::catalogs()
-                .iter()
-                .chain(&system.custom_glasses)
-                .filter(|g| {
-                    (catalog.is_empty() || g.catalog == catalog)
-                        && (g.name.contains(&query) || g.catalog.contains(&query))
-                })
-                .collect();
-            let data:Vec<_>=matches.iter().skip(offset).take(limit).map(|g|json!({"key":g.key(),"name":g.name,"catalog":g.catalog,"nd":g.nd,"vd":g.vd,"formula":g.formula,"wavelength_range":g.wavelength_range})).collect();
-            Ok(
-                json!({"total":matches.len(),"glasses":data,"warnings":material::catalog_warnings().iter().filter(|w|catalog.is_empty()||w.catalog==catalog).collect::<Vec<_>>()}),
-            )
-        }
-        "material_index" => {
-            let name = args["material"].as_str().unwrap();
-            let temperature = args["temperature"].as_f64().unwrap_or(system.temperature);
-            let pressure = args["pressure"].as_f64().unwrap_or(system.pressure);
-            let mut s = system.clone();
-            s.temperature = temperature;
-            s.pressure = pressure;
-            let n = s.material_index(name, w)?;
-            Ok(json!({"index":n,"wavelength":w,"temperature":temperature,"pressure":pressure}))
-        }
-        "air_index" => Ok(
-            json!({"index":material::air_index(w/1000.,args["temperature"].as_f64().unwrap_or(system.temperature),args["pressure"].as_f64().unwrap_or(system.pressure))?}),
-        ),
-        "prescription_report" => serde_json::to_value(report::generate(
-            &resolved()?,
-            revision,
-            serde_json::from_value(args["sections"].clone()).map_err(|e| e.to_string())?,
-            w,
-            args["precision"].as_u64().unwrap() as usize,
-        )?)
-        .map_err(|e| e.to_string()),
-        "paraxial" => resolved()?.paraxial(w),
-        "paraxial_trace" => inspection::paraxial_trace(&resolved()?, &field()?, w),
-        "trace_inspect" => inspection::inspect(
-            &resolved()?,
-            serde_json::from_value(args["launch"].clone()).map_err(|e| e.to_string())?,
-            w,
-        ),
-        "trace_ray" => serde_json::to_value(resolved()?.trace_field(
-            args["x"].as_f64().unwrap_or(0.),
-            args["y"].as_f64().unwrap_or(0.),
-            &field()?,
-            w,
-        )?)
-        .map_err(|e| e.to_string()),
-        "spot_diagram" => resolved()?.spot_field(
-            &field()?,
-            w,
-            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                .map_err(|e| e.to_string())?,
-        ),
-        "polychromatic_spot" => analysis::polychromatic_spot(
-            &resolved()?,
-            &field()?,
-            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                .map_err(|e| e.to_string())?,
-        ),
-        "layout" => Ok(resolved()?.layout()),
-        "geometric_mtf" => crate::compute::geometric_mtf(&resolved()?, &args),
-        "ray_fan" => analysis::ray_fan(&resolved()?, &field()?, w, samples),
-        "opd_fan" => analysis::opd_fan(&resolved()?, &field()?, w, samples),
-        "chromatic_focus" => {
-            let resolved = system.resolved()?;
-            analysis::chromatic_focus(
-                &resolved,
-                args["lower"].as_f64().unwrap_or_else(|| {
-                    resolved
-                        .wavelengths
-                        .iter()
-                        .map(|w| w.value)
-                        .fold(f64::INFINITY, f64::min)
-                }),
-                args["upper"].as_f64().unwrap_or_else(|| {
-                    resolved
-                        .wavelengths
-                        .iter()
-                        .map(|w| w.value)
-                        .fold(f64::NEG_INFINITY, f64::max)
-                }),
-                samples,
-            )
-        }
-        "longitudinal_aberration" => analysis::longitudinal(&resolved()?, w, samples),
-        "spherochromatism" => {
-            let resolved = system.resolved()?;
-            let reference_wavelength = resolved.reference();
-            let reference_focus = resolved.paraxial(reference_wavelength)?["image_distance"]
-                .as_f64()
-                .ok_or("No finite reference focus")?;
-            let curves: Vec<_> = resolved
-                .wavelengths
-                .iter()
-                .enumerate()
-                .map(|(index, wv)| -> Result<Value, String> {
-                    let mut curve = analysis::longitudinal(&resolved, wv.value, samples)?;
-                    curve["color"] = json!(wv.color);
-                    curve["weight"] = json!(wv.weight);
-                    curve["wavelength_index"] = json!(index);
-                    Ok(curve)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(
-                json!({"curves":curves,"reference_focus":reference_focus,"reference_wavelength":reference_wavelength,"units":"mm"}),
-            )
-        }
-        "astigmatism" => analysis::astigmatism(&resolved()?, &field()?, w),
-        "field_curvature" => focus::field_curvature(
-            &resolved()?,
-            args.get("field_end")
-                .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
-                .transpose()?,
-            samples,
-        ),
-        "distortion" => analysis::distortion(&resolved()?, &field()?, w),
-        "wavefront" => Ok(analysis::wavefront(&resolved()?, &field()?, w, grid)?.json()),
-        "diffraction_psf" => analysis::diffraction_psf(
-            &resolved()?,
-            &field()?,
-            w,
-            args["grid"].as_u64().unwrap_or(32) as usize,
-        ),
-        "diffraction_mtf" => analysis::diffraction_mtf(
-            &resolved()?,
-            &field()?,
-            serde_json::from_value::<Spectrum>(args["spectrum"].clone())
-                .map_err(|e| e.to_string())?,
-            args["grid"].as_u64().unwrap_or(32) as usize,
-            args["max_frequency"].as_f64(),
-        ),
-        "wavefront_zernike" => zernike::fit(
-            &analysis::wavefront(&resolved()?, &field()?, w, grid)?,
-            args["terms"].as_u64().unwrap_or(37) as usize,
-        ),
-        "huygens_psf" => analysis::huygens_psf(
-            &resolved()?,
-            &field()?,
-            w,
-            args["grid"].as_u64().unwrap_or(32) as usize,
-            args["size"].as_u64().map(|v| v as usize),
-            args["pitch"].as_f64(),
-        ),
-        "huygens_mtf" => analysis::huygens_mtf(
-            &resolved()?,
-            &field()?,
-            serde_json::from_value::<Spectrum>(args["spectrum"].clone())
-                .map_err(|e| e.to_string())?,
-            args["grid"].as_u64().unwrap_or(32) as usize,
-            args["max_frequency"].as_f64(),
-        ),
-        "gaussian_beam" => gaussian::gaussian_beam(
-            &resolved()?,
-            w,
-            args["waist"].as_f64().unwrap(),
-            args["waist_z"].as_f64().unwrap_or(0.),
-        ),
-        "fiber_coupling" => gaussian::fiber_coupling(
-            &resolved()?,
-            w,
-            args["waist"].as_f64().unwrap(),
-            args["waist_z"].as_f64().unwrap_or(0.),
-            args["mode_field_diameter"].as_f64().unwrap(),
-        ),
-        "encircled_energy" => analysis::encircled_energy(
-            &resolved()?,
-            &field()?,
-            w,
-            serde_json::from_value::<PupilSampling>(args["sampling"].clone())
-                .map_err(|e| e.to_string())?,
-            samples,
-        ),
-        "surface_sag" => {
-            let i = args["surface"].as_u64().unwrap() as usize;
-            let resolved = resolved()?;
-            let s = resolved
-                .surfaces
-                .get(i)
-                .ok_or("Surface index outside prescription")?;
-            let h = args["height"].as_f64().unwrap();
-            let (z, dz) = optics::sag(s, h)?;
-            Ok(json!({"sag":z,"derivative":dz,"height":h,"units":"mm"}))
-        }
-        "aperture_report" => {
-            let mut report = serde_json::to_value(aperture::semi_diameters(&resolved()?)?)
-                .map_err(|e| e.to_string())?;
-            report["revision"] = json!(revision);
-            Ok(report)
-        }
-        "project_export" => {
-            let v = if args["format"] == "geopter" {
-                project::export(system)?
-            } else if args["format"] == "zmx" {
-                return Ok(
-                    json!({"text":zmx::export(system)?,"revision":revision,"name":system.name,"format":args["format"]}),
-                );
-            } else {
-                serde_json::to_value(system).map_err(|e| e.to_string())?
-            };
-            Ok(
-                json!({"text":serde_json::to_string_pretty(&v).map_err(|e|e.to_string())?,"revision":revision,"name":system.name,"format":args["format"]}),
-            )
-        }
-        "design_summary" => optimize::design_summary(&resolved()?),
-        "optimize" => optimization_response(&run_optimization(system, args)?, false, revision),
-        "tolerance_sensitivity" => {
-            let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
-            serde_json::to_value(tolerance::sensitivity(system, &request)?)
-                .map_err(|e| e.to_string())
-        }
-        "tolerance_monte_carlo" => {
-            let request = serde_json::from_value(args).map_err(|e| e.to_string())?;
-            serde_json::to_value(tolerance::monte_carlo(system, &request)?)
-                .map_err(|e| e.to_string())
-        }
-        "capabilities" => {
-            let mut scope = json!({"sequential":true,"finite_conjugates":true,"curved_object_surface":true,"curved_image_surface":true,"endpoint_apertures":true,"object_medium":true,"prescribed_plot_colors":true,"internal_stop_aiming":true,"centered_surfaces":true,"centered_reflection":true,"ray_inspection":true,"paraxial_ray_tables":true,"assembled_prescription_report":true,"startup_recovery":true,"surface_row_editing":true,"project_creation":true,"automatic_semidiameters":true,"directional_vignetting":true,"field_local_analyses":true,"continuous_field_curvature":true,"pupil_sampling":["grid","hexapolar"],"pupil_mappings":["reference_entrance_pupil","real_stop"],"weighted_polychromatic_mtf":true,"analysis_revisions":true,"project_exchange":["hissabeth","geopter","zmx"],"folded_coordinates":true,"polarization":false,"nonsequential":false,"free_space_bench":true,"bench_spatial_poses":true,"bench_scalar_splitters":true,"bench_nearest_hits":true,"bench_assembly":true,"bench_lens_groups":true});
-            scope["bench_fresnel_splitters"] = json!(true);
-            scope["bench_coatings"] = json!(true);
-            scope["bench_scatter"] = json!(["lambertian", "abg"]);
-            scope["bench_group_ghosts"] = json!(2);
-            scope["bench_polarization"] = json!(true);
-            scope["bench_gaussian_envelope"] = json!(true);
-            scope["bench_hardware_catalog"] = json!(true);
-            scope["bench_auto_aim"] = json!(true);
-            scope["bench_lab_check"] = json!(true);
-            scope["bench_alignment_guide"] = json!(true);
-            scope["bench_blueprint_exports"] = json!(bench_lab::FORMATS);
-            scope["bench_detector_maps"] = json!(true);
-            scope["bench_lens_model"] =
-                json!("ideal thin lens or real current-prescription lens group");
-            scope["surface_profiles"] = json!([
-                "standard",
-                "even_asphere",
-                "odd_asphere",
-                "toroid",
-                "zernike_fringe_sag"
-            ]);
-            scope["huygens_diffraction"] = json!(true);
-            scope["zernike_wavefront_fit"] = json!({"ordering":"noll","max_terms":45});
-            scope["gaussian_beam"] = json!(true);
-            scope["fiber_coupling"] = json!(true);
-            scope["coordinate_breaks"] = json!(true);
-            scope["optimization"] = json!({"solver":"dls","max_variables":64,"max_operands":256});
-            scope["tolerancing"] = json!({"sensitivity":true,"monte_carlo":true,"max_trials":2000});
-            scope["revision_history"] = json!(true);
-            scope["multi_project"] = json!(true);
-            scope["multi_configuration"] = json!({"max_configurations":64,"operands":["thickness","radius","conic","aperture","material","object_distance"]});
-            Ok(
-                json!({"tools":tools(),"units":{"length":"mm","wavelength":"nm","field_angle":"degrees","pressure":"Pa","temperature":"C"},"backend":"cpu","scope":scope}),
-            )
-        }
-        _ => Err(format!("Unknown tool {name}")),
-    }?;
-    if [
-        "prescription_report",
-        "paraxial",
-        "paraxial_trace",
-        "trace_inspect",
-        "trace_ray",
-        "layout",
-        "spot_diagram",
-        "polychromatic_spot",
-        "geometric_mtf",
-        "ray_fan",
-        "opd_fan",
-        "chromatic_focus",
-        "longitudinal_aberration",
-        "spherochromatism",
-        "astigmatism",
-        "field_curvature",
-        "distortion",
-        "wavefront",
-        "diffraction_psf",
-        "diffraction_mtf",
-        "wavefront_zernike",
-        "huygens_psf",
-        "huygens_mtf",
-        "gaussian_beam",
-        "fiber_coupling",
-        "encircled_energy",
-        "surface_sag",
-        "design_summary",
-        "tolerance_sensitivity",
-        "tolerance_monte_carlo",
-    ]
-    .contains(&name)
-    {
-        result["revision"] = json!(revision);
-    }
-    Ok(result)
+    registry::call(registry::Target::Shared(workspace, on_change), name, args)
 }
 pub fn data_dir() -> PathBuf {
     std::env::var_os("HISSABETH_DATA_DIR")
@@ -1051,6 +405,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(dir.path().join("system.json")).unwrap();
         (dir, Arc::new(RwLock::new(workspace)))
+    }
+
+    #[test]
+    fn typed_surface_sag_returns_spherical_geometry_and_snapshot_revision() {
+        let (_dir, workspace) = shared_workspace();
+        let snapshot = dispatch(&workspace, "system_get", json!({}), None).unwrap();
+        let radius = snapshot["system"]["surfaces"][0]["radius"]
+            .as_f64()
+            .unwrap();
+        let height = 3.0;
+        let result = dispatch(
+            &workspace,
+            "surface_sag",
+            json!({"surface":0,"height":height}),
+            None,
+        )
+        .unwrap();
+        let axial = (radius * radius - height * height).sqrt();
+        assert!((result["sag"].as_f64().unwrap() - (radius - axial)).abs() < 1e-12);
+        assert!((result["derivative"].as_f64().unwrap() - height / axial).abs() < 1e-12);
+        assert_eq!(result["units"], "mm");
+        assert_eq!(result["revision"], snapshot["revision"]);
     }
 
     #[test]

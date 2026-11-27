@@ -5,7 +5,7 @@ use super::{
     *,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct SurfaceSize {
     pub surface: usize,
     pub semi_diameter: f64,
@@ -13,7 +13,7 @@ pub struct SurfaceSize {
     pub clear_aperture: bool,
     pub reached_rays: usize,
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct EndpointSize {
     pub semi_diameter: f64,
     pub aperture: f64,
@@ -34,7 +34,7 @@ impl EndpointSize {
         self.reached_rays += 1;
     }
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct CoverageFailure {
     pub field_index: usize,
     pub pupil: [f64; 2],
@@ -44,7 +44,7 @@ pub struct CoverageFailure {
     pub kind: String,
     pub error: String,
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct ApertureReport {
     pub wavelength: f64,
     pub sampling: &'static str,
@@ -150,7 +150,7 @@ pub fn semi_diameters(s: &System) -> Result<ApertureReport, String> {
     })
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Boundary {
     pub direction: &'static str,
     pub pupil_scale: f64,
@@ -158,13 +158,13 @@ pub struct Boundary {
     pub limiting_endpoint: Option<&'static str>,
     pub status: &'static str,
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct FieldVignetting {
     pub field_index: usize,
     pub vignetting: [f64; 4],
     pub boundaries: Vec<Boundary>,
 }
-#[derive(Debug, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct VignettingReport {
     pub wavelength: f64,
     pub iterations: usize,

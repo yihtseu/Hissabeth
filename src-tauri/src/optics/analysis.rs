@@ -7,7 +7,33 @@ use serde_json::{Value, json};
 
 const IMAGE_SAMPLING: &str = "Planar lateral analysis grid centered at the real chief image intercept; not surface irradiance integrated over a curved detector";
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct FanPoint {
+    pupil: f64,
+    tangential_error: Option<f64>,
+    sagittal_error: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct RayFan {
+    tangential: Vec<FanPoint>,
+    sagittal: Vec<FanPoint>,
+    frame: FieldFrame,
+    chief_image: [f64; 3],
+    wavelength: f64,
+    units: &'static str,
+}
+
 pub fn ray_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, String> {
+    serde_json::to_value(ray_fan_report(s, f, w, samples)?).map_err(|e| e.to_string())
+}
+pub(crate) fn ray_fan_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+    samples: usize,
+) -> Result<RayFan, String> {
     if !(3..=257).contains(&samples) {
         return Err("Fan samples must be 3–257".into());
     }
@@ -23,26 +49,69 @@ pub fn ray_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, S
             (frame.tangential, &mut tangential),
             (frame.sagittal, &mut sagittal),
         ] {
-            out.push(match s.trace_field(radius * p * axis[0], radius * p * axis[1], f, w) {
-                Ok(ray) => {
-                    let h = ray.image();
-                    let error = [h[0] - c[0], h[1] - c[1]];
-                    json!({"pupil":p,"tangential_error":FieldFrame::project(frame.tangential,error),"sagittal_error":FieldFrame::project(frame.sagittal,error),"error":null})
-                }
-                Err(error) => json!({"pupil":p,"tangential_error":null,"sagittal_error":null,"error":error}),
-            });
+            out.push(
+                match s.trace_field(radius * p * axis[0], radius * p * axis[1], f, w) {
+                    Ok(ray) => {
+                        let h = ray.image();
+                        let error = [h[0] - c[0], h[1] - c[1]];
+                        FanPoint {
+                            pupil: p,
+                            tangential_error: Some(FieldFrame::project(frame.tangential, error)),
+                            sagittal_error: Some(FieldFrame::project(frame.sagittal, error)),
+                            error: None,
+                        }
+                    }
+                    Err(error) => FanPoint {
+                        pupil: p,
+                        tangential_error: None,
+                        sagittal_error: None,
+                        error: Some(error),
+                    },
+                },
+            );
         }
     }
-    Ok(
-        json!({"tangential":tangential,"sagittal":sagittal,"frame":frame,"chief_image":c,"wavelength":w,"units":"mm"}),
-    )
+    Ok(RayFan {
+        tangential,
+        sagittal,
+        frame,
+        chief_image: c,
+        wavelength: w,
+        units: "mm",
+    })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ChromaticPoint {
+    wavelength: f64,
+    focus: Option<f64>,
+    shift: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ChromaticFocus {
+    reference_wavelength: f64,
+    reference_focus: f64,
+    points: Vec<ChromaticPoint>,
+    units: &'static str,
+}
+
 pub fn chromatic_focus(
     s: &System,
     lower: f64,
     upper: f64,
     samples: usize,
 ) -> Result<Value, String> {
+    serde_json::to_value(chromatic_focus_report(s, lower, upper, samples)?)
+        .map_err(|e| e.to_string())
+}
+pub(crate) fn chromatic_focus_report(
+    s: &System,
+    lower: f64,
+    upper: f64,
+    samples: usize,
+) -> Result<ChromaticFocus, String> {
     if !lower.is_finite() || !upper.is_finite() || upper <= lower || !(2..=257).contains(&samples) {
         return Err("Invalid chromatic wavelength interval or sample count".into());
     }
@@ -58,15 +127,52 @@ pub fn chromatic_focus(
                 .ok_or_else(|| "No finite paraxial focus".into())
         });
         points.push(match focus {
-            Ok(focus) => json!({"wavelength":w,"focus":focus,"shift":focus-reference,"error":null}),
-            Err(error) => json!({"wavelength":w,"focus":null,"shift":null,"error":error}),
+            Ok(focus) => ChromaticPoint {
+                wavelength: w,
+                focus: Some(focus),
+                shift: Some(focus - reference),
+                error: None,
+            },
+            Err(error) => ChromaticPoint {
+                wavelength: w,
+                focus: None,
+                shift: None,
+                error: Some(error),
+            },
         });
     }
-    Ok(
-        json!({"reference_wavelength":s.reference(),"reference_focus":reference,"points":points,"units":"mm"}),
-    )
+    Ok(ChromaticFocus {
+        reference_wavelength: s.reference(),
+        reference_focus: reference,
+        points,
+        units: "mm",
+    })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct LongitudinalPoint {
+    pupil: f64,
+    focus: Option<f64>,
+    shift: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct LongitudinalAberration {
+    wavelength: f64,
+    paraxial_focus: f64,
+    points: Vec<LongitudinalPoint>,
+    units: &'static str,
+}
+
 pub fn longitudinal(s: &System, w: f64, samples: usize) -> Result<Value, String> {
+    serde_json::to_value(longitudinal_report(s, w, samples)?).map_err(|e| e.to_string())
+}
+pub(crate) fn longitudinal_report(
+    s: &System,
+    w: f64,
+    samples: usize,
+) -> Result<LongitudinalAberration, String> {
     if !(3..=257).contains(&samples) {
         return Err("Longitudinal samples must be 3–257".into());
     }
@@ -97,13 +203,44 @@ pub fn longitudinal(s: &System, w: f64, samples: usize) -> Result<Value, String>
             })
         };
         points.push(match result {
-            Ok(z) => json!({"pupil":p,"focus":z,"shift":z-paraxial,"error":null}),
-            Err(e) => json!({"pupil":p,"focus":null,"shift":null,"error":e}),
+            Ok(z) => LongitudinalPoint {
+                pupil: p,
+                focus: Some(z),
+                shift: Some(z - paraxial),
+                error: None,
+            },
+            Err(e) => LongitudinalPoint {
+                pupil: p,
+                focus: None,
+                shift: None,
+                error: Some(e),
+            },
         });
     }
-    Ok(json!({"wavelength":w,"paraxial_focus":paraxial,"points":points,"units":"mm"}))
+    Ok(LongitudinalAberration {
+        wavelength: w,
+        paraxial_focus: paraxial,
+        points,
+        units: "mm",
+    })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Astigmatism {
+    sagittal_focus: f64,
+    tangential_focus: f64,
+    sagittal_shift: Option<f64>,
+    tangential_shift: Option<f64>,
+    astigmatism: f64,
+    chief_direction: Option<[f64; 3]>,
+    frame: FieldFrame,
+    units: &'static str,
+}
+
 pub fn astigmatism(s: &System, f: &Field, w: f64) -> Result<Value, String> {
+    serde_json::to_value(astigmatism_report(s, f, w)?).map_err(|e| e.to_string())
+}
+pub(crate) fn astigmatism_report(s: &System, f: &Field, w: f64) -> Result<Astigmatism, String> {
     let pair = super::focus::chief_foci(s, f, w);
     let sagittal = pair
         .sagittal
@@ -119,15 +256,31 @@ pub fn astigmatism(s: &System, f: &Field, w: f64) -> Result<Value, String> {
         .take(s.surfaces.len() - 1)
         .map(|v| v.thickness)
         .sum::<f64>();
-    Ok(
-        json!({"sagittal_focus":sagittal-vertex,"tangential_focus":tangential-vertex,
-        "sagittal_shift":pair.sagittal.shift,"tangential_shift":pair.tangential.shift,
-        "astigmatism":tangential-sagittal,"chief_direction":pair.chief_direction,
-        "frame":pair.frame,"units":"mm"}),
-    )
+    Ok(Astigmatism {
+        sagittal_focus: sagittal - vertex,
+        tangential_focus: tangential - vertex,
+        sagittal_shift: pair.sagittal.shift,
+        tangential_shift: pair.tangential.shift,
+        astigmatism: tangential - sagittal,
+        chief_direction: pair.chief_direction,
+        frame: pair.frame,
+        units: "mm",
+    })
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Distortion {
+    ideal: [f64; 2],
+    actual: [f64; 2],
+    distortion_percent: Option<f64>,
+    reference: &'static str,
+    units: &'static str,
 }
 
 pub fn distortion(s: &System, f: &Field, w: f64) -> Result<Value, String> {
+    serde_json::to_value(distortion_report(s, f, w)?).map_err(|e| e.to_string())
+}
+pub(crate) fn distortion_report(s: &System, f: &Field, w: f64) -> Result<Distortion, String> {
     let image = s.trace_field(0., 0., f, w)?.image();
     let ideal = s.paraxial_chief_image(f, w)?;
     let squared_height = ideal[0] * ideal[0] + ideal[1] * ideal[1];
@@ -136,10 +289,33 @@ pub fn distortion(s: &System, f: &Field, w: f64) -> Result<Value, String> {
     } else {
         None
     };
-    Ok(
-        json!({"ideal":ideal,"actual":[image[0],image[1]],"distortion_percent":distortion,"reference":"paraxial chief-ray intercept at the stored image plane","units":"mm"}),
-    )
+    Ok(Distortion {
+        ideal,
+        actual: [image[0], image[1]],
+        distortion_percent: distortion,
+        reference: "paraxial chief-ray intercept at the stored image plane",
+        units: "mm",
+    })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct EnergyPoint {
+    radius: f64,
+    fraction: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct EncircledEnergy {
+    center: [f64; 2],
+    points: Vec<EnergyPoint>,
+    rays: usize,
+    sampling: PupilSampling,
+    sampled_rays: usize,
+    transmitted_weight: f64,
+    normalization: &'static str,
+    units: &'static str,
+}
+
 pub fn encircled_energy(
     s: &System,
     f: &Field,
@@ -147,6 +323,16 @@ pub fn encircled_energy(
     sampling: PupilSampling,
     samples: usize,
 ) -> Result<Value, String> {
+    serde_json::to_value(encircled_energy_report(s, f, w, sampling, samples)?)
+        .map_err(|e| e.to_string())
+}
+pub(crate) fn encircled_energy_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+    sampling: PupilSampling,
+    samples: usize,
+) -> Result<EncircledEnergy, String> {
     if !(2..=257).contains(&samples) {
         return Err("Energy samples must be 2–257".into());
     }
@@ -169,14 +355,22 @@ pub fn encircled_energy(
         .map(|i| {
             let radius = max * i as f64 / (samples - 1) as f64;
             let count = distances.partition_point(|(r, _)| *r <= radius);
-            json!({"radius":radius,"fraction":cumulative[count]/total})
+            EnergyPoint {
+                radius,
+                fraction: cumulative[count] / total,
+            }
         })
         .collect();
-    Ok(
-        json!({"center":center,"points":points,"rays":distances.len(),"sampling":sampling,
-        "sampled_rays":bundle.sampled_rays,"transmitted_weight":total,
-        "normalization":"transmitted nominal-pupil area weights","units":"mm"}),
-    )
+    Ok(EncircledEnergy {
+        center,
+        points,
+        rays: distances.len(),
+        sampling,
+        sampled_rays: bundle.sampled_rays,
+        transmitted_weight: total,
+        normalization: "transmitted nominal-pupil area weights",
+        units: "mm",
+    })
 }
 
 pub struct Wavefront {
@@ -190,12 +384,27 @@ pub struct Wavefront {
 }
 impl Wavefront {
     pub fn json(&self) -> Value {
+        json!(self.map())
+    }
+    pub(crate) fn map(&self) -> WavefrontMap {
         let data: Vec<f64> = self.values.iter().flatten().copied().collect();
         let mean = data.iter().sum::<f64>() / data.len() as f64;
         let rms = (data.iter().map(|w| (w - mean).powi(2)).sum::<f64>() / data.len() as f64).sqrt();
         let lo = data.iter().copied().fold(f64::INFINITY, f64::min);
         let hi = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        json!({"grid":self.grid,"opd":self.values,"pupils":self.pupils,"rms":rms,"peak_to_valley":hi-lo,"mean":mean,"wavelength":self.wavelength,"units":"waves","valid":self.valid,"failed":self.failed,"reference":"sphere centered at chief ray image intercept"})
+        WavefrontMap {
+            grid: self.grid,
+            opd: self.values.clone(),
+            pupils: self.pupils.clone(),
+            rms,
+            peak_to_valley: hi - lo,
+            mean,
+            wavelength: self.wavelength,
+            units: "waves",
+            valid: self.valid,
+            failed: self.failed,
+            reference: "sphere centered at chief ray image intercept",
+        }
     }
 }
 struct WavefrontReference {
@@ -326,7 +535,33 @@ pub fn wavefront(s: &System, f: &Field, w: f64, grid: usize) -> Result<Wavefront
         chief: reference.chief,
     })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct OpdPoint {
+    pupil: f64,
+    opd: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct OpdFan {
+    tangential: Vec<OpdPoint>,
+    sagittal: Vec<OpdPoint>,
+    frame: FieldFrame,
+    units: &'static str,
+    wavelength: f64,
+    reference: &'static str,
+}
+
 pub fn opd_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, String> {
+    serde_json::to_value(opd_fan_report(s, f, w, samples)?).map_err(|e| e.to_string())
+}
+pub(crate) fn opd_fan_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+    samples: usize,
+) -> Result<OpdFan, String> {
     if !(3..=257).contains(&samples) {
         return Err("Fan samples must be 3–257".into());
     }
@@ -345,14 +580,27 @@ pub fn opd_fan(s: &System, f: &Field, w: f64, samples: usize) -> Result<Value, S
                 .trace_field(p * radius * axis[0], p * radius * axis[1], f, w)
                 .and_then(|ray| reference.opd(s, f, &ray));
             out.push(match result {
-                Ok(opd) => json!({"pupil":p,"opd":opd,"error":null}),
-                Err(error) => json!({"pupil":p,"opd":null,"error":error}),
+                Ok(opd) => OpdPoint {
+                    pupil: p,
+                    opd: Some(opd),
+                    error: None,
+                },
+                Err(error) => OpdPoint {
+                    pupil: p,
+                    opd: None,
+                    error: Some(error),
+                },
             });
         }
     }
-    Ok(
-        json!({"tangential":tangential,"sagittal":sagittal,"frame":frame,"units":"waves","wavelength":w,"reference":"sphere centered at chief ray image intercept"}),
-    )
+    Ok(OpdFan {
+        tangential,
+        sagittal,
+        frame,
+        units: "waves",
+        wavelength: w,
+        reference: "sphere centered at chief ray image intercept",
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -519,13 +767,43 @@ fn psf_data(s: &System, f: &Field, w: f64, grid: usize) -> Result<PsfData, Strin
         chief_image: map.chief_image,
     })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct DiffractionPsf {
+    intensity: Vec<f64>,
+    grid: usize,
+    pixel_size: f64,
+    strehl: f64,
+    wavelength: f64,
+    normalization: &'static str,
+    model: &'static str,
+    image_sampling: &'static str,
+    failed_pupil_rays: usize,
+    units: &'static str,
+}
+
 pub fn diffraction_psf(s: &System, f: &Field, w: f64, grid: usize) -> Result<Value, String> {
+    serde_json::to_value(diffraction_psf_report(s, f, w, grid)?).map_err(|e| e.to_string())
+}
+pub(crate) fn diffraction_psf_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+    grid: usize,
+) -> Result<DiffractionPsf, String> {
     let psf = psf_data(s, f, w, grid)?;
-    Ok(
-        json!({"intensity":psf.intensity,"grid":psf.n,"pixel_size":psf.pixel,"strehl":psf.strehl,
-        "wavelength":w,"normalization":"sum intensity = 1","model":"Fraunhofer with paraxial exit pupil mapping","image_sampling":IMAGE_SAMPLING,
-        "failed_pupil_rays":psf.failed,"units":"mm"}),
-    )
+    Ok(DiffractionPsf {
+        intensity: psf.intensity,
+        grid: psf.n,
+        pixel_size: psf.pixel,
+        strehl: psf.strehl,
+        wavelength: w,
+        normalization: "sum intensity = 1",
+        model: "Fraunhofer with paraxial exit pupil mapping",
+        image_sampling: IMAGE_SAMPLING,
+        failed_pupil_rays: psf.failed,
+        units: "mm",
+    })
 }
 
 // Direct Huygens-Fresnel summation over the traced pupil samples, evaluated at
@@ -599,6 +877,22 @@ fn huygens_psf_data(
         chief_image: map.chief_image,
     })
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct HuygensPsf {
+    intensity: Vec<f64>,
+    grid: usize,
+    pupil_grid: usize,
+    pixel_size: f64,
+    strehl: f64,
+    wavelength: f64,
+    normalization: &'static str,
+    model: &'static str,
+    image_sampling: &'static str,
+    failed_pupil_rays: usize,
+    units: &'static str,
+}
+
 pub fn huygens_psf(
     s: &System,
     f: &Field,
@@ -607,13 +901,31 @@ pub fn huygens_psf(
     size: Option<usize>,
     pitch: Option<f64>,
 ) -> Result<Value, String> {
+    serde_json::to_value(huygens_psf_report(s, f, w, grid, size, pitch)?).map_err(|e| e.to_string())
+}
+pub(crate) fn huygens_psf_report(
+    s: &System,
+    f: &Field,
+    w: f64,
+    grid: usize,
+    size: Option<usize>,
+    pitch: Option<f64>,
+) -> Result<HuygensPsf, String> {
     let size = size.unwrap_or(2 * grid);
     let psf = huygens_psf_data(s, f, w, grid, size, pitch)?;
-    Ok(
-        json!({"intensity":psf.intensity,"grid":psf.n,"pupil_grid":grid,"pixel_size":psf.pixel,"strehl":psf.strehl,
-        "wavelength":w,"normalization":"sum intensity = 1","model":"direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping","image_sampling":IMAGE_SAMPLING,
-        "failed_pupil_rays":psf.failed,"units":"mm"}),
-    )
+    Ok(HuygensPsf {
+        intensity: psf.intensity,
+        grid: psf.n,
+        pupil_grid: grid,
+        pixel_size: psf.pixel,
+        strehl: psf.strehl,
+        wavelength: w,
+        normalization: "sum intensity = 1",
+        model: "direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping",
+        image_sampling: IMAGE_SAMPLING,
+        failed_pupil_rays: psf.failed,
+        units: "mm",
+    })
 }
 pub fn huygens_mtf(
     s: &System,
@@ -622,6 +934,16 @@ pub fn huygens_mtf(
     grid: usize,
     max_frequency: Option<f64>,
 ) -> Result<Value, String> {
+    serde_json::to_value(huygens_mtf_report(s, f, spectrum, grid, max_frequency)?)
+        .map_err(|e| e.to_string())
+}
+pub(crate) fn huygens_mtf_report(
+    s: &System,
+    f: &Field,
+    spectrum: Spectrum,
+    grid: usize,
+    max_frequency: Option<f64>,
+) -> Result<DiffractionMtf, String> {
     let mut components = vec![];
     for wave in spectrum.wavelengths(s)? {
         let data = huygens_psf_data(s, f, wave.value, grid, 2 * grid, None)
@@ -640,9 +962,7 @@ pub fn huygens_mtf(
     }
     let mut result =
         compose_diffraction_mtf(&components, spectrum, s.field_frame(f), grid, max_frequency)?;
-    result["model"] = json!(
-        "direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color"
-    );
+    result.model = "direct Huygens-Fresnel pupil sum with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color";
     Ok(result)
 }
 
@@ -701,13 +1021,51 @@ struct PsfComponent {
     data: PsfData,
     spectral: SpectralComponent,
 }
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct Otf {
+    pub real: Vec<f64>,
+    pub imaginary: Vec<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct DiffractionComponent {
+    #[serde(flatten)]
+    spectral: SpectralComponent,
+    pixel_size: f64,
+    sampling_cutoff: f64,
+    chief_image: [f64; 2],
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct DiffractionMtf {
+    frequencies: Vec<f64>,
+    sagittal: Vec<f64>,
+    tangential: Vec<f64>,
+    sagittal_otf: Otf,
+    tangential_otf: Otf,
+    spectrum: Spectrum,
+    components: Vec<DiffractionComponent>,
+    origin: [f64; 2],
+    transmitted_weight: f64,
+    pupil_grid: usize,
+    sampling_limit: f64,
+    max_frequency: f64,
+    frame: FieldFrame,
+    units: &'static str,
+    image_sampling: &'static str,
+    failed_pupil_rays: usize,
+    normalization: &'static str,
+    model: &'static str,
+}
+
 fn compose_diffraction_mtf(
     components: &[PsfComponent],
     spectrum: Spectrum,
     frame: FieldFrame,
     grid: usize,
     max_frequency: Option<f64>,
-) -> Result<Value, String> {
+) -> Result<DiffractionMtf, String> {
     let total = components
         .iter()
         .map(|c| c.spectral.effective_weight)
@@ -732,48 +1090,57 @@ fn compose_diffraction_mtf(
         ));
     }
     let frequencies: Vec<_> = (0..=grid).map(|i| max * i as f64 / grid as f64).collect();
-    let mut cuts = vec![];
-    for axis in [frame.sagittal, frame.tangential] {
-        let mut combined = vec![Complex::default(); frequencies.len()];
-        for component in components {
-            let offset = [
-                component.data.chief_image[0] - origin[0],
-                component.data.chief_image[1] - origin[1],
-            ];
-            let shift = FieldFrame::project(axis, offset);
-            let cut = psf_otf_cut(&component.data, axis, shift, &frequencies);
-            let weight = component.spectral.effective_weight / total;
-            for (sum, value) in combined.iter_mut().zip(cut) {
-                sum.re += weight * value.re;
-                sum.im += weight * value.im;
+    let [(sagittal, sagittal_otf), (tangential, tangential_otf)] =
+        [frame.sagittal, frame.tangential].map(|axis| {
+            let mut combined = vec![Complex::default(); frequencies.len()];
+            for component in components {
+                let offset = [
+                    component.data.chief_image[0] - origin[0],
+                    component.data.chief_image[1] - origin[1],
+                ];
+                let shift = FieldFrame::project(axis, offset);
+                let cut = psf_otf_cut(&component.data, axis, shift, &frequencies);
+                let weight = component.spectral.effective_weight / total;
+                for (sum, value) in combined.iter_mut().zip(cut) {
+                    sum.re += weight * value.re;
+                    sum.im += weight * value.im;
+                }
             }
-        }
-        cuts.push(
-            json!({"real":combined.iter().map(|v|v.re).collect::<Vec<_>>(),
-            "imaginary":combined.iter().map(|v|v.im).collect::<Vec<_>>(),
-            "magnitude":combined.iter().map(|v|v.abs2().sqrt()).collect::<Vec<_>>()}),
-        );
-    }
-    let spectral: Vec<_> = components
+            let otf = Otf {
+                real: combined.iter().map(|v| v.re).collect(),
+                imaginary: combined.iter().map(|v| v.im).collect(),
+            };
+            (combined.iter().map(|v| v.abs2().sqrt()).collect(), otf)
+        });
+    let spectral = components
         .iter()
-        .map(|c| {
-            let mut value = serde_json::to_value(&c.spectral).unwrap();
-            value["pixel_size"] = json!(c.data.pixel);
-            value["sampling_cutoff"] = json!(1. / (2. * c.data.pixel));
-            value["chief_image"] = json!(c.data.chief_image);
-            value
+        .map(|c| DiffractionComponent {
+            spectral: c.spectral.clone(),
+            pixel_size: c.data.pixel,
+            sampling_cutoff: 1. / (2. * c.data.pixel),
+            chief_image: c.data.chief_image,
         })
         .collect();
-    Ok(
-        json!({"frequencies":frequencies,"sagittal":cuts[0]["magnitude"],"tangential":cuts[1]["magnitude"],
-        "sagittal_otf":{"real":cuts[0]["real"],"imaginary":cuts[0]["imaginary"]},
-        "tangential_otf":{"real":cuts[1]["real"],"imaginary":cuts[1]["imaginary"]},
-        "spectrum":spectrum,"components":spectral,"origin":origin,"transmitted_weight":total,
-        "pupil_grid":grid,"sampling_limit":limit,"max_frequency":max,"frame":frame,"units":"cycles/mm","image_sampling":IMAGE_SAMPLING,
-        "failed_pupil_rays":components.iter().map(|c|c.data.failed).sum::<usize>(),
-        "normalization":"incident spectral weights times sampled pupil transmission; normalized at DC",
-        "model":"Fraunhofer with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color"}),
-    )
+    Ok(DiffractionMtf {
+        frequencies,
+        sagittal,
+        tangential,
+        sagittal_otf,
+        tangential_otf,
+        spectrum,
+        components: spectral,
+        origin,
+        transmitted_weight: total,
+        pupil_grid: grid,
+        sampling_limit: limit,
+        max_frequency: max,
+        frame,
+        units: "cycles/mm",
+        image_sampling: IMAGE_SAMPLING,
+        failed_pupil_rays: components.iter().map(|c| c.data.failed).sum::<usize>(),
+        normalization: "incident spectral weights times sampled pupil transmission; normalized at DC",
+        model: "Fraunhofer with paraxial exit pupil mapping; complex OTF sum on common physical frequencies, preserving chief-ray lateral color",
+    })
 }
 pub fn diffraction_mtf(
     s: &System,
@@ -782,6 +1149,16 @@ pub fn diffraction_mtf(
     grid: usize,
     max_frequency: Option<f64>,
 ) -> Result<Value, String> {
+    serde_json::to_value(diffraction_mtf_report(s, f, spectrum, grid, max_frequency)?)
+        .map_err(|e| e.to_string())
+}
+pub(crate) fn diffraction_mtf_report(
+    s: &System,
+    f: &Field,
+    spectrum: Spectrum,
+    grid: usize,
+    max_frequency: Option<f64>,
+) -> Result<DiffractionMtf, String> {
     let mut components = vec![];
     for wave in spectrum.wavelengths(s)? {
         let data =
@@ -799,6 +1176,21 @@ pub fn diffraction_mtf(
         components.push(PsfComponent { data, spectral });
     }
     compose_diffraction_mtf(&components, spectrum, s.field_frame(f), grid, max_frequency)
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct WavefrontMap {
+    grid: usize,
+    opd: Vec<Option<f64>>,
+    pupils: Vec<[f64; 2]>,
+    rms: f64,
+    peak_to_valley: f64,
+    mean: f64,
+    wavelength: f64,
+    units: &'static str,
+    valid: usize,
+    failed: usize,
+    reference: &'static str,
 }
 
 #[cfg(test)]
@@ -1080,9 +1472,36 @@ mod tests {
     }
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct Transmission {
+    wavelength: f64,
+    weight: f64,
+    color: [f64; 4],
+    transmitted: usize,
+    rejected: usize,
+    transmitted_fraction: f64,
+    effective_weight: f64,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct PolychromaticSpot {
+    #[serde(flatten)]
+    spot: super::sampling::Spot,
+    wavelengths: Vec<f64>,
+    colors: Vec<[f64; 4]>,
+    failures: Vec<Transmission>,
+}
+
 pub fn polychromatic_spot(s: &System, f: &Field, sampling: PupilSampling) -> Result<Value, String> {
+    serde_json::to_value(polychromatic_spot_report(s, f, sampling)?).map_err(|e| e.to_string())
+}
+pub(crate) fn polychromatic_spot_report(
+    s: &System,
+    f: &Field,
+    sampling: PupilSampling,
+) -> Result<PolychromaticSpot, String> {
     let (bundle, components) = s.sample_spectrum(f, sampling, Spectrum::Polychromatic {})?;
-    let mut result = bundle.json()?;
+    let spot = bundle.spot()?;
     let wavelengths: Vec<_> = components
         .iter()
         .flat_map(|component| {
@@ -1093,15 +1512,24 @@ pub fn polychromatic_spot(s: &System, f: &Field, sampling: PupilSampling) -> Res
         .iter()
         .flat_map(|component| std::iter::repeat_n(component.color, component.transmitted_samples))
         .collect();
-    let failures:Vec<_>=components.iter().map(|component| json!({
-        "wavelength":component.wavelength,"weight":component.weight,"color":component.color,
-        "transmitted":component.transmitted_samples,"rejected":component.pupil_samples-component.transmitted_samples,
-        "transmitted_fraction":component.transmitted_fraction,"effective_weight":component.effective_weight
-    })).collect();
-    result["wavelengths"] = json!(wavelengths);
-    result["colors"] = json!(colors);
-    result["failures"] = json!(failures);
-    Ok(result)
+    let failures: Vec<_> = components
+        .iter()
+        .map(|component| Transmission {
+            wavelength: component.wavelength,
+            weight: component.weight,
+            color: component.color,
+            transmitted: component.transmitted_samples,
+            rejected: component.pupil_samples - component.transmitted_samples,
+            transmitted_fraction: component.transmitted_fraction,
+            effective_weight: component.effective_weight,
+        })
+        .collect();
+    Ok(PolychromaticSpot {
+        spot,
+        wavelengths,
+        colors,
+        failures,
+    })
 }
 
 #[cfg(test)]
@@ -1248,8 +1676,8 @@ mod spectral_tests {
             Some(100.),
         )
         .unwrap();
-        assert!(result["tangential"][4].as_f64().unwrap() < 1e-12);
-        assert!((result["sagittal"][4].as_f64().unwrap() - 1.).abs() < 1e-12);
+        assert!(result.tangential[4] < 1e-12);
+        assert!((result.sagittal[4] - 1.).abs() < 1e-12);
         components[1].spectral.weight = 3.;
         components[1].spectral.effective_weight = 3.;
         let result = compose_diffraction_mtf(
@@ -1260,15 +1688,15 @@ mod spectral_tests {
             Some(100.),
         )
         .unwrap();
-        assert!((result["tangential"][4].as_f64().unwrap() - 0.5).abs() < 1e-12);
+        assert!((result.tangential[4] - 0.5).abs() < 1e-12);
         components[0] = impulse_component(500., 1., 0.5, 0.001, -0.005);
         let result =
             compose_diffraction_mtf(&components, Spectrum::Polychromatic {}, frame, 8, None)
                 .unwrap();
-        assert_eq!(result["sampling_limit"], 500.);
+        assert_eq!(result.sampling_limit, 500.);
         // At 312.5 cycles/mm the long-wavelength component is beyond its cutoff;
         // its DFT must not wrap around and re-enter the weighted response.
-        assert!((result["sagittal"][5].as_f64().unwrap() - 0.5 / 3.5).abs() < 1e-12);
+        assert!((result.sagittal[5] - 0.5 / 3.5).abs() < 1e-12);
         assert!(
             compose_diffraction_mtf(
                 &components,
