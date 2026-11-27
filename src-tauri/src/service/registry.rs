@@ -17,6 +17,8 @@ pub enum FileAccess {
     None,
     Read,
     Write,
+    /// The step commands determine the requested file operations.
+    Steps,
 }
 
 type Handler = dyn Fn(Target<'_>, Value) -> Result<Value, String> + Send + Sync;
@@ -25,6 +27,7 @@ pub struct CommandSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub access: Access,
+    pub meta: bool,
     pub files: FileAccess,
     pub params_schema: Value,
     pub result_schema: fn() -> Value,
@@ -32,6 +35,11 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
+    pub(super) fn call(&self, target: Target<'_>, args: Value) -> Result<Value, String> {
+        self.validate(&args)?;
+        (self.handler)(target, args)
+    }
+
     fn validate(&self, args: &Value) -> Result<(), String> {
         if args.get("field_index").is_some()
             && (args.get("field").is_some() || args.get("field_x").is_some())
@@ -58,6 +66,7 @@ fn command<P: DeserializeOwned + JsonSchema + 'static, R: Serialize + JsonSchema
         name,
         description,
         access,
+        meta: false,
         files,
         params_schema: schema::derived::<P>(),
         result_schema: schema::result::<R>,
@@ -103,9 +112,7 @@ pub fn validate_args(name: &str, args: &Value) -> Result<(), String> {
 }
 
 pub(super) fn call(target: Target<'_>, name: &str, args: Value) -> Result<Value, String> {
-    let spec = lookup(name)?;
-    spec.validate(&args)?;
-    (spec.handler)(target, args)
+    lookup(name)?.call(target, args)
 }
 
 pub(super) enum Target<'a> {
@@ -120,7 +127,7 @@ pub(super) enum Store<'a> {
 }
 
 impl<'a> Store<'a> {
-    fn engine(self) -> Result<&'a mut Engine, String> {
+    pub(super) fn engine(self) -> Result<&'a mut Engine, String> {
         match self {
             Self::Workspace(w) => w.engine_mut(),
             Self::Engine(e) => Ok(e),
@@ -198,6 +205,12 @@ impl Target<'_> {
 }
 
 macro_rules! tool {
+    (Meta, $handler:ident, $access:ident, $files:ident, $description:literal) => {
+        CommandSpec {
+            meta: true,
+            ..tool!($handler, $access, $files, $description)
+        }
+    };
     ($handler:ident, Read, $files:ident, $description:literal) => {
         command(
             stringify!($handler),
@@ -221,6 +234,7 @@ macro_rules! tool {
 pub fn registry() -> &'static [CommandSpec] {
     static TOOLS: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         vec![
+            tool!(Meta, batch, Mutate, Steps, "Run ordered optical commands under one workspace lock. Supply an optional starting revision. Mutations inherit the current step revision. Stop at the first error; rollback defaults to true. History, workspace control, capabilities and nested batch commands are excluded."),
             tool!(
                 bench_get,
                 Read,
@@ -273,7 +287,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_lab_check,
                 Read,
                 None,
-                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Recommends dump positions for escaped beams."
+                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
             ),
             tool!(
                 bench_alignment_guide,
@@ -288,19 +302,19 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Return a lab blueprint or alignment SOP with its filename, MIME type and text content."
             ),
             tool!(
-                workspace_status,
+                Meta, workspace_status,
                 Read,
                 None,
                 "Read the workspace state before requesting optical data. A recovery state is connected but has no active optical system."
             ),
             tool!(
-                workspace_retry,
+                Meta, workspace_retry,
                 Mutate,
                 Read,
                 "While recovery is active, reread a user-repaired saved file under the current workspace lease. A missing or invalid file stays in recovery. Requires its current recovery revision."
             ),
             tool!(
-                workspace_recover,
+                Meta, workspace_recover,
                 Mutate,
                 Write,
                 "While recovery is active, validate a chosen native/Geopter/ZMX project or create a new system. Preserve the original file before installing the chosen system; reject changed disk contents and stale recovery revisions. No optical tool can write through recovery."
@@ -366,31 +380,31 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Run parallel seeded Monte Carlo tolerance trials with optional autofocus compensator, returning distribution statistics (mean, std_dev, min/max, p50/p80/p90/p95/p98), pass yield rate, compensator stroke range, and histogram."
             ),
             tool!(
-                history_list,
+                Meta, history_list,
                 Read,
                 None,
                 "List the in-memory revision history snapshots of the current workspace, including undo/redo availability."
             ),
             tool!(
-                history_undo,
+                Meta, history_undo,
                 Mutate,
                 None,
                 "Undo the latest workspace mutation by restoring the previous prescription and project link. Requires the current revision."
             ),
             tool!(
-                history_redo,
+                Meta, history_redo,
                 Mutate,
                 None,
                 "Redo a previously undone workspace mutation atomically. Requires the current revision."
             ),
             tool!(
-                history_restore,
+                Meta, history_restore,
                 Mutate,
                 None,
                 "Restore a historical prescription and project link by its zero-based index from history_list. The restore is undoable and requires the current revision."
             ),
             tool!(
-                history_compare,
+                Meta, history_compare,
                 Read,
                 None,
                 "Compare two revision history snapshots (default: previous vs current), returning optical metric deltas (EFL, BFL, F/#, RMS spot) and per-surface prescription diffs."
@@ -654,7 +668,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Export the current prescription as native or Geopter JSON text"
             ),
             tool!(
-                capabilities,
+                Meta, capabilities,
                 Read,
                 None,
                 "Describe all implemented tools and physical scope"
@@ -689,6 +703,7 @@ mod tests {
                 spec.name
             );
             let files = match spec.name {
+                "batch" => FileAccess::Steps,
                 "project_list" | "project_open" | "workspace_retry" => FileAccess::Read,
                 "project_save_as" | "workspace_recover" => FileAccess::Write,
                 _ => FileAccess::None,

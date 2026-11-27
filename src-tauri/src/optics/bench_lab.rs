@@ -1117,6 +1117,16 @@ pub(crate) struct LabCheck {
     clamping: Vec<Clamping>,
 }
 
+impl LabCheck {
+    pub(crate) fn require_pass(&self) -> Result<(), String> {
+        if self.passed {
+            Ok(())
+        } else {
+            Err(format!("Bench lab check failed with {} errors", self.counts.errors))
+        }
+    }
+}
+
 fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<LabCheck, String> {
     let grid = Grid::new(bench)?;
     let mut issues = Vec::new();

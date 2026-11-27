@@ -51,6 +51,15 @@ pub(super) struct BenchDraft {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct BenchCheck {
+    #[schemars(default, with = "bench::Bench")]
+    pub bench: Option<bench::Bench>,
+    #[serde(default)]
+    pub require_pass: bool,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct BenchCatalog {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]

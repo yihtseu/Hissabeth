@@ -33,6 +33,8 @@ jobs:
                   workspaces: src-tauri
             - name: Test Rust library
               run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+            - name: Test headless bench script
+              run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test batch_script
             - uses: oven-sh/setup-bun@v2
             - name: Build desktop assets
               run: |

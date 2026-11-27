@@ -69,7 +69,29 @@ interface FieldArgs extends WavelengthArgs {
     field_index: number;
 }
 
+interface BatchFailure {
+    index: number;
+    command: string;
+    error: string;
+}
+
 interface ToolMap {
+    batch: {
+        args: {
+            steps: { command: string; args: Record<string, unknown> }[];
+            rollback?: boolean;
+            revision?: number;
+        };
+        result: {
+            ok: boolean;
+            results: (
+                | { index: number; command: string; ok: true; result: unknown }
+                | (BatchFailure & { ok: false })
+            )[];
+            failed: BatchFailure | null;
+            revision: number;
+        };
+    };
     bench_example: { args: NoArgs; result: { bench: import('./bench').Bench } };
     bench_get: {
         args: NoArgs;
@@ -112,7 +134,7 @@ interface ToolMap {
         };
     };
     bench_lab_check: {
-        args: { bench?: import('./bench').Bench };
+        args: { bench?: import('./bench').Bench; require_pass?: boolean };
         result: import('./bench').BenchLabCheck;
     };
     bench_alignment_guide: {

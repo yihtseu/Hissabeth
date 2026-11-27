@@ -35,7 +35,7 @@ fn respond(
     let id = request.get("id")?.clone();
     let result = match request["method"].as_str().unwrap_or("") {
         "initialize" => Ok(
-            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"hissabeth","version":env!("CARGO_PKG_VERSION")},"instructions":"Read workspace_status first; if recovery is active, use workspace_retry or workspace_recover before optical tools. Read system_get before editing. All dimensions are mm and wavelengths nm. GUI reflects changes immediately. Use field_index for stored fields. Every mutating operation requires the current revision."}),
+            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"hissabeth","version":env!("CARGO_PKG_VERSION")},"instructions":"Read workspace_status first; if recovery is active, use workspace_retry or workspace_recover before optical tools. Read system_get before editing. All dimensions are mm and wavelengths nm. GUI reflects changes immediately. Use field_index for stored fields. For individual mutations supply the current revision. A batch accepts an optional starting revision and chains revisions for its steps."}),
         ),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools":tools()})),

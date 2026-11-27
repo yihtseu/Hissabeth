@@ -10,6 +10,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+mod batch;
 mod broker;
 mod commands;
 mod history;
@@ -34,6 +35,7 @@ pub struct Engine {
     _lease: Arc<std::fs::File>,
     history: history::History,
     projects: ProjectFiles,
+    batch: Option<batch::Transaction>,
 }
 
 pub fn field_argument(s: &System, args: &Value) -> Result<Field, String> {
@@ -150,7 +152,7 @@ impl Engine {
             if std::fs::read(&path).map_err(|e| e.to_string())? != bytes {
                 return Err("Saved file changed while loading; retry from disk".into());
             }
-            persist_system(&path, &system, &projects, false)?;
+            persist_system(&path, &system, &projects, false, None)?;
         }
         Ok(Self::new(path, lease, revision, system, projects))
     }
@@ -172,6 +174,7 @@ impl Engine {
             revision,
             path,
             _lease: lease,
+            batch: None,
             projects,
         }
     }
@@ -210,15 +213,21 @@ impl Engine {
         self.check_revision(expected)?;
         self.persist(next, &projects)?;
         self.projects = projects;
+        if self.batch.is_none() {
+            self.record_history(action);
+        }
+        Ok(Revision {
+            revision: self.revision,
+        })
+    }
+
+    fn record_history(&mut self, action: &str) {
         self.history.push(
             self.revision,
             action,
             self.system.clone(),
             self.projects.linked_path.clone(),
         );
-        Ok(Revision {
-            revision: self.revision,
-        })
     }
 
     fn persist(&mut self, next: System, projects: &ProjectFiles) -> Result<(), String> {
@@ -226,7 +235,13 @@ impl Engine {
             .revision
             .checked_add(1)
             .ok_or("Workspace revision exhausted")?;
-        persist_system(&self.path, &next, projects, projects != &self.projects)?;
+        persist_system(
+            &self.path,
+            &next,
+            projects,
+            projects != &self.projects,
+            self.batch.as_mut().filter(|b| b.rollback).map(|b| &mut b.journal),
+        )?;
         self.system = next;
         self.revision = revision;
         Ok(())
@@ -258,7 +273,7 @@ impl Engine {
 
     fn project_open(&mut self, path: &str, expected: u64) -> Result<OpenProject, String> {
         self.check_revision(expected)?;
-        let path = ProjectFiles::resolve(&self.path, path, false)?;
+        let path = ProjectFiles::resolve(&self.path, path, false, None)?;
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let linked = !ProjectFiles::is_zmx(&path);
@@ -281,7 +296,12 @@ impl Engine {
 
     fn project_save_as(&mut self, path: &str, expected: u64) -> Result<SavedProject, String> {
         self.check_revision(expected)?;
-        let path = ProjectFiles::resolve(&self.path, path, true)?;
+        let path = ProjectFiles::resolve(
+            &self.path,
+            path,
+            true,
+            self.batch.as_mut().map(|b| &mut b.journal),
+        )?;
         let mut projects = self.projects.clone();
         projects.select(&path, true);
         let result =

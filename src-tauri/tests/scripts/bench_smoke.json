@@ -1,0 +1,8 @@
+{
+    "steps": [
+        { "command": "bench_template", "args": { "name": "polarized_beam_combiner", "apply": true } },
+        { "command": "bench_trace", "args": {} },
+        { "command": "bench_export_blueprint", "args": { "format": "svg" } },
+        { "command": "bench_lab_check", "args": { "require_pass": true } }
+    ]
+}

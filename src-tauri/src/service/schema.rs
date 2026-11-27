@@ -32,6 +32,9 @@ pub fn bench_schema() -> Value {
 }
 
 pub fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if schema == &Value::Bool(true) {
+        return Ok(());
+    }
     if let Some(choices) = schema["oneOf"]
         .as_array()
         .or_else(|| schema["anyOf"].as_array())
@@ -132,10 +135,9 @@ pub fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), 
             }
         }
         for (key, v) in object {
-            let child = &schema["properties"][key];
-            if child.is_null() {
-                return Err(format!("Unknown argument {path}.{key}"));
-            }
+            let child = schema["properties"].get(key).or_else(|| {
+                schema.get("additionalProperties").filter(|extra| **extra != false)
+            }).ok_or_else(|| format!("Unknown argument {path}.{key}"))?;
             validate_schema(v, child, &format!("{path}.{key}"))?;
         }
     }

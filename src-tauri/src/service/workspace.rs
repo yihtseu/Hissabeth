@@ -48,6 +48,21 @@ fn workspace_dir(workspace_file: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+fn create_project_dir(path: &Path, created: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let missing: Vec<_> = path
+        .ancestors()
+        .take_while(|dir| !dir.as_os_str().is_empty() && !dir.is_dir())
+        .collect();
+    for dir in missing.into_iter().rev() {
+        match std::fs::create_dir(dir) {
+            Ok(()) => created.push(dir.to_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => (),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 impl ProjectFiles {
     pub fn load(workspace_file: &Path) -> Self {
         std::fs::read(workspace_dir(workspace_file).join(PROJECT_META))
@@ -61,7 +76,12 @@ impl ProjectFiles {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zmx"))
     }
 
-    pub fn resolve(workspace_file: &Path, path: &str, save: bool) -> Result<PathBuf, String> {
+    pub fn resolve(
+        workspace_file: &Path,
+        path: &str,
+        save: bool,
+        journal: Option<&mut FileJournal>,
+    ) -> Result<PathBuf, String> {
         const SAVE_ZMX: &str =
             "Use project_export to write ZMX; project_save_as writes Hissabeth JSON";
         if path.trim().is_empty() {
@@ -88,7 +108,11 @@ impl ProjectFiles {
             .ok_or("Project file has no parent directory")?;
         let name = resolved.file_name().ok_or("Project file has no name")?;
         if save {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            if let Some(log) = journal {
+                create_project_dir(parent, &mut log.directories).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
         }
         let workspace_dir = workspace_dir(workspace_file)
             .canonicalize()
@@ -156,6 +180,54 @@ fn stage_file(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, Stri
     Ok(file)
 }
 
+type Backup = Option<tempfile::NamedTempFile>;
+
+fn backup_file(path: &Path) -> Result<Backup, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(stage_file(path, &bytes)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+fn restore_file(path: &Path, previous: Backup) -> std::io::Result<()> {
+    match previous {
+        Some(file) => file.persist(path).map(|_| ()).map_err(|e| e.error),
+        None => std::fs::remove_file(path),
+    }
+}
+
+#[derive(Default)]
+pub(super) struct FileJournal {
+    originals: std::collections::BTreeMap<PathBuf, Backup>,
+    directories: Vec<PathBuf>,
+}
+
+impl FileJournal {
+    pub fn keep_directories(&mut self) {
+        self.directories.clear();
+    }
+
+    pub fn restore(self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (path, original) in self.originals {
+            if let Err(e) = restore_file(&path, original) {
+                errors.push(format!("could not restore {}: {e}", path.display()));
+            }
+        }
+        for path in self.directories.into_iter().rev() {
+            if let Err(e) = std::fs::remove_dir(&path) {
+                errors.push(format!("could not remove {}: {e}", path.display()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
 struct ProjectWrite {
     path: PathBuf,
     next: tempfile::NamedTempFile,
@@ -164,11 +236,7 @@ struct ProjectWrite {
 
 impl ProjectWrite {
     fn stage(path: PathBuf, bytes: &[u8]) -> Result<Self, String> {
-        let previous = match std::fs::read(&path) {
-            Ok(bytes) => Some(stage_file(&path, &bytes)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
+        let previous = backup_file(&path)?;
         let next = stage_file(&path, bytes)?;
         Ok(Self {
             path,
@@ -183,6 +251,7 @@ pub(super) fn persist_system(
     system: &System,
     projects: &ProjectFiles,
     save_metadata: bool,
+    journal: Option<&mut FileJournal>,
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(system).map_err(|e| e.to_string())?;
     let mut writes = Vec::new();
@@ -207,6 +276,11 @@ pub(super) fn persist_system(
         )?);
     }
 
+    let original = journal
+        .as_ref()
+        .filter(|log| !log.originals.contains_key(path))
+        .map(|_| backup_file(path))
+        .transpose()?;
     let pending_path = path.with_extension("pending");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -236,15 +310,19 @@ pub(super) fn persist_system(
     })();
     if let Err(mut error) = result {
         for (path, previous) in installed.into_iter().rev() {
-            let restored = match previous {
-                Some(previous) => previous.persist(&path).map(|_| ()).map_err(|e| e.error),
-                None => std::fs::remove_file(&path),
-            };
-            if let Err(e) = restored {
+            if let Err(e) = restore_file(&path, previous) {
                 error.push_str(&format!("; could not restore {}: {e}", path.display()));
             }
         }
         return Err(error);
+    }
+    if let Some(journal) = journal {
+        if let Some(original) = original {
+            journal.originals.insert(path.to_owned(), original);
+        }
+        for (path, previous) in installed {
+            journal.originals.entry(path).or_insert(previous);
+        }
     }
     Ok(())
 }

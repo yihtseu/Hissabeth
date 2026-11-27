@@ -1,3 +1,32 @@
+use hissabeth_lib::service::{Workspace, data_dir};
+use serde_json::{Value, json};
+
+fn open_workspace() -> Result<Workspace, String> {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Workspace::open(dir.join("system.json"))
+}
+
+fn run_script(path: Option<&String>) -> Result<(), String> {
+    let run = || -> Result<Value, String> {
+        let path = path.ok_or("--run requires a script path")?;
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let args = serde_json::from_slice(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        open_workspace()?.call("batch", args)
+    };
+    let report = run().unwrap_or_else(|error| json!({"ok": false, "error": error}));
+    println!("{report}");
+    if report["ok"] == true {
+        Ok(())
+    } else {
+        Err(report["failed"]["error"]
+            .as_str()
+            .or(report["error"].as_str())
+            .unwrap_or("Batch failed")
+            .to_owned())
+    }
+}
+
 fn execute() -> Result<(), String> {
     let args: Vec<_> = std::env::args().collect();
 
@@ -16,9 +45,10 @@ fn execute() -> Result<(), String> {
     } else if args.iter().any(|a| a == "--mcp") {
         hissabeth_lib::service::relay()
     } else if args.iter().any(|a| a == "--engine") {
-        let dir = hissabeth_lib::service::data_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let engine = hissabeth_lib::service::Workspace::open(dir.join("system.json"))?;
+        if let Some(index) = args.iter().position(|arg| arg == "--run") {
+            return run_script(args.get(index + 1));
+        }
+        let engine = open_workspace()?;
         hissabeth_lib::service::serve(std::sync::Arc::new(std::sync::RwLock::new(engine)))?;
         loop {
             std::thread::park()

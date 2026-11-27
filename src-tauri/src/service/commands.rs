@@ -25,6 +25,10 @@ pub(super) struct Preview<T> {
     data: T,
 }
 
+pub(super) fn batch(target: Target<'_>, args: batch::Request) -> Result<batch::Report, String> {
+    target.write(|store| store.engine()?.run_batch(args))
+}
+
 fn analysis<T>(
     target: &Target<'_>,
     run: impl FnOnce(&System) -> Result<T, String>,
@@ -320,9 +324,15 @@ pub(super) fn bench_assembly(
 
 pub(super) fn bench_lab_check(
     target: &Target<'_>,
-    args: p::BenchDraft,
+    args: p::BenchCheck,
 ) -> Result<BenchReport<bench_lab::LabCheck>, String> {
-    bench_report(target, args.bench, bench_lab::check)
+    bench_report(target, args.bench, |bench, system| {
+        let report = bench_lab::check(bench, system)?;
+        if args.require_pass {
+            report.require_pass()?;
+        }
+        Ok(report)
+    })
 }
 
 pub(super) fn bench_alignment_guide(
@@ -577,8 +587,7 @@ pub(super) fn project_list(
     target: &Target<'_>,
     _: p::Empty,
 ) -> Result<workspace::ProjectList, String> {
-    let (path, projects) = target.read(|e| Ok((e.path.clone(), e.projects.clone())))?;
-    Ok(projects.list(&path))
+    target.read(|e| Ok(e.projects.list(&e.path)))
 }
 
 pub(super) fn history_undo(target: Target<'_>, args: p::Revision) -> Result<HistoryStep, String> {
