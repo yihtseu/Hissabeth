@@ -98,15 +98,15 @@ interface ToolMap {
         result: { bench: import('./bench').Bench | null; revision: number };
     };
     bench_set: {
-        args: { bench: import('./bench').Bench; revision: number };
+        args: { bench: import('./bench').BenchInput; revision: number };
         result: { revision: number };
     };
     bench_trace: {
-        args: { bench?: import('./bench').Bench };
+        args: { bench?: import('./bench').BenchInput };
         result: import('./bench').BenchTrace;
     };
     bench_assembly: {
-        args: { bench?: import('./bench').Bench };
+        args: { bench?: import('./bench').BenchInput };
         result: import('./bench').BenchAssembly;
     };
     bench_catalog: {
@@ -119,7 +119,7 @@ interface ToolMap {
     };
     bench_auto_aim: {
         args: {
-            bench?: import('./bench').Bench;
+            bench?: import('./bench').BenchInput;
             snap_holes?: boolean;
             uniform_z?: number;
             apply?: boolean;
@@ -134,15 +134,18 @@ interface ToolMap {
         };
     };
     bench_lab_check: {
-        args: { bench?: import('./bench').Bench; require_pass?: boolean };
+        args: { bench?: import('./bench').BenchInput; require_pass?: boolean };
         result: import('./bench').BenchLabCheck;
     };
     bench_alignment_guide: {
-        args: { bench?: import('./bench').Bench };
+        args: { bench?: import('./bench').BenchInput };
         result: import('./bench').BenchAlignmentGuide;
     };
     bench_export_blueprint: {
-        args: { bench?: import('./bench').Bench; format: 'svg' | 'dxf' | 'stl' | 'alignment_md' };
+        args: {
+            bench?: import('./bench').BenchInput;
+            format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
+        };
         result: import('./bench').BenchBlueprintExport;
     };
     /** Workspace state; the only read that also works during recovery. */

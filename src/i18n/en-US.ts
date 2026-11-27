@@ -108,6 +108,8 @@ export default {
             'Run tolerance sensitivity and 100-trial Monte Carlo yield analysis on the current lens with back-focus compensation.',
     },
     bench: {
+        autoRotation: 'Solve rotation with Auto-aim',
+        autoDirection: 'Adjust launch direction with Auto-aim',
         example: 'Load split-beam example',
         undo: 'Undo',
         redo: 'Redo',

@@ -156,7 +156,10 @@ async function run(): Promise<void> {
             trace.value = result;
         }
     } catch (e) {
-        if (alive && request === token) error.value = errorMessage(e);
+        if (alive && request === token) {
+            trace.value = null;
+            error.value = errorMessage(e);
+        }
     } finally {
         if (alive && request === token) pending.value = false;
     }
@@ -175,7 +178,7 @@ async function runLabCheck(): Promise<void> {
         const res = await callTool('bench_lab_check', benchDirty.value ? { bench: active } : {});
         if (alive && request === labToken) labCheck.value = res;
     } catch {
-        // Surface trace errors primarily; lab check stays optional while dragging.
+        if (alive && request === labToken) labCheck.value = null;
     } finally {
         if (alive && request === labToken) labPending.value = false;
     }
@@ -317,7 +320,7 @@ function addFromCatalog(item: BenchCatalogItem): void {
         label: item.name,
         kind: item.kind,
         position: [cx, cy, cz],
-        rotation: [0, 0, 0],
+        rotation: null,
         aperture: item.aperture,
         body_radius: item.body_radius,
         focal_length: item.focal_length,
@@ -547,24 +550,33 @@ const gaussianPolygons = computed(() => {
         .filter(Boolean);
 });
 
+function setRotation(element: BenchElement, axis: 0 | 1 | 2, event: Event): void {
+    if (!element.rotation) return;
+    element.rotation[axis] = Number((event.target as HTMLInputElement).value);
+    schedulePreview();
+}
+
 function shape(e: BenchElement, radius = e.body_radius): string {
+    const rotation = e.rotation;
+    if (!rotation) return '';
     return path(
         Array.from({ length: 33 }, (_, i) => {
             const a = (i * Math.PI) / 16;
-            const v = benchRotate([0, radius * Math.cos(a), radius * Math.sin(a)], e.rotation);
+            const v = benchRotate([0, radius * Math.cos(a), radius * Math.sin(a)], rotation);
             return e.position.map((x, j) => x + v[j]!) as Vec3;
         }),
     );
 }
 function mountLines(e: BenchElement): Vec3[][] {
-    if (!e.mount || !scene.value) return [];
+    if (!e.mount || !scene.value || !e.rotation) return [];
     const [w, h] = e.mount.base_size;
+    const mountYaw = e.rotation[2];
     const low = scene.value.origin[2];
     const high = Math.max(low, e.position[2] - e.body_radius);
     const corners = Array.from({ length: 8 }, (_, i) => {
         const v = benchRotate(
             [((i % 2 ? 1 : -1) * w) / 2, ((Math.floor(i / 2) % 2 ? 1 : -1) * h) / 2, 0],
-            [0, 0, e.rotation[2]],
+            [0, 0, mountYaw],
         );
         return [e.position[0] + v[0], e.position[1] + v[1], i < 4 ? low : high] as Vec3;
     });
@@ -585,14 +597,15 @@ function mountLines(e: BenchElement): Vec3[][] {
 }
 
 function groupCurves(e: BenchElement): Vec3[][] {
-    if (e.kind !== 'lens_group') return [];
+    const rotation = e.rotation;
+    if (e.kind !== 'lens_group' || !rotation) return [];
     let z = 0;
     return props.system.surfaces.flatMap((surface) => {
         const curve = profileCurve(surface, z);
         z += surface.thickness;
         return [0, Math.PI / 2].map((angle) =>
             curve.map(([x, r]) => {
-                const v = benchRotate([x, r * Math.cos(angle), r * Math.sin(angle)], e.rotation);
+                const v = benchRotate([x, r * Math.cos(angle), r * Math.sin(angle)], rotation);
                 return e.position.map((p, i) => p + v[i]!) as Vec3;
             }),
         );
@@ -1187,47 +1200,48 @@ defineExpose({ saveBench, discardBench });
                                 <span>{{ tr('bench.kinds.' + entity.kind) }}</span>
                             </label>
                             <label>
-                                Roll (°)
+                                {{ tr('bench.autoRotation') }}
                                 <input
-                                    type="number"
-                                    step="1"
-                                    :value="entity.rotation[0]"
+                                    type="checkbox"
+                                    :checked="entity.rotation == null"
                                     @change="
-                                        entity.rotation[0] = Number(
-                                            ($event.target as HTMLInputElement).value,
-                                        );
+                                        entity.rotation = ($event.target as HTMLInputElement)
+                                            .checked
+                                            ? null
+                                            : [0, 0, 0];
                                         schedulePreview();
                                     "
                                 />
                             </label>
-                            <label>
-                                Pitch (°)
-                                <input
-                                    type="number"
-                                    step="1"
-                                    :value="entity.rotation[1]"
-                                    @change="
-                                        entity.rotation[1] = Number(
-                                            ($event.target as HTMLInputElement).value,
-                                        );
-                                        schedulePreview();
-                                    "
-                                />
-                            </label>
-                            <label>
-                                Yaw (°)
-                                <input
-                                    type="number"
-                                    step="1"
-                                    :value="entity.rotation[2]"
-                                    @change="
-                                        entity.rotation[2] = Number(
-                                            ($event.target as HTMLInputElement).value,
-                                        );
-                                        schedulePreview();
-                                    "
-                                />
-                            </label>
+                            <template v-if="entity.rotation">
+                                <label>
+                                    Roll (°)
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        :value="entity.rotation[0]"
+                                        @change="setRotation(entity, 0, $event)"
+                                    />
+                                </label>
+                                <label>
+                                    Pitch (°)
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        :value="entity.rotation[1]"
+                                        @change="setRotation(entity, 1, $event)"
+                                    />
+                                </label>
+                                <label>
+                                    Yaw (°)
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        :value="entity.rotation[2]"
+                                        @change="setRotation(entity, 2, $event)"
+                                    />
+                                </label>
+                            </template>
                             <label>
                                 {{ tr('bench.aperture') }}
                                 <input
@@ -1335,6 +1349,19 @@ defineExpose({ saveBench, discardBench });
                                         entity.wavelength = Number(
                                             ($event.target as HTMLInputElement).value,
                                         );
+                                        schedulePreview();
+                                    "
+                                />
+                            </label>
+                            <label>
+                                {{ tr('bench.autoDirection') }}
+                                <input
+                                    type="checkbox"
+                                    :checked="entity.aim_direction"
+                                    @change="
+                                        entity.aim_direction = (
+                                            $event.target as HTMLInputElement
+                                        ).checked;
                                         schedulePreview();
                                     "
                                 />

@@ -251,13 +251,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_set,
                 Mutate,
                 None,
-                "Atomically save a validated free-space bench in the current project. Requires the current shared project revision. Retains the sequential prescription."
+                "Atomically save a free-space bench with fixed rotations and unique downstream connections per output. Omitted element parameters use kind-specific defaults; an omitted or null rotation requires bench_auto_aim before saving. Branches use output from, input to, and optional intermediate output selections via. Requires the current shared project revision."
             ),
             tool!(
                 bench_trace,
                 Read,
                 None,
-                "Trace the saved bench or supplied draft without writing. Nearest surface/mount hits, optional intended port connections, ideal thin lenses and lens_group instances of the current prescription, bounded ray trees and complete power accounting. A lens_group position is its first vertex; local +X is prescription +Z. Groups require forward refractive positive-gap prescriptions with air at both boundaries; their scalar transmittance is applied once. Splitters may set index for polarization-averaged Fresnel splitting; mirrors and splitters may carry a thin-film coating stack. Mirrors, splitters and thin lenses may scatter (lambertian or ABg) into deterministic hemisphere samples; scattered power leaves the specular child. Group ghosts enumerate internal Fresnel bounces (0-2) per surface; shares beyond the bounce budget are truncated to conserve power, and ghost segments skip internal obstruction checks. Detectors with pixels record irradiance maps. Terminations and segments carry the full branch power tree. Jones polarization drives waveplates, polarizers and PBS outputs. Curved mirrors use a paraxial focusing reflection. The geometric ledger adds branch powers incoherently."
+                "Trace the saved bench or supplied draft without writing. Nearest surface/mount hits, optional intended port connections, ideal thin lenses and lens_group instances of the current prescription, bounded ray trees and complete power accounting. A lens_group position is its first vertex; local +X is prescription +Z. Groups require forward refractive positive-gap prescriptions with air at both boundaries; their scalar transmittance is applied once. Splitters may set index for polarization-averaged Fresnel splitting; mirrors and splitters may carry a thin-film coating stack. Mirrors, splitters and thin lenses may scatter (lambertian or ABg) into deterministic hemisphere samples; scattered power leaves the specular child. Group ghosts enumerate internal Fresnel bounces (0-2) per surface; shares beyond the bounce budget are truncated to conserve power, and ghost segments skip internal obstruction checks. Detectors with pixels record irradiance maps. Physical segments record ports, media, wavelength and OPL and link to their preceding segment by index. Named branches aggregate on-axis specular paths between their declared ports. Jones polarization drives waveplates, polarizers and PBS outputs. Curved mirrors use a paraxial focusing reflection. The geometric ledger adds branch powers incoherently."
             ),
             tool!(
                 bench_assembly,
@@ -281,13 +281,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_auto_aim,
                 Mutate,
                 None,
-                "Aim a draft or saved bench from its nominal connections. Optionally snap elements to the hole grid and set a common world Z. Set apply=true with the current revision to save."
+                "Solve omitted or null element rotations from nominal connections. Explicit rotations remain fixed; source directions are adjustable only with aim_direction=true. Optional hole snapping and uniform Z move elements. Set apply=true with the current revision to save a fully resolved result."
             ),
             tool!(
                 bench_lab_check,
                 Read,
                 None,
-                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate saved equal_opl assertions as the first named branch minus the second in mm or um. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
             ),
             tool!(
                 bench_alignment_guide,

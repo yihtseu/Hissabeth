@@ -103,6 +103,8 @@ export default {
             '对当前镜头执行常规公差灵敏度分析和 100 次带后截距补偿的蒙特卡洛良率仿真，列出最敏感的面。',
     },
     bench: {
+        autoRotation: '由自动准直求解姿态',
+        autoDirection: '允许自动准直调整光源方向',
         example: '载入分光示例',
         undo: '撤销',
         redo: '重做',

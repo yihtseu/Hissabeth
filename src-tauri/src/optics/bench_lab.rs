@@ -1,7 +1,10 @@
 //! Lab planning for the geometric bench. All lengths are in millimetres.
 use super::{
     System,
-    bench::{self, Bench, Connection, Element, Kind, Mount, Polarization, Trace},
+    bench::{
+        self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchReport, Connection,
+        Element, Kind, Mount, PathBreak, Polarization, Port, Trace,
+    },
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
 };
 use serde::Serialize;
@@ -353,7 +356,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         label: format!("{id} ({})", hardware.part),
         kind: hardware.kind,
         position,
-        rotation: normal_rotation(normal),
+        rotation: Some(normal_rotation(normal)),
         aperture: hardware.aperture,
         body_radius: hardware.body_radius,
         focal_length: hardware.focal_length,
@@ -493,6 +496,25 @@ pub fn template(name: &str) -> Result<Bench, String> {
             to: to.into(),
         })
         .collect();
+    if name == "mach_zehnder" {
+        scene.branches = [
+            ("arm_a", "reflected", "in_a"),
+            ("arm_b", "transmitted", "in_b"),
+        ].into_iter().map(|(id, output, input)| Branch {
+            id: id.into(),
+            from: Port::new("BS1", output),
+            to: Port::new("BS2", input),
+            via: vec![],
+        }).collect();
+        scene.assertions = vec![Assertion {
+            id: "equal_arms".into(),
+            kind: AssertionKind::EqualOpl,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Mm,
+            tolerance: 1e-6,
+        }];
+    }
     scene.validate()?;
     Ok(scene)
 }
@@ -517,7 +539,7 @@ pub(crate) fn aim(
     snap_holes: bool,
     uniform_z: Option<f64>,
 ) -> Result<AimResult, String> {
-    bench.validate()?;
+    bench.validate_draft()?;
     if uniform_z.is_some_and(|z| !z.is_finite() || z <= 0.) {
         return Err("Uniform Z must be finite and positive".into());
     }
@@ -551,8 +573,12 @@ pub(crate) fn aim(
             let target = indices[&link.to];
             let direction = unit(sub(scene.elements[target].position, source.position))
                 .map_err(|_| format!("{} and {} have coincident positions", source.id, link.to))?;
-            source.direction = direction;
-            pending.push_back((target, direction));
+            if source.aim_direction {
+                source.direction = direction;
+            } else if dot(unit(source.direction)?, direction) < 1. - 1e-9 {
+                warnings.push(format!("{}: fixed launch direction differs from its nominal connection", source.id));
+            }
+            pending.push_back((target, unit(source.direction)?));
         }
     }
     let mut incoming = HashMap::new();
@@ -594,14 +620,12 @@ pub(crate) fn aim(
             }
             pending.push_back((j, out));
         }
-        if let Some(normal) = normal {
-            scene.elements[i].rotation = normal_rotation(normal);
-        } else if !scene
-            .connections
-            .iter()
-            .any(|c| c.from == element.id && c.port == "reflected")
-        {
-            warnings.push(format!("{}: no reflected target to aim at", element.id));
+        if element.rotation.is_none() {
+            if let Some(normal) = normal {
+                scene.elements[i].rotation = Some(normal_rotation(normal));
+            } else if !scene.connections.iter().any(|c| c.from == element.id && c.port == "reflected") {
+                warnings.push(format!("{}: no reflected target to aim at", element.id));
+            }
         }
     }
     for (i, e) in scene.elements.iter().enumerate() {
@@ -609,7 +633,7 @@ pub(crate) fn aim(
             warnings.push(format!("{}: no incoming connection from a source", e.id));
         }
     }
-    scene.validate()?;
+    scene.validate_draft()?;
     let adjusted: Vec<_> = scene
         .elements
         .iter()
@@ -951,7 +975,7 @@ fn base_contains(element: &Element, point: V3) -> bool {
     let Some(mount) = &element.mount else {
         return false;
     };
-    let [x, y, _] = bench::local(sub(point, element.position), [0., 0., element.rotation[2]]);
+    let [x, y, _] = bench::local(sub(point, element.position), [0., 0., element.rotation()[2]]);
     x.abs() <= mount.base_size[0] / 2. && y.abs() <= mount.base_size[1] / 2.
 }
 
@@ -960,7 +984,7 @@ fn base_corners(element: &Element, mount: &Mount) -> [V3; 4] {
     [[-w, -h, 0.], [w, -h, 0.], [w, h, 0.], [-w, h, 0.]].map(|p| {
         add(
             element.position,
-            bench::rotate(p, [0., 0., element.rotation[2]]),
+            bench::rotate(p, [0., 0., element.rotation()[2]]),
         )
     })
 }
@@ -1112,9 +1136,77 @@ pub(crate) struct LabCheck {
     passed: bool,
     counts: IssueCounts,
     issues: Vec<Issue>,
+    assertions: Vec<AssertionResult>,
     gaussian: GaussianEnvelope,
     recommended_beam_dumps: Vec<BeamDump>,
     clamping: Vec<Clamping>,
+}
+
+#[derive(schemars::JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AssertionStatus {
+    Pass,
+    Fail,
+    Unreachable,
+}
+
+#[derive(schemars::JsonSchema, Serialize)]
+struct AssertionResult {
+    assertion: String,
+    branches: [String; 2],
+    value: Option<f64>,
+    unit: AssertionUnit,
+    target: f64,
+    tolerance: f64,
+    residual: Option<f64>,
+    status: AssertionStatus,
+    #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
+    interruption: Option<PathBreak>,
+}
+
+fn equal_opl(a: &BranchReport, b: &BranchReport, from: &Port) -> Result<f64, PathBreak> {
+    if let Some(interruption) = a.interruption.as_ref().or(b.interruption.as_ref()) {
+        return Err(interruption.clone());
+    }
+    let ([a], [b]) = (a.paths.as_slice(), b.paths.as_slice()) else {
+        return Err(PathBreak::new(&from.element, &from.port, "ambiguous_start"));
+    };
+    if let Some(interruption) = a.interruption.as_ref().or(b.interruption.as_ref()) {
+        return Err(interruption.clone());
+    }
+    // Both paths were built from the same split arrival, so they share a source and wavelength.
+    if a.start_segment != b.start_segment {
+        return Err(PathBreak::new(&from.element, &from.port, "different_start"));
+    }
+    Ok(a.opl_mm - b.opl_mm)
+}
+
+fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
+    let reports: HashMap<_, _> = trace.branches.iter().map(|report| (report.id.as_str(), report)).collect();
+    let branches: HashMap<_, _> = bench.branches.iter().map(|branch| (branch.id.as_str(), branch)).collect();
+    bench.assertions.iter().filter(|assertion| assertion.kind == AssertionKind::EqualOpl).map(|a| {
+        let [first, second] = a.branches.each_ref().map(String::as_str);
+        let compared = equal_opl(reports[first], reports[second], &branches[first].from)
+            .map(|value| a.unit.convert_mm(value));
+        let value = compared.as_ref().ok().copied();
+        let residual = value.map(|value| value - a.target);
+        let status = match residual {
+            Some(residual) if residual.abs() <= a.tolerance => AssertionStatus::Pass,
+            Some(_) => AssertionStatus::Fail,
+            None => AssertionStatus::Unreachable,
+        };
+        AssertionResult {
+            assertion: a.id.clone(),
+            branches: a.branches.clone(),
+            value,
+            unit: a.unit,
+            target: a.target,
+            tolerance: a.tolerance,
+            residual,
+            status,
+            interruption: compared.err(),
+        }
+    }).collect()
 }
 
 impl LabCheck {
@@ -1281,6 +1373,18 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
             clamping_offset_mm: free.map(|(_, d)| d),
         });
     }
+    let assertions = check_assertions(bench, trace);
+    for result in &assertions {
+        let (code, target, message) = match result.status {
+            AssertionStatus::Pass => continue,
+            AssertionStatus::Fail => ("assertion_failed", None, format!("{}: OPL residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
+            AssertionStatus::Unreachable => {
+                let location = result.interruption.as_ref().unwrap();
+                ("assertion_unreachable", Some(location.element.as_str()), format!("{}: {} / {} ({})", result.assertion, location.element, location.port, location.reason))
+            }
+        };
+        issues.push(issue("error", code, target, None, message));
+    }
     let count = |severity| {
         issues
             .iter()
@@ -1298,6 +1402,7 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
             info,
         },
         issues,
+        assertions,
         gaussian: gaussian.report(),
         recommended_beam_dumps: dumps,
         clamping,
@@ -1858,9 +1963,9 @@ fn stl(bench: &Bench) -> Result<String, String> {
         let rim = std::array::from_fn::<_, 32, _>(|i| {
             let (s, c) = (TAU * i as f64 / 32.).sin_cos();
             let p = [-2., e.body_radius * c, e.body_radius * s];
-            add(center, bench::rotate(p, e.rotation))
+            add(center, bench::rotate(p, e.rotation()))
         });
-        let slab = bench::rotate([4., 0., 0.], e.rotation);
+        let slab = bench::rotate([4., 0., 0.], e.rotation());
         prism(&mut out, &rim, &rim.map(|p| add(p, slab)))?;
     }
     out.push_str("endsolid hissabeth_bench\n");
@@ -2041,6 +2146,94 @@ mod tests {
     }
 
     #[test]
+    fn mach_zehnder_arms_measure_the_actual_fold_and_mirror_translation() {
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        let expected_ports = [
+            [("BS1", "reflected"), ("M1", "in"), ("M1", "reflected"), ("BS2", "in_a")],
+            [("BS1", "transmitted"), ("M2", "in"), ("M2", "reflected"), ("BS2", "in_b")],
+        ];
+        let trace = bench.trace(&system).unwrap();
+        for (report, expected) in trace.branches.iter().zip(expected_ports) {
+            let [arm] = report.paths.as_slice() else { panic!("expected one axial path") };
+            assert!(arm.nominal_match);
+            assert_eq!(arm.ports, expected.map(|(element, port)| Port::new(element, port)));
+            assert!((arm.length_mm - 400.).abs() <= 1e-9);
+            assert!((arm.opl_mm - 400.).abs() <= 1e-9);
+            assert_eq!(arm.wavelength_nm, 532.);
+        }
+        assert_eq!(trace.branches.len(), 2);
+        assert_eq!(lab_check(&bench, &system).unwrap()["assertions"][0]["status"], "pass");
+
+        let shift = 2.5;
+        bench.elements[1].position[1] += shift;
+        // The mirror keeps its 45° fold. The first leg grows by the vertical shift;
+        // the parallel outgoing ray crosses the diagonal combiner farther along X by the same amount.
+        let moved = bench.trace(&system).unwrap();
+        for (report, expected) in moved.branches.iter().zip([400. + 2. * shift, 400.]) {
+            let arm = &report.paths[0];
+            assert!(arm.nominal_match);
+            assert!((arm.length_mm - expected).abs() <= 1e-9);
+            assert!((arm.opl_mm - expected).abs() <= 1e-9);
+        }
+        bench.assertions[0].unit = AssertionUnit::Um;
+        let check = lab_check(&bench, &system).unwrap();
+        let result = &check["assertions"][0];
+        assert_eq!(result["status"], "fail");
+        assert_eq!(result["unit"], "um");
+        assert!((result["value"].as_f64().unwrap() - 5000.).abs() <= 1e-6);
+        assert_eq!(result["residual"], result["value"]);
+        assert_eq!(check["passed"], false);
+    }
+
+    #[test]
+    fn interrupted_arms_identify_the_physical_obstacle_or_missed_input() {
+        let system = System::default();
+        let bench = template("mach_zehnder").unwrap();
+        let mut blocked = bench.clone();
+        blocked.elements.push(mount_element("STOP", DUMP, [250., 300., 75.], [0., 1., 0.]));
+        let trace = blocked.trace(&system).unwrap();
+        let partial = &trace.branches[0].paths[0];
+        assert!(!partial.nominal_match);
+        assert!((partial.length_mm - 100.).abs() <= 1e-9);
+        assert!((partial.opl_mm - 100.).abs() <= 1e-9);
+        let mut missed = bench;
+        missed.elements[1].position[1] += 50.;
+        missed.elements[1].position[0] += 100.;
+        for (scene, expected) in [
+            (blocked, json!({"element":"STOP", "port":"in", "reason":"unexpected_hit"})),
+            (missed, json!({"element":"M1", "port":"in", "reason":"missed_target"})),
+        ] {
+            let check = lab_check(&scene, &system).unwrap();
+            let result = &check["assertions"][0];
+            assert_eq!(result["status"], "unreachable");
+            assert_eq!(result["value"], Value::Null);
+            assert_eq!(result["residual"], Value::Null);
+            assert_eq!(result["break"], expected);
+        }
+    }
+
+    #[test]
+    fn branch_via_selects_an_intermediate_splitter_output() {
+        let mut bench = template("mach_zehnder").unwrap();
+        let mut plate = mount_element("BS3", SPLITTER, [250., 300., 75.], [0., 1., 0.]);
+        plate.reflectance = 0.;
+        plate.transmittance = 1.;
+        bench.elements.push(plate);
+        bench.connections[1].to = "BS3".into();
+        for (port, to) in [("transmitted", "M1"), ("reflected", "D1")] {
+            bench.connections.push(Connection { from: "BS3".into(), port: port.into(), to: to.into() });
+        }
+        assert!(bench.validate().unwrap_err().contains("BS3: select an intermediate output in via"));
+        bench.branches[0].via = vec![Port::new("BS3", "transmitted")];
+        let trace = bench.trace(&System::default()).unwrap();
+        let arm = &trace.branches[0].paths[0];
+        assert!(arm.nominal_match);
+        assert!(arm.ports.contains(&Port::new("BS3", "transmitted")));
+        assert!((arm.opl_mm - 400.).abs() <= 1e-9);
+    }
+
+    #[test]
     fn catalog_filters_parts_and_exposes_lab_metadata() {
         let all = catalog(None, None);
         assert!(all["items"].as_array().unwrap().len() >= 14);
@@ -2088,14 +2281,18 @@ mod tests {
         bench.elements[0].position = [259., 183., 75.];
         bench.elements[1].position = [260., 284., 125.];
         bench.elements[2].position = [508., 285., 125.];
-        bench.elements[0].rotation = [15., 30., 90.];
-        let result = auto_aim(&bench, true, Some(85.)).unwrap();
+        bench.elements[0].rotation = Some([15., 30., 90.]);
+        let mut draft = bench.clone();
+        for element in &mut draft.elements {
+            element.rotation = None;
+        }
+        let result = auto_aim(&draft, true, Some(85.)).unwrap();
         let adjusted: Bench = serde_json::from_value(result["bench"].clone()).unwrap();
         assert_eq!(adjusted.elements[0].position, [260., 185., 85.]);
         assert_eq!(adjusted.sources[0].position[2], 85.);
-        assert_eq!(bench.elements[0].rotation, [15., 30., 90.]);
+        assert_eq!(bench.elements[0].rotation, Some([15., 30., 90.]));
         assert_eq!(result["adjusted_elements"], json!(["M1", "M2", "D"]));
-        let normal = bench::rotate([1., 0., 0.], adjusted.elements[0].rotation);
+        let normal = bench::rotate([1., 0., 0.], adjusted.elements[0].rotation());
         let incoming = adjusted.sources[0].direction;
         let reflected = sub(incoming, scale(normal, 2. * dot(incoming, normal)));
         close(norm(sub(reflected, [0., 1., 0.])), 0.);

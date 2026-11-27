@@ -39,7 +39,8 @@ export interface BenchElement {
     label: string;
     kind: BenchKind;
     position: Vec3;
-    rotation: Vec3;
+    /** Fixed [roll, pitch, yaw] in degrees. Null requests auto-aim. */
+    rotation: Vec3 | null;
     aperture: number;
     body_radius: number;
     focal_length: number;
@@ -67,10 +68,24 @@ export interface BenchElement {
     /** Kinematic mount pivot lever arm (mm, e.g. 25.4). */
     lever_arm_mm?: number | null;
 }
+type DefaultedElementFields =
+    | 'label'
+    | 'rotation'
+    | 'aperture'
+    | 'body_radius'
+    | 'focal_length'
+    | 'reflectance'
+    | 'transmittance'
+    | 'mount';
+export type BenchElementInput = Omit<BenchElement, DefaultedElementFields> & {
+    [Field in DefaultedElementFields]?: BenchElement[Field] | null;
+};
 export interface BenchSource {
     id: string;
     position: Vec3;
     direction: Vec3;
+    /** Explicitly permit auto-aim to adjust this launch direction. */
+    aim_direction?: boolean;
     wavelength: number;
     power: number;
     beam_radius: number;
@@ -85,6 +100,29 @@ export interface BenchConnection {
     port: string;
     to: string;
 }
+export interface BenchPort {
+    element: string;
+    port: string;
+}
+export interface BenchBranch {
+    id: string;
+    /** Output at which measurement begins. */
+    from: BenchPort;
+    /** Named input at which measurement ends. "in" is the generic input. */
+    to: BenchPort;
+    /** Ordered output selections at intermediate elements with multiple nominal continuations. */
+    via?: BenchPort[];
+}
+export type BenchAssertionUnit = 'mm' | 'um' | 'mrad';
+export interface BenchAssertion {
+    id: string;
+    kind: 'equal_opl' | 'colinear';
+    /** Two distinct branch IDs. Equal OPL takes the first branch minus the second. */
+    branches: [string, string];
+    target: number;
+    unit: BenchAssertionUnit;
+    tolerance: number;
+}
 export interface Bench {
     name: string;
     table_size: [number, number];
@@ -93,10 +131,27 @@ export interface Bench {
     elements: BenchElement[];
     sources: BenchSource[];
     connections: BenchConnection[];
+    branches?: BenchBranch[];
+    assertions?: BenchAssertion[];
     max_interactions: number;
     min_power: number;
 }
-export interface BenchSegment {
+export type BenchInput = Omit<Bench, 'elements'> & { elements: BenchElementInput[] };
+
+export interface BenchFlight {
+    from_element: string;
+    from_port: string;
+    to_element: string;
+    to_port: string;
+    length_mm: number;
+    medium: string;
+    index: number;
+    opl_mm: number;
+    wavelength_nm: number;
+    previous_segment: number | null;
+}
+/** Display segments carry flight fields when they connect real endpoints. */
+export interface BenchSegment extends Partial<BenchFlight> {
     source: string;
     branch: string;
     from: Vec3;
@@ -117,10 +172,28 @@ export interface BenchDetectorMap {
     centroid: [number, number];
     rms: [number, number];
 }
+export interface BenchPathBreak extends BenchPort {
+    reason: string;
+}
+export interface BenchBranchReport {
+    id: string;
+    paths: {
+        source: string;
+        wavelength_nm: number;
+        start_segment: number | null;
+        length_mm: number;
+        opl_mm: number;
+        ports: BenchPort[];
+        nominal_match: boolean;
+        break?: BenchPathBreak;
+    }[];
+    break?: BenchPathBreak;
+}
 export interface BenchTrace {
     revision: number;
     saved: boolean;
     segments: BenchSegment[];
+    branches: BenchBranchReport[];
     terminations: {
         source: string;
         branch: string;
@@ -128,6 +201,8 @@ export interface BenchTrace {
         position: Vec3;
         power: number;
         reason: string;
+        /** Index of the last real flight in segments. */
+        last_segment: number | null;
     }[];
     power: Record<
         'launched' | 'detected' | 'absorbed' | 'blocked' | 'escaped' | 'truncated',
@@ -210,12 +285,24 @@ export interface BenchLabIssue {
     branch?: string | null;
     message: string;
 }
+export interface BenchAssertionResult {
+    assertion: string;
+    branches: [string, string];
+    value: number | null;
+    unit: BenchAssertionUnit;
+    target: number;
+    tolerance: number;
+    residual: number | null;
+    status: 'pass' | 'fail' | 'unreachable';
+    break?: BenchPathBreak;
+}
 export interface BenchLabCheck {
     revision?: number;
     readiness_score: number;
     passed: boolean;
     counts: { errors: number; warnings: number; info: number };
     issues: BenchLabIssue[];
+    assertions: BenchAssertionResult[];
     gaussian: { segments: BenchGaussianSegment[]; hits: BenchGaussianHit[] };
     recommended_beam_dumps: { branch: string; position: Vec3; direction: Vec3; power: number }[];
     clamping: {
@@ -300,7 +387,7 @@ const vector = (v: unknown, n = 3): boolean =>
 export function benchProblems(value: unknown): string[] {
     if (value == null) return [];
     try {
-        const b = value as Bench;
+        const b = value as BenchInput;
         if (
             typeof b.name !== 'string' ||
             !vector(b.table_size, 2) ||
@@ -331,23 +418,24 @@ export function benchProblems(value: unknown): string[] {
         for (const e of b.elements) {
             if (
                 !BENCH_KINDS.includes(e.kind) ||
-                typeof e.label !== 'string' ||
-                !vector(e.rotation) ||
+                (e.label != null && typeof e.label !== 'string') ||
+                (e.rotation != null && !vector(e.rotation)) ||
                 ![e.aperture, e.body_radius, e.focal_length, e.reflectance, e.transmittance].every(
-                    Number.isFinite,
+                    (v) => v == null || Number.isFinite(v),
                 ) ||
-                e.aperture <= 0 ||
-                e.body_radius < e.aperture ||
-                e.reflectance < 0 ||
-                e.transmittance < 0 ||
-                e.reflectance + e.transmittance > 1 ||
-                (e.kind === 'lens' && Math.abs(e.focal_length) < 1e-6)
+                (e.aperture != null && e.aperture <= 0) ||
+                (e.body_radius != null && e.body_radius < (e.aperture ?? 0)) ||
+                (e.reflectance != null && e.reflectance < 0) ||
+                (e.transmittance != null && e.transmittance < 0) ||
+                (e.reflectance ?? 0) + (e.transmittance ?? 0) > 1 ||
+                ((e.kind === 'lens' || e.kind === 'curved_mirror') &&
+                    e.focal_length != null &&
+                    Math.abs(e.focal_length) < 1e-6)
             )
                 throw Error();
             if (
-                e.mount !== null &&
-                (!e.mount ||
-                    typeof e.mount.part !== 'string' ||
+                e.mount != null &&
+                (typeof e.mount.part !== 'string' ||
                     !vector(e.mount.base_size, 2) ||
                     !vector(e.mount.height_range, 2))
             )
@@ -379,6 +467,7 @@ export function benchProblems(value: unknown): string[] {
         for (const s of b.sources)
             if (
                 !vector(s.direction) ||
+                (s.aim_direction !== undefined && typeof s.aim_direction !== 'boolean') ||
                 Math.hypot(...s.direction) < 1e-15 ||
                 ![s.wavelength, s.power, s.beam_radius].every(Number.isFinite) ||
                 s.power <= 0 ||
@@ -395,6 +484,38 @@ export function benchProblems(value: unknown): string[] {
                 typeof c.port !== 'string'
             )
                 throw Error();
+        const isPort = (p: BenchPort): boolean =>
+            typeof p.element === 'string' && typeof p.port === 'string';
+        if (
+            b.branches !== undefined &&
+            (!Array.isArray(b.branches) ||
+                b.branches.some(
+                    (branch) =>
+                        typeof branch.id !== 'string' ||
+                        !isPort(branch.from) ||
+                        !isPort(branch.to) ||
+                        (branch.via !== undefined &&
+                            (!Array.isArray(branch.via) || !branch.via.every(isPort))),
+                ))
+        )
+            throw Error();
+        if (
+            b.assertions !== undefined &&
+            (!Array.isArray(b.assertions) ||
+                b.assertions.some(
+                    (a) =>
+                        typeof a.id !== 'string' ||
+                        !['equal_opl', 'colinear'].includes(a.kind) ||
+                        !['mm', 'um', 'mrad'].includes(a.unit) ||
+                        !Number.isFinite(a.target) ||
+                        !Number.isFinite(a.tolerance) ||
+                        a.tolerance < 0 ||
+                        !Array.isArray(a.branches) ||
+                        a.branches.length !== 2 ||
+                        a.branches.some((branch) => typeof branch !== 'string'),
+                ))
+        )
+            throw Error();
         return [];
     } catch {
         return [tr('bench.invalid')];

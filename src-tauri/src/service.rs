@@ -699,6 +699,59 @@ mod tests {
     }
 
     #[test]
+    fn bench_ports_and_poses_validate_through_the_registered_tools() {
+        let mut e = engine("bench-ports-poses");
+        let revision = e.revision;
+        let template = e.call("bench_template", json!({"name":"mach_zehnder"})).unwrap();
+        let mut draft = template["bench"].clone();
+        draft["elements"][1] = json!({"id":"M1", "kind":"mirror", "position":[250,400,75]});
+        draft["elements"][2]["rotation"] = Value::Null;
+        draft["elements"][0]["rotation"][0] = json!(31.);
+        draft["sources"][0]["direction"] = json!([2., 0., 0.]);
+        let unresolved = e.call("bench_set", json!({"bench":draft,"revision":revision})).unwrap_err();
+        assert!(unresolved.contains("Unresolved bench rotations: M1, M2"), "{unresolved}");
+        let unsaved = e.call("bench_trace", json!({"bench":draft})).unwrap_err();
+        assert!(unsaved.contains("M1, M2"), "{unsaved}");
+
+        let solved = e.call("bench_auto_aim", json!({"bench":draft})).unwrap();
+        assert_eq!(solved["adjusted_elements"], json!(["M1","M2"]));
+        let mut scene = solved["bench"].clone();
+        assert_eq!(scene["elements"][1]["label"], "M1");
+        assert_eq!(scene["elements"][1]["focal_length"], 0.);
+        assert_eq!(scene["elements"][1]["reflectance"], 1.);
+        assert_eq!(scene["elements"][1]["transmittance"], 0.);
+        assert_eq!(scene["elements"][0]["rotation"], draft["elements"][0]["rotation"]);
+        assert_eq!(scene["sources"][0]["direction"], draft["sources"][0]["direction"]);
+        scene["assertions"].as_array_mut().unwrap().push(json!({
+            "id":"align", "kind":"colinear", "branches":["arm_a","arm_b"], "target":0., "unit":"mrad", "tolerance":0.1
+        }));
+
+        let mut invalid = scene.clone();
+        invalid["connections"].as_array_mut().unwrap().push(json!({
+            "from":"BS1", "port":"reflected", "to":"D1"
+        }));
+        assert!(e.call("bench_set", json!({"bench":invalid,"revision":revision})).unwrap_err().contains("BS1 / reflected"));
+        assert_eq!(e.revision, revision);
+
+        e.call("bench_set", json!({"bench":scene,"revision":revision})).unwrap();
+        let first = &e.call("bench_trace", json!({})).unwrap()["segments"][0];
+        assert_eq!(first["from_element"], "S1");
+        assert_eq!(first["to_element"], "BS1");
+        assert!((first["opl_mm"].as_f64().unwrap() - 150.).abs() <= 1e-9);
+        let check = e.call("bench_lab_check", json!({"require_pass":true})).unwrap();
+        assert_eq!(check["assertions"].as_array().unwrap().len(), 1);
+        assert_eq!(check["assertions"][0]["status"], "pass");
+        let saved: Value = serde_json::from_slice(&std::fs::read(&e.path).unwrap()).unwrap();
+        assert_eq!(saved["bench"]["branches"], scene["branches"]);
+        assert_eq!(saved["bench"]["assertions"], scene["assertions"]);
+
+        let old = e.call("bench_example", json!({})).unwrap();
+        assert!(old["bench"].get("branches").is_none());
+        let traced = e.call("bench_trace", old).unwrap();
+        assert!((traced["power"]["detected"].as_f64().unwrap() - 1.).abs() <= 1e-9);
+    }
+
+    #[test]
     fn bench_transaction_preview_roundtrip_and_restart() {
         let mut e = engine("bench-transaction");
         let revision = e.revision;

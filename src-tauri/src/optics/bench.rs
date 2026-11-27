@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[path = "bench_paths.rs"]
+mod paths;
+pub use paths::{Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, Port};
+pub(crate) use paths::PathBreak;
+use paths::{Departure, Flight, NominalPaths, PathIndex};
+
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bench {
@@ -22,6 +28,14 @@ pub struct Bench {
     pub sources: Vec<Source>,
     #[schemars(length(min = 0, max = 384))]
     pub connections: Vec<Connection>,
+    /// Named nominal routes through the connection graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 128))]
+    pub branches: Vec<Branch>,
+    /// Saved comparison targets and tolerances.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 128))]
+    pub assertions: Vec<Assertion>,
     #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -52,16 +66,16 @@ pub enum Kind {
     Blocker,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ElementInput")]
 pub struct Element {
     pub id: String,
     pub label: String,
     pub kind: Kind,
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub position: V3,
-    /// Degrees: [roll about X, pitch about Y, yaw about Z].
+    /// Fixed angles in degrees [roll, pitch, yaw], or null for auto-aim.
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
-    pub rotation: V3,
+    pub rotation: Option<V3>,
     #[schemars(range(min = 1e-09, max = 1e5))]
     pub aperture: f64,
     #[schemars(range(min = 1e-09, max = 1e5))]
@@ -72,7 +86,7 @@ pub struct Element {
     pub reflectance: f64,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub transmittance: f64,
-    #[schemars(schema_with = "schemars::SchemaGenerator::subschema_for::<Option<Mount>>")]
+    #[schemars(required, schema_with = "schemars::SchemaGenerator::subschema_for::<Option<Mount>>")]
     pub mount: Option<Mount>,
     /// Splitter substrate index; replaces scalar R/T with Fresnel splitting.
     #[serde(default)]
@@ -107,6 +121,106 @@ pub struct Element {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 2.0, max = 200.0))]
     pub lever_arm_mm: Option<f64>,
+}
+
+#[derive(schemars::JsonSchema, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ElementInput {
+    id: String,
+    label: Option<String>,
+    kind: Kind,
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
+    position: V3,
+    /// Fixed angles in degrees [roll, pitch, yaw], or null for auto-aim.
+    #[schemars(inner(range(min = -1e6, max = 1e6)))]
+    rotation: Option<V3>,
+    #[schemars(range(min = 1e-09, max = 1e5))]
+    aperture: Option<f64>,
+    #[schemars(range(min = 1e-09, max = 1e5))]
+    body_radius: Option<f64>,
+    #[schemars(range(min = -1e6, max = 1e6))]
+    focal_length: Option<f64>,
+    #[schemars(range(min = 0.0, max = 1.0))]
+    reflectance: Option<f64>,
+    #[schemars(range(min = 0.0, max = 1.0))]
+    transmittance: Option<f64>,
+    mount: Option<Mount>,
+    /// Splitter substrate index; replaces scalar R/T with Fresnel splitting.
+    #[serde(default)]
+    #[schemars(range(min = 1.0, max = 4.0))]
+    index: Option<f64>,
+    /// Thin-film stack on a mirror or splitter face, replacing scalar R/T.
+    #[serde(default)]
+    coating: Option<Coating>,
+    /// Surface scatter model on mirrors, splitters and thin lenses.
+    #[serde(default)]
+    scatter: Option<Scatter>,
+    /// Lens group: internal Fresnel ghost bounces to enumerate (0-2).
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 2))]
+    ghosts: usize,
+    /// Detector irradiance map resolution [columns, rows].
+    #[serde(default)]
+    #[schemars(inner(range(min = 2, max = 128)))]
+    pixels: Option<[usize; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 10.0))]
+    retardance_waves: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -360.0, max = 360.0))]
+    fast_axis_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1.0, max = 1e9))]
+    extinction_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 10.0, max = 500.0))]
+    screw_tpi: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 2.0, max = 200.0))]
+    lever_arm_mm: Option<f64>,
+}
+
+impl From<ElementInput> for Element {
+    fn from(input: ElementInput) -> Self {
+        let (focal_length, reflectance, transmittance): (f64, f64, f64) = match input.kind {
+            Kind::Mirror => (0., 1., 0.),
+            Kind::CurvedMirror => (100., 1., 0.),
+            Kind::Splitter | Kind::Pbs => (0., 0.5, 0.5),
+            Kind::Lens => (100., 0., 1.),
+            Kind::LensGroup | Kind::Aperture | Kind::Waveplate | Kind::Polarizer => (0., 0., 1.),
+            Kind::Detector | Kind::Blocker => (0., 0., 0.),
+        };
+        let aperture = input.aperture.unwrap_or(12.5_f64.min(input.body_radius.unwrap_or(15.)));
+        Self {
+            label: input.label.unwrap_or_else(|| input.id.clone()),
+            id: input.id,
+            kind: input.kind,
+            position: input.position,
+            rotation: input.rotation,
+            aperture,
+            body_radius: input.body_radius.unwrap_or(aperture.max(15.)),
+            focal_length: input.focal_length.unwrap_or(focal_length),
+            reflectance: input.reflectance.unwrap_or_else(|| reflectance.min(1. - input.transmittance.unwrap_or(0.))),
+            transmittance: input.transmittance.unwrap_or_else(|| transmittance.min(1. - input.reflectance.unwrap_or(0.))),
+            mount: input.mount,
+            index: input.index,
+            coating: input.coating,
+            scatter: input.scatter,
+            ghosts: input.ghosts,
+            pixels: input.pixels,
+            retardance_waves: input.retardance_waves,
+            fast_axis_deg: input.fast_axis_deg,
+            extinction_ratio: input.extinction_ratio,
+            screw_tpi: input.screw_tpi,
+            lever_arm_mm: input.lever_arm_mm,
+        }
+    }
+}
+
+impl Element {
+    pub(crate) fn rotation(&self) -> V3 {
+        self.rotation.expect("bench pose was validated")
+    }
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +300,9 @@ pub struct Source {
     pub m2: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polarization: Option<Polarization>,
+    /// Permit auto-aim to change the supplied launch direction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aim_direction: bool,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,6 +439,26 @@ fn valid_vec(v: V3) -> bool {
 }
 impl Bench {
     pub fn validate(&self) -> Result<(), String> {
+        self.validated_paths().map(|_| ())
+    }
+
+    fn validated_paths(&self) -> Result<NominalPaths<'_>, String> {
+        let paths = self.draft_paths()?;
+        let unresolved: Vec<_> = self.elements.iter()
+            .filter(|e| e.rotation.is_none())
+            .map(|e| e.id.as_str())
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(format!("Unresolved bench rotations: {}", unresolved.join(", ")));
+        }
+        Ok(paths)
+    }
+
+    pub(crate) fn validate_draft(&self) -> Result<(), String> {
+        self.draft_paths().map(|_| ())
+    }
+
+    fn draft_paths(&self) -> Result<NominalPaths<'_>, String> {
         if self.name.len() > 256
             || !valid_vec(self.origin)
             || self
@@ -353,7 +490,7 @@ impl Bench {
         }
         for e in &self.elements {
             if e.label.len() > 256
-                || !valid_vec(e.rotation)
+                || e.rotation.is_some_and(|rotation| !valid_vec(rotation))
                 || !e.aperture.is_finite()
                 || e.aperture <= 0.
                 || e.aperture > 1e5
@@ -488,7 +625,7 @@ impl Bench {
                 ));
             }
         }
-        Ok(())
+        self.nominal_paths()
     }
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
@@ -500,6 +637,8 @@ pub struct Segment {
     pub power: f64,
     pub element: Option<String>,
     pub status: String,
+    #[serde(flatten)]
+    pub flight: Option<Flight>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jones: Option<[[f64; 2]; 2]>,
 }
@@ -511,6 +650,8 @@ pub struct Termination {
     pub position: V3,
     pub power: f64,
     pub reason: String,
+    /// Last real propagation segment, if the ray reached a surface.
+    pub last_segment: Option<usize>,
 }
 #[derive(schemars::JsonSchema, Default, Debug, Serialize)]
 pub struct Ledger {
@@ -537,6 +678,7 @@ pub struct DetectorMap {
 #[derive(schemars::JsonSchema, Debug, Serialize)]
 pub struct Trace {
     pub segments: Vec<Segment>,
+    pub branches: Vec<BranchReport>,
     pub terminations: Vec<Termination>,
     pub power: Ledger,
     pub detectors: Vec<DetectorMap>,
@@ -588,13 +730,13 @@ fn jones_axes(j: Jones, angle: f64, gains: [[f64; 2]; 2]) -> (Jones, f64) {
 }
 
 fn focused(direction: V3, height: V3, e: &Element) -> Result<V3, String> {
-    let [x, y, z] = local(direction, e.rotation);
+    let [x, y, z] = local(direction, e.rotation());
     let local_direction = unit([
         x.signum(),
         y / x.abs() - height[1] / e.focal_length,
         z / x.abs() - height[2] / e.focal_length,
     ])?;
-    Ok(rotate(local_direction, e.rotation))
+    Ok(rotate(local_direction, e.rotation()))
 }
 
 struct Packet {
@@ -605,9 +747,53 @@ struct Packet {
     power: f64,
     depth: usize,
     expected: Option<String>,
+    departure: Departure,
+    air: f64,
     wavelength: f64,
     jones: Option<Jones>,
 }
+impl Packet {
+    fn segment(&self, from: V3, to: V3, element: Option<&str>, status: &str, flight: Option<Flight>) -> Segment {
+        Segment {
+            source: self.source.clone(),
+            branch: self.branch.clone(),
+            from,
+            to,
+            power: self.power,
+            element: element.map(str::to_owned),
+            status: status.into(),
+            flight,
+            jones: self.jones,
+        }
+    }
+
+    fn finish(self, element: Option<String>, position: V3, reason: &str, last_segment: Option<usize>) -> Termination {
+        Termination {
+            source: self.source,
+            branch: self.branch,
+            element,
+            position,
+            power: self.power,
+            reason: reason.into(),
+            last_segment,
+        }
+    }
+}
+
+fn group_media(system: &System) -> Vec<&str> {
+    let mut medium = system.object_material.as_str();
+    system.surfaces.iter().map(|surface| {
+        if surface.interaction == Interaction::Refract {
+            medium = &surface.material;
+        }
+        medium
+    }).collect()
+}
+
+fn surface_port(element: &str, face: usize) -> Port {
+    Port::new(element, &format!("surface:{}", face + 1))
+}
+
 enum GhostEnd {
     Exit(V3),
     Truncated,
@@ -619,8 +805,15 @@ struct DetectorAccum {
     sum: [f64; 2],
     sum2: [f64; 2],
 }
+#[derive(Clone)]
+struct GhostHit {
+    point: V3,
+    face: usize,
+    index: f64,
+    medium_after_face: Option<usize>,
+}
 struct GhostPath {
-    points: Vec<V3>,
+    points: Vec<GhostHit>,
     factor: f64,
     bounces: usize,
     end: GhostEnd,
@@ -654,7 +847,7 @@ impl GhostWalk<'_> {
         step: i64,
         mut factor: f64,
         bounces_left: usize,
-        mut points: Vec<V3>,
+        mut points: Vec<GhostHit>,
     ) {
         let len = self.after.len() as i64;
         loop {
@@ -680,7 +873,10 @@ impl GhostWalk<'_> {
                     return;
                 }
             };
-            points.push(hit.point);
+            let face = i as usize;
+            let medium_after_face = if step > 0 { face.checked_sub(1) } else { Some(face) };
+            let n1 = medium_after_face.map_or(self.entry, |face| self.after[face]);
+            points.push(GhostHit { point: hit.point, face, index: n1, medium_after_face });
             if s.clear_aperture && hit.point[0].hypot(hit.point[1]) > s.aperture + 1e-9 {
                 self.paths.push(GhostPath {
                     points,
@@ -690,11 +886,7 @@ impl GhostWalk<'_> {
                 });
                 return;
             }
-            let (n1, n2) = if step > 0 {
-                (self.before(i as usize), self.after[i as usize])
-            } else {
-                (self.after[i as usize], self.before(i as usize))
-            };
+            let n2 = if step > 0 { self.after[face] } else { self.before(face) };
             let ci = dot(v, hit.normal).clamp(-1., 1.);
             let reflectance = coating::fresnel(n1, n2, ci).unwrap_or(1.);
             if reflectance > 0. {
@@ -744,7 +936,7 @@ impl GhostWalk<'_> {
 // Its top is below the optical body. No unprovided hardware geometry is inferred.
 fn mount_hit(e: &Element, p: V3, d: V3, table_z: f64) -> Option<f64> {
     let m = e.mount.as_ref()?;
-    let angles = [0., 0., e.rotation[2]];
+    let angles = [0., 0., e.rotation()[2]];
     let q = local(sub(p, [e.position[0], e.position[1], table_z]), angles);
     let v = local(d, angles);
     let low = [-m.base_size[0] / 2., -m.base_size[1] / 2., 0.];
@@ -840,8 +1032,8 @@ impl Bench {
             if exclude == Some(e.id.as_str()) {
                 continue;
             }
-            let p = local(sub(position, e.position), e.rotation);
-            let d = local(direction, e.rotation);
+            let p = local(sub(position, e.position), e.rotation());
+            let d = local(direction, e.rotation());
             let mut take = |distance: f64, mount: bool, surface: Option<usize>| {
                 if distance > 1e-7 && closest.is_none_or(|a| distance < a.0) {
                     closest = Some((distance, e, mount, surface));
@@ -881,12 +1073,13 @@ impl Bench {
     fn trace_group_ghosts(
         &self,
         system: &System,
-        out: &mut Trace,
+        (out, paths): (&mut Trace, &mut PathIndex),
         queue: &mut VecDeque<Packet>,
         ray: &Packet,
         e: &Element,
-        hit: V3,
+        arrival: usize,
     ) -> Result<(), String> {
+        let hit = out.segments[arrival].to;
         let group_size = system.surfaces.len();
         if ray.depth + group_size > self.max_interactions {
             out.power.truncated += ray.power;
@@ -897,24 +1090,23 @@ impl Bench {
                 position: hit,
                 power: ray.power,
                 reason: "budget".into(),
+                last_segment: Some(arrival),
             });
+            paths.group_stop(ray.departure.nominal, arrival, arrival, PathBreak::new(&e.id, "in", "budget"));
             return Ok(());
         }
-        let mut n = system.material_index("AIR", ray.wavelength)?;
-        let entry = n;
+        let entry = ray.air;
+        let media = group_media(system);
         let mut after = Vec::with_capacity(group_size);
         let mut vertices = Vec::with_capacity(group_size);
         let mut vertex = 0.;
-        for s in &system.surfaces {
-            if s.interaction == Interaction::Refract {
-                n = system.material_index(&s.material, ray.wavelength)?;
-            }
-            after.push(n);
+        for (s, medium) in system.surfaces.iter().zip(&media) {
+            after.push(system.material_index(medium, ray.wavelength)?);
             vertices.push(vertex);
             vertex += s.thickness;
         }
-        let p = local(sub(ray.p, e.position), e.rotation);
-        let d = local(ray.d, e.rotation);
+        let p = local(sub(ray.p, e.position), e.rotation());
+        let d = local(ray.d, e.rotation());
         let mut walk = GhostWalk {
             system,
             entry,
@@ -932,43 +1124,48 @@ impl Bench {
             vec![],
         );
         out.power.absorbed += ray.power * (1. - e.transmittance);
-        let world = |p: V3| add(e.position, rotate([p[2], p[0], p[1]], e.rotation));
+        let world = |p: V3| add(e.position, rotate([p[2], p[0], p[1]], e.rotation()));
         for path in walk.paths {
             let power = ray.power * e.transmittance * path.factor;
             if power <= 0. {
                 continue;
             }
+            let main = path.bounces == 0;
+            let mut previous = arrival;
             let mut last = hit;
+            let mut departure = Departure {
+                port: surface_port(&e.id, 0),
+                previous: Some(arrival),
+                arrival: Some(arrival),
+                nominal: ray.departure.nominal && main,
+            };
             for point in path.points.iter().skip(1) {
-                let end = world(*point);
-                out.segments.push(Segment {
-                    jones: ray.jones,
-                    source: ray.source.clone(),
-                    branch: ray.branch.clone(),
-                    from: last,
-                    to: end,
-                    power,
-                    element: Some(e.id.clone()),
-                    status: if path.bounces == 0 {
-                        "group_surface"
-                    } else {
-                        "group_ghost"
-                    }
-                    .into(),
-                });
+                let end = world(point.point);
+                let to = surface_port(&e.id, point.face);
+                let medium = point.medium_after_face.map_or(system.object_material.as_str(), |i| media[i]);
+                let flight = departure.flight(to.clone(), norm(sub(end, last)), medium, point.index, ray.wavelength);
+                previous = out.segments.len();
+                let status = if main { "group_surface" } else { "group_ghost" };
+                let mut segment = ray.segment(last, end, Some(&e.id), status, Some(flight));
+                segment.power = power;
+                out.segments.push(segment);
+                departure.port = to;
+                departure.previous = Some(previous);
                 last = end;
             }
-            let termination = |power: f64, reason: String| Termination {
+            let termination = |reason: String| Termination {
                 source: ray.source.clone(),
                 branch: ray.branch.clone(),
                 element: Some(e.id.clone()),
                 position: last,
                 power,
                 reason,
+                last_segment: Some(previous),
             };
             match path.end {
                 GhostEnd::Exit(direction) => {
-                    let main = path.bounces == 0;
+                    let port = if main { "out" } else { "ghost" };
+                    departure.port = Port::new(&e.id, port);
                     queue.push_back(Packet {
                         source: ray.source.clone(),
                         branch: if main {
@@ -977,7 +1174,7 @@ impl Bench {
                             format!("{}/{}:ghost", ray.branch, e.id)
                         },
                         p: last,
-                        d: rotate([direction[2], direction[0], direction[1]], e.rotation),
+                        d: rotate([direction[2], direction[0], direction[1]], e.rotation()),
                         power,
                         depth: ray.depth + path.points.len().saturating_sub(1),
                         expected: if main {
@@ -988,6 +1185,8 @@ impl Bench {
                         } else {
                             None
                         },
+                        departure,
+                        air: ray.air,
                         wavelength: ray.wavelength,
                         jones: ray.jones,
                     });
@@ -995,12 +1194,13 @@ impl Bench {
                 GhostEnd::Truncated => {
                     out.power.truncated += power;
                     out.terminations
-                        .push(termination(power, "ghost_bounce_limit".into()));
+                        .push(termination("ghost_bounce_limit".into()));
                 }
                 GhostEnd::Blocked(reason) => {
                     out.power.blocked += power;
-                    out.terminations
-                        .push(termination(power, format!("group_{reason}")));
+                    let reason = format!("group_{reason}");
+                    paths.group_stop(departure.nominal, arrival, previous, PathBreak::new(&e.id, &departure.port.port, &reason));
+                    out.terminations.push(termination(reason));
                 }
             }
         }
@@ -1008,10 +1208,13 @@ impl Bench {
     }
 
     pub fn trace(&self, system: &System) -> Result<Trace, String> {
-        self.validate()?;
+        let nominal = self.validated_paths()?;
         self.validate_groups(system)?;
+        let mut paths = PathIndex::default();
+        let media = group_media(system);
         let mut out = Trace {
             segments: vec![],
+            branches: vec![],
             terminations: vec![],
             power: Ledger::default(),
             detectors: vec![],
@@ -1048,6 +1251,7 @@ impl Bench {
                 }
             }
             let count = offsets.len();
+            let air = system.material_index("AIR", s.wavelength)?;
             out.power.launched += s.power;
             for (i, offset) in offsets.into_iter().enumerate() {
                 queue.push_back(Packet {
@@ -1058,6 +1262,13 @@ impl Bench {
                     power: s.power / count as f64,
                     depth: 0,
                     expected: next(&s.id, "out"),
+                    departure: Departure {
+                        port: Port::new(&s.id, "out"),
+                        previous: None,
+                        arrival: None,
+                        nominal: i == 0 && !self.branches.is_empty(),
+                    },
+                    air,
                     wavelength: s.wavelength,
                     jones: s.polarization.and_then(Polarization::jones),
                 });
@@ -1069,14 +1280,10 @@ impl Bench {
                 || out.segments.len() >= 50_000;
             if cutoff {
                 out.power.truncated += ray.power;
-                out.terminations.push(Termination {
-                    source: ray.source,
-                    branch: ray.branch,
-                    element: None,
-                    position: ray.p,
-                    power: ray.power,
-                    reason: "budget".into(),
-                });
+                let departure = &ray.departure;
+                paths.stop(departure, PathBreak::new(&departure.port.element, &departure.port.port, "budget"));
+                let (position, last) = (ray.p, departure.previous);
+                out.terminations.push(ray.finish(None, position, "budget", last));
                 continue;
             }
             let closest = self.nearest(system, ray.p, ray.d, None);
@@ -1085,34 +1292,22 @@ impl Bench {
                     ray.p,
                     scale(ray.d, self.table_size[0].hypot(self.table_size[1])),
                 );
-                out.segments.push(Segment {
-                    jones: ray.jones,
-                    source: ray.source.clone(),
-                    branch: ray.branch.clone(),
-                    from: ray.p,
-                    to: end,
-                    power: ray.power,
-                    element: None,
-                    status: if ray.expected.is_some() {
-                        "missed_target"
-                    } else {
-                        "escaped"
-                    }
-                    .into(),
-                });
+                let status = if ray.expected.is_some() { "missed_target" } else { "escaped" };
+                // The displayed extension has no measured endpoint.
+                out.segments.push(ray.segment(ray.p, end, None, status, None));
+                let departure = &ray.departure;
+                let (element, port) = ray.expected.as_deref().map_or(
+                    (departure.port.element.as_str(), departure.port.port.as_str()),
+                    |id| (id, nominal.input(&departure.port)),
+                );
+                paths.stop(departure, PathBreak::new(element, port, status));
+                let (expected, last) = (ray.expected.clone(), departure.previous);
                 out.power.escaped += ray.power;
-                out.terminations.push(Termination {
-                    source: ray.source,
-                    branch: ray.branch,
-                    element: ray.expected,
-                    position: end,
-                    power: ray.power,
-                    reason: "escaped".into(),
-                });
+                out.terminations.push(ray.finish(expected, end, "escaped", last));
                 continue;
             };
             let hit = add(ray.p, scale(ray.d, distance));
-            let h = local(sub(hit, e.position), e.rotation);
+            let h = local(sub(hit, e.position), e.rotation());
             let reason = if mount {
                 Some("mount_obstruction")
             } else if ray.expected.as_ref().is_some_and(|id| id != &e.id) {
@@ -1120,7 +1315,7 @@ impl Bench {
             } else if h[1].hypot(h[2]) > e.aperture {
                 Some("clipped")
             } else if e.kind == Kind::LensGroup
-                && (face != Some(0) || local(ray.d, e.rotation)[0] <= 0.)
+                && (face != Some(0) || local(ray.d, e.rotation())[0] <= 0.)
             {
                 Some("group_entry")
             } else if e.kind == Kind::Blocker {
@@ -1128,48 +1323,36 @@ impl Bench {
             } else {
                 None
             };
-            out.segments.push(Segment {
-                jones: ray.jones,
-                source: ray.source.clone(),
-                branch: ray.branch.clone(),
-                from: ray.p,
-                to: hit,
-                power: ray.power,
-                element: Some(e.id.clone()),
-                status: reason.unwrap_or("hit").into(),
-            });
+            let arrival = out.segments.len();
+            let input = if mount {
+                "mount"
+            } else if ray.expected.as_deref() == Some(&e.id) {
+                nominal.input(&ray.departure.port)
+            } else {
+                "in"
+            };
+            let flight = ray.departure.flight(Port::new(&e.id, input), distance, "AIR", ray.air, ray.wavelength);
+            out.segments.push(ray.segment(ray.p, hit, Some(&e.id), reason.unwrap_or("hit"), Some(flight)));
+            paths.hit(&ray.departure, arrival, &e.id, reason.is_none());
             if let Some(reason) = reason {
                 out.power.blocked += ray.power;
-                out.terminations.push(Termination {
-                    source: ray.source,
-                    branch: ray.branch,
-                    element: Some(e.id.clone()),
-                    position: hit,
-                    power: ray.power,
-                    reason: reason.into(),
-                });
+                out.terminations.push(ray.finish(Some(e.id.clone()), hit, reason, Some(arrival)));
                 continue;
             }
             if e.kind == Kind::LensGroup {
                 let group_size = system.surfaces.len();
                 if e.ghosts > 0 {
-                    self.trace_group_ghosts(system, &mut out, &mut queue, &ray, e, hit)?;
+                    self.trace_group_ghosts(system, (&mut out, &mut paths), &mut queue, &ray, e, arrival)?;
                     continue;
                 }
                 if ray.depth + group_size > self.max_interactions {
                     out.power.truncated += ray.power;
-                    out.terminations.push(Termination {
-                        source: ray.source,
-                        branch: ray.branch,
-                        element: Some(e.id.clone()),
-                        position: hit,
-                        power: ray.power,
-                        reason: "budget".into(),
-                    });
+                    paths.group_stop(ray.departure.nominal, arrival, arrival, PathBreak::new(&e.id, input, "budget"));
+                    out.terminations.push(ray.finish(Some(e.id.clone()), hit, "budget", Some(arrival)));
                     continue;
                 }
-                let p = local(sub(ray.p, e.position), e.rotation);
-                let d = local(ray.d, e.rotation);
+                let p = local(sub(ray.p, e.position), e.rotation());
+                let d = local(ray.d, e.rotation());
                 let result = system.trace_path(
                     Launch {
                         point: [p[1], p[2], p[0]],
@@ -1190,95 +1373,84 @@ impl Bench {
                         Some((error.kind.as_str(), error.point)),
                     ),
                 };
-                let world = |p: V3| add(e.position, rotate([p[2], p[0], p[1]], e.rotation));
+                let world = |p: V3| add(e.position, rotate([p[2], p[0], p[1]], e.rotation()));
                 let mut last = hit;
                 let mut blocked = None;
+                let mut departure = Departure {
+                    port: surface_port(&e.id, 0),
+                    previous: Some(arrival),
+                    arrival: Some(arrival),
+                    nominal: ray.departure.nominal,
+                };
                 if let Some(path) = &traced {
-                    let mut points: Vec<_> = path.points.iter().skip(2).copied().collect();
-                    if let Some((_, Some(point))) = failure {
-                        points.push(point);
-                    }
-                    for point in points {
+                    let internal = path.segments.iter().skip(1).map(|segment| (segment.point, segment.n_before));
+                    let failed_hit = failure.and_then(|(_, point)| {
+                        path.segments.last().zip(point).map(|(before, point)| (point, before.n_after))
+                    });
+                    for (gap, (point, index)) in internal.chain(failed_hit).enumerate() {
                         let end = world(point);
                         let delta = sub(end, last);
                         let length = norm(delta);
+                        let mut visit = (end, length, surface_port(&e.id, gap + 1), "group_surface");
                         if length > 1e-7 {
                             let direction = scale(delta, 1. / length);
-                            if dot(direction, rotate([1., 0., 0.], e.rotation)) <= 0. {
-                                blocked = Some(("group_geometry".to_string(), e.id.clone()));
+                            if dot(direction, rotate([1., 0., 0.], e.rotation())) <= 0. {
+                                blocked = Some(("group_geometry", departure.port.clone()));
                                 break;
                             }
                             if let Some((distance, obstacle, mount, _)) =
                                 self.nearest(system, last, direction, Some(&e.id))
                                 && distance < length - 1e-7
                             {
-                                let stop = add(last, scale(direction, distance));
-                                out.segments.push(Segment {
-                                    jones: ray.jones,
-                                    source: ray.source.clone(),
-                                    branch: ray.branch.clone(),
-                                    from: last,
-                                    to: stop,
-                                    power: ray.power,
-                                    element: Some(obstacle.id.clone()),
-                                    status: "group_obstruction".into(),
-                                });
-                                last = stop;
-                                blocked = Some((
-                                    if mount {
-                                        "mount_obstruction"
-                                    } else {
-                                        "group_obstruction"
-                                    }
-                                    .to_string(),
-                                    obstacle.id.clone(),
-                                ));
-                                break;
+                                let port = Port::new(&obstacle.id, if mount { "mount" } else { "in" });
+                                let reason = if mount { "mount_obstruction" } else { "group_obstruction" };
+                                blocked = Some((reason, port.clone()));
+                                visit = (add(last, scale(direction, distance)), distance, port, "group_obstruction");
                             }
                         }
-                        out.segments.push(Segment {
-                            jones: ray.jones,
-                            source: ray.source.clone(),
-                            branch: ray.branch.clone(),
-                            from: last,
-                            to: end,
-                            power: ray.power,
-                            element: Some(e.id.clone()),
-                            status: "group_surface".into(),
-                        });
+                        let (end, length, port, status) = visit;
+                        let flight = departure.flight(port.clone(), length, media[gap], index, ray.wavelength);
+                        departure.previous = Some(out.segments.len());
+                        out.segments.push(ray.segment(last, end, Some(&port.element), status, Some(flight)));
+                        departure.port = port;
                         last = end;
+                        if blocked.is_some() {
+                            break;
+                        }
                     }
                 }
+                let failure_reason;
                 if blocked.is_none()
                     && let Some((reason, _)) = failure
                 {
-                    blocked = Some((format!("group_{reason}"), e.id.clone()));
+                    failure_reason = format!("group_{reason}");
+                    blocked = Some((&failure_reason, departure.port.clone()));
                 }
-                if let Some((reason, id)) = blocked {
+                if let Some((reason, port)) = blocked {
                     out.power.blocked += ray.power;
-                    out.terminations.push(Termination {
-                        source: ray.source,
-                        branch: ray.branch,
-                        element: Some(id),
-                        position: last,
-                        power: ray.power,
-                        reason,
-                    });
+                    let previous = departure.previous.unwrap();
+                    paths.group_stop(departure.nominal, arrival, previous, PathBreak::new(&port.element, &port.port, reason));
+                    out.terminations.push(ray.finish(Some(port.element), last, reason, Some(previous)));
                 } else if let Some(path) = traced {
                     out.power.absorbed += ray.power * (1. - e.transmittance);
                     if e.transmittance > 0. {
                         let d = path.direction;
+                        departure.port = Port::new(&e.id, "out");
                         queue.push_back(Packet {
                             source: ray.source,
                             branch: format!("{}/{}:out", ray.branch, e.id),
                             p: last,
-                            d: rotate([d[2], d[0], d[1]], e.rotation),
+                            d: rotate([d[2], d[0], d[1]], e.rotation()),
                             power: ray.power * e.transmittance,
                             depth: ray.depth + group_size,
                             expected: next(&e.id, "out"),
+                            departure,
+                            air: ray.air,
                             wavelength: ray.wavelength,
                             jones: ray.jones,
                         });
+                    } else {
+                        paths.group_stop(departure.nominal, arrival, departure.previous.unwrap(), PathBreak::new(&e.id, "out", "no_output"));
                     }
                 }
                 continue;
@@ -1304,17 +1476,10 @@ impl Bench {
                     acc.sum2[0] += ray.power * h[1] * h[1];
                     acc.sum2[1] += ray.power * h[2] * h[2];
                 }
-                out.terminations.push(Termination {
-                    source: ray.source,
-                    branch: ray.branch,
-                    element: Some(e.id.clone()),
-                    position: hit,
-                    power: ray.power,
-                    reason: "detected".into(),
-                });
+                out.terminations.push(ray.finish(Some(e.id.clone()), hit, "detected", Some(arrival)));
                 continue;
             }
-            let n = rotate([1., 0., 0.], e.rotation);
+            let n = rotate([1., 0., 0.], e.rotation());
             let reflected = sub(ray.d, scale(n, 2. * dot(ray.d, n)));
             let incidence = dot(ray.d, n).abs();
             let films = |c: &Coating| {
@@ -1415,6 +1580,13 @@ impl Bench {
                                 power: ray.power * fraction * weight,
                                 depth: ray.depth + 1,
                                 expected: None,
+                                departure: Departure {
+                                    port: Port::new(&e.id, &format!("scatter{k}")),
+                                    previous: Some(arrival),
+                                    arrival: Some(arrival),
+                                    nominal: false,
+                                },
+                                air: ray.air,
                                 wavelength: ray.wavelength,
                                 jones,
                             });
@@ -1430,12 +1602,20 @@ impl Bench {
                         power: ray.power * kept,
                         depth: ray.depth + 1,
                         expected: next(&e.id, port),
+                        departure: Departure {
+                            port: Port::new(&e.id, port),
+                            previous: Some(arrival),
+                            arrival: Some(arrival),
+                            nominal: ray.departure.nominal,
+                        },
+                        air: ray.air,
                         wavelength: ray.wavelength,
                         jones,
                     });
                 }
             }
         }
+        out.branches = paths.reports(self, &nominal, &out.segments);
         out.detectors = self
             .elements
             .iter()
@@ -1471,12 +1651,7 @@ impl Bench {
             - out.power.blocked
             - out.power.escaped
             - out.power.truncated;
-        out.warnings = self.assembly()["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_owned())
-            .collect();
+        out.warnings = self.assembly_report().warnings;
         Ok(out)
     }
     pub fn assembly(&self) -> Value {
@@ -1492,29 +1667,29 @@ impl Bench {
             if e.mount.is_none(){warnings.push(format!("{}: mount dimensions unspecified",e.id));}
             if let Some(m)=&e.mount {
                 if p[2]<m.height_range[0] || p[2]>m.height_range[1] {warnings.push(format!("{}: optical height outside mount adjustment range",e.id));}
-                let a=e.rotation[2].to_radians();let w=(a.cos().abs()*m.base_size[0]+a.sin().abs()*m.base_size[1])/2.;let h=(a.sin().abs()*m.base_size[0]+a.cos().abs()*m.base_size[1])/2.;
+                let a=e.rotation()[2].to_radians();let w=(a.cos().abs()*m.base_size[0]+a.sin().abs()*m.base_size[1])/2.;let h=(a.sin().abs()*m.base_size[0]+a.cos().abs()*m.base_size[1])/2.;
                 if p[0]-w<0. || p[1]-h<0. || p[0]+w>self.table_size[0] || p[1]+h>self.table_size[1] {warnings.push(format!("{}: mount envelope outside table",e.id));}
             }
             let part=e.mount.as_ref().map(|m|m.part.as_str()).unwrap_or("unspecified");
             *bom.entry(format!("{:?} / {}",e.kind,part)).or_default()+=1;
-            AssemblyElement { id: e.id.clone(), label: e.label.clone(), kind: e.kind, position: p, rotation: e.rotation, normal: rotate([1.,0.,0.],e.rotation), hole: holes, hole_offset: [p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch], mount: e.mount.clone(), lens_model: match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None } }
+            AssemblyElement { id: e.id.clone(), label: e.label.clone(), kind: e.kind, position: p, rotation: e.rotation(), normal: rotate([1.,0.,0.],e.rotation()), hole: holes, hole_offset: [p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch], mount: e.mount.clone(), lens_model: match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None } }
         }).collect();
         for (i, a) in self.elements.iter().enumerate() {
             for b in &self.elements[i + 1..] {
                 if let (Some(ma), Some(mb)) = (&a.mount, &b.mount) {
                     // Separating-axis test for upright, yaw-rotated rectangular bases.
                     let overlap = [
-                        a.rotation[2],
-                        a.rotation[2] + 90.,
-                        b.rotation[2],
-                        b.rotation[2] + 90.,
+                        a.rotation()[2],
+                        a.rotation()[2] + 90.,
+                        b.rotation()[2],
+                        b.rotation()[2] + 90.,
                     ]
                     .iter()
                     .all(|angle| {
                         let theta = angle.to_radians();
                         let axis = [theta.cos(), theta.sin(), 0.];
                         let extent = |e: &Element, m: &Mount| {
-                            let da = (e.rotation[2] - angle).to_radians();
+                            let da = (e.rotation()[2] - angle).to_radians();
                             (da.cos().abs() * m.base_size[0] + da.sin().abs() * m.base_size[1]) / 2.
                         };
                         dot(sub(a.position, b.position), axis).abs() < extent(a, ma) + extent(b, mb)
@@ -1637,7 +1812,7 @@ pub fn example() -> Bench {
         label: id.into(),
         kind,
         position,
-        rotation: [0., 0., yaw],
+        rotation: Some([0., 0., yaw]),
         aperture: 12.5,
         body_radius: 15.,
         focal_length: 100.,
@@ -1695,6 +1870,7 @@ pub fn example() -> Bench {
             waist_offset: None,
             m2: None,
             polarization: None,
+            aim_direction: false,
         }],
         connections: vec![
             Connection {
@@ -1723,6 +1899,8 @@ pub fn example() -> Bench {
                 to: "D1".into(),
             },
         ],
+        branches: vec![],
+        assertions: vec![],
         max_interactions: 32,
         min_power: 1e-8,
     }
@@ -1806,12 +1984,12 @@ mod tests {
         let mirror = &mut scene.elements[0];
         mirror.kind = Kind::CurvedMirror;
         mirror.position = [350., 200., 75.];
-        mirror.rotation = [0.; 3];
+        mirror.rotation = Some([0.; 3]);
         mirror.reflectance = 0.85;
         mirror.focal_length = 100.;
         let detector = &mut scene.elements[1];
         detector.position = [250., 200., 75.];
-        detector.rotation = [0.; 3];
+        detector.rotation = Some([0.; 3]);
         detector.aperture = 0.01;
         scene.sources[0].position = [300., 200., 75.];
         scene.sources[0].beam_radius = 4.;
@@ -1835,7 +2013,7 @@ mod tests {
         group.id = "G".into();
         group.kind = Kind::LensGroup;
         group.position = [100., 200., 75.];
-        group.rotation = [0.; 3];
+        group.rotation = Some([0.; 3]);
         group.reflectance = 0.;
         group.transmittance = 1.;
         group.mount = None;
@@ -1865,6 +2043,43 @@ mod tests {
         ];
         (system, bench)
     }
+    #[test]
+    fn lens_group_propagation_integrates_glass_and_air_with_linked_segments() {
+        use super::super::Surface;
+        let (mut system, mut bench) = group_scene();
+        system.surfaces = vec![
+            Surface::sphere(0., 8., "1.5:60", 12.5),
+            Surface::sphere(0., 0., "AIR", 12.5),
+        ];
+        bench.sources[0].position[1] = 200.;
+        bench.sources[0].wavelength = 587.562; // Buchdahl reference wavelength, exactly n_d.
+        bench.branches.push(Branch {
+            id: "through_group".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+        });
+        for ghosts in [0, 1] {
+            bench.elements[0].ghosts = ghosts;
+            let trace = bench.trace(&system).unwrap();
+            let arm = &trace.branches[0].paths[0];
+            assert!(arm.nominal_match);
+            assert!((arm.length_mm - 110.).abs() <= 1e-9);
+            assert!((arm.opl_mm - 114.).abs() <= 1e-9);
+            let end = trace.terminations.iter().find(|end| end.reason == "detected").unwrap();
+            let exit = trace.segments[end.last_segment.unwrap()].flight.as_ref().unwrap();
+            let glass = trace.segments[exit.previous_segment.unwrap()].flight.as_ref().unwrap();
+            assert_eq!(glass.from_port, "surface:1");
+            assert_eq!(glass.to_port, "surface:2");
+            assert_eq!(glass.medium, "1.5:60");
+            assert!((glass.index - 1.5).abs() <= 1e-12);
+            assert!((glass.length_mm - 8.).abs() <= 1e-9);
+            assert!((glass.opl_mm - 12.).abs() <= 1e-9);
+            assert!((exit.length_mm - 52.).abs() <= 1e-9);
+            assert_eq!(exit.medium, "AIR");
+        }
+    }
+
     #[test]
     fn lens_group_matches_real_prescription_and_tracks_edits() {
         let (mut system, bench) = group_scene();
@@ -1910,7 +2125,7 @@ mod tests {
         let offset = [100., 300., 200.];
         for e in &mut bench.elements {
             e.position = add(rotate(e.position, angles), offset);
-            e.rotation = angles;
+            e.rotation = Some(angles);
         }
         for s in &mut bench.sources {
             s.position = add(rotate(s.position, angles), offset);
@@ -2252,7 +2467,7 @@ mod tests {
         let mut detector = b.elements[3].clone();
         detector.id = "D3".into();
         detector.position = [400., 400., 75.];
-        detector.rotation = [0., 0., 90.];
+        detector.rotation = Some([0., 0., 90.]);
         b.elements.extend([splitter, detector]);
         b.connections
             .iter_mut()
@@ -2302,9 +2517,9 @@ mod tests {
         b.elements[0].kind = Kind::Mirror;
         b.elements[0].reflectance = 1.;
         b.elements[0].transmittance = 0.;
-        b.elements[0].rotation = [0., 45., 0.];
+        b.elements[0].rotation = Some([0., 45., 0.]);
         b.elements[1].position = [300., 200., 275.];
-        b.elements[1].rotation = [0., 90., 0.];
+        b.elements[1].rotation = Some([0., 90., 0.]);
         let t = b.trace(&System::default()).unwrap();
         accounted(&t);
         close(t.power.detected, 1.);
@@ -2319,7 +2534,7 @@ mod tests {
         for e in &mut b.elements {
             e.mount = None;
             e.position = add(rotate(e.position, angle), offset);
-            e.rotation[2] += 37.;
+            e.rotation.as_mut().unwrap()[2] += 37.;
         }
         for s in &mut b.sources {
             s.position = add(rotate(s.position, angle), offset);
@@ -2347,7 +2562,7 @@ mod tests {
         let mut obstacle = b.elements[0].clone();
         obstacle.id = "obstruction".into();
         obstacle.position = [200., 200., 110.];
-        obstacle.rotation = [0.; 3];
+        obstacle.rotation = Some([0.; 3]);
         b.elements.push(obstacle);
         let t = b.trace(&System::default()).unwrap();
         accounted(&t);
@@ -2373,7 +2588,7 @@ mod tests {
             e.mount = None;
             e.reflectance = 1.;
             e.transmittance = 0.;
-            e.rotation = [0.; 3];
+            e.rotation = Some([0.; 3]);
             e.position = [if i == 0 { 300. } else { 100. }, 200., 75.];
         }
         b.connections = vec![
@@ -2416,7 +2631,7 @@ mod tests {
             let mut e = prototype.clone();
             e.id = format!("E{i}");
             e.position = [150. + 25. * i as f64, 200., 75.];
-            e.rotation = [0.; 3];
+            e.rotation = Some([0.; 3]);
             e.kind = if i == 39 {
                 Kind::Detector
             } else {
