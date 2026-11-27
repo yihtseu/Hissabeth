@@ -41,7 +41,7 @@ pub(super) struct ProjectFiles {
     recent_projects: Vec<String>,
 }
 
-fn workspace_dir(workspace_file: &Path) -> &Path {
+pub(super) fn workspace_dir(workspace_file: &Path) -> &Path {
     workspace_file
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -76,6 +76,26 @@ impl ProjectFiles {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zmx"))
     }
 
+    /// Where a project path points before any directory is created or link
+    /// resolved: `~` expands, relative paths live in the workspace's projects
+    /// directory, and saved files without an extension get one.
+    pub fn locate(workspace_file: &Path, path: &str, save: bool) -> Result<PathBuf, String> {
+        let path = Path::new(path);
+        let mut located = if let Ok(relative) = path.strip_prefix("~") {
+            std::env::home_dir()
+                .ok_or("Home directory is unavailable")?
+                .join(relative)
+        } else if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_dir(workspace_file).join("projects").join(path)
+        };
+        if save && located.extension().is_none() {
+            located.set_extension("hissabeth.json");
+        }
+        Ok(located)
+    }
+
     pub fn resolve(
         workspace_file: &Path,
         path: &str,
@@ -87,22 +107,10 @@ impl ProjectFiles {
         if path.trim().is_empty() {
             return Err("Project path is required".into());
         }
-        let path = Path::new(path);
-        if save && Self::is_zmx(path) {
+        if save && Self::is_zmx(Path::new(path)) {
             return Err(SAVE_ZMX.into());
         }
-        let mut resolved = if let Ok(relative) = path.strip_prefix("~") {
-            std::env::home_dir()
-                .ok_or("Home directory is unavailable")?
-                .join(relative)
-        } else if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            workspace_dir(workspace_file).join("projects").join(path)
-        };
-        if save && resolved.extension().is_none() {
-            resolved.set_extension("hissabeth.json");
-        }
+        let resolved = Self::locate(workspace_file, path, save)?;
         let parent = resolved
             .parent()
             .ok_or("Project file has no parent directory")?;
@@ -355,6 +363,9 @@ pub struct Workspace {
     path: PathBuf,
     lease: Arc<std::fs::File>,
     state: State,
+    /// Directories the GUI opened or saved a project in this session; agents
+    /// may reach them too. Never persisted.
+    session: Vec<PathBuf>,
 }
 #[derive(schemars::JsonSchema, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -372,6 +383,17 @@ impl Drop for Pending {
     }
 }
 impl Workspace {
+    pub(super) fn file(&self) -> &Path {
+        &self.path
+    }
+    pub(super) fn session(&self) -> &[PathBuf] {
+        &self.session
+    }
+    pub(super) fn grant(&mut self, dir: PathBuf) {
+        if !self.session.contains(&dir) {
+            self.session.push(dir);
+        }
+    }
     pub(super) fn revision(&self) -> u64 {
         match &self.state {
             State::Ready(engine) => engine.revision,
@@ -429,7 +451,15 @@ impl Workspace {
                 }
             }
         };
-        Ok(Self { path, lease, state })
+        // Relative project paths save here, and agents may only create files
+        // in existing directories.
+        let _ = std::fs::create_dir_all(workspace_dir(&path).join("projects"));
+        Ok(Self {
+            path,
+            lease,
+            state,
+            session: Vec::new(),
+        })
     }
     fn recovery_artifact(path: &std::path::Path) -> Option<PathBuf> {
         let stem = path.file_stem()?.to_string_lossy();
@@ -620,6 +650,13 @@ impl Workspace {
     }
     pub fn call(&mut self, name: &str, args: Value) -> Result<Value, String> {
         registry::call(registry::Target::Workspace(self), name, args)
+    }
+
+    /// Like `call`, but holds file paths to an agent scope first.
+    pub fn call_scoped(&mut self, scope: &super::Scope, name: &str, args: Value) -> Result<Value, String> {
+        registry::validate_args(name, &args)?;
+        scope.check(&self.path, &self.session, name, &args)?;
+        self.call(name, args)
     }
 }
 impl ToolCaller for Workspace {

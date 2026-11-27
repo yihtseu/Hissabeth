@@ -77,6 +77,9 @@ def malformed_parameters() -> None:
         ("paraxial", {"wavelength": "Infinity"}, "Invalid type"),
         ("batch", {"steps": [None] * 100_001}, "Invalid array length"),
         ("project_save_as", {"path": "", "revision": revision}, "Project path is required"),
+        # The relay holds agents to the data directory by default.
+        ("project_save_as", {"path": str(DATA.parent / "outside-scope"), "revision": revision}, "File access denied"),
+        ("project_open", {"path": str(DATA.parent / "outside-scope.hissabeth.json"), "revision": revision}, "File access denied"),
         ("project_new", {"revision": revision + 1}, "System changed"),
     ]
     for name, args, expected in cases:

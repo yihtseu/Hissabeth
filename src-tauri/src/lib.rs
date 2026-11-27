@@ -63,7 +63,7 @@ mod desktop {
         let workspace = state.inner().clone();
         let notifier = notifier.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
-            service::dispatch(&workspace, &name, args, Some(&notifier))
+            service::dispatch(&service::Caller::Gui, &workspace, &name, args, Some(&notifier))
         })
         .await
         .map_err(|e| e.to_string())?
@@ -225,7 +225,12 @@ mod desktop {
                     }
                 });
                 app.manage(notifier.clone());
-                service::serve_with_notifier(engine, Some(notifier))
+                let args: Vec<String> = std::env::args().collect();
+                let scope = service::Scope::from_args(&args).unwrap_or_else(|error| {
+                    eprintln!("Agent file scope: {error}; using the default scope");
+                    service::Scope::default()
+                });
+                service::serve_with_notifier(engine, Some(notifier), scope)
                     .map_err(std::io::Error::other)?;
                 if !automatic_targets.is_empty()
                     && std::env::var_os("HISSABETH_SKIP_AGENT_REGISTRATION").is_none()

@@ -17,11 +17,13 @@ mod history;
 mod params;
 pub mod registry;
 mod schema;
+pub mod scope;
 mod workspace;
 
 pub use broker::{relay, rpc, rpc_shared, serve, serve_with_notifier};
 pub use registry::{tools, validate_args};
 pub use schema::{bench_schema, system_schema};
+pub use scope::{Caller, Scope};
 pub use workspace::Workspace;
 use workspace::{ProjectFiles, persist_system};
 
@@ -328,13 +330,27 @@ fn check_revision(current: u64, expected: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs a command for `caller`. Broker callers are held to their file scope
+/// before the command runs; a project the GUI opens or saves grants its
+/// directory to agents for the session.
 pub fn dispatch(
+    caller: &Caller,
     workspace: &SharedWorkspace,
     name: &str,
     args: Value,
     on_change: Option<&ChangeNotifier>,
 ) -> Result<Value, String> {
-    registry::call(registry::Target::Shared(workspace, on_change), name, args)
+    if let Caller::Broker(scope) = caller {
+        validate_args(name, &args)?;
+        let workspace = workspace.read().map_err(|e| e.to_string())?;
+        scope.check(workspace.file(), workspace.session(), name, &args)?;
+    }
+    let partial = args["rollback"] == Value::Bool(false);
+    let result = registry::call(registry::Target::Shared(workspace, on_change), name, args)?;
+    if let Caller::Gui = caller {
+        scope::remember(workspace, name, partial, &result);
+    }
+    Ok(result)
 }
 pub fn data_dir() -> PathBuf {
     std::env::var_os("HISSABETH_DATA_DIR")
@@ -358,7 +374,7 @@ mod tests {
     #[test]
     fn lab_tools_preview_report_export_and_commit_with_revision() {
         let (_dir, workspace) = shared_workspace();
-        let call = |name, args| dispatch(&workspace, name, args, None);
+        let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None);
         let initial = call("bench_get", json!({})).unwrap();
         let catalog = call("bench_catalog", json!({"query":"PBS251","kind":"pbs"})).unwrap();
         assert_eq!(catalog["items"][0]["part"], "PBS251");
@@ -452,13 +468,12 @@ mod tests {
     #[test]
     fn typed_surface_sag_returns_spherical_geometry_and_snapshot_revision() {
         let (_dir, workspace) = shared_workspace();
-        let snapshot = dispatch(&workspace, "system_get", json!({}), None).unwrap();
+        let snapshot = dispatch(&Caller::Gui, &workspace, "system_get", json!({}), None).unwrap();
         let radius = snapshot["system"]["surfaces"][0]["radius"]
             .as_f64()
             .unwrap();
         let height = 3.0;
-        let result = dispatch(
-            &workspace,
+        let result = dispatch(&Caller::Gui, &workspace,
             "surface_sag",
             json!({"surface":0,"height":height}),
             None,
@@ -474,7 +489,7 @@ mod tests {
     #[test]
     fn optimization_preview_and_apply_share_results_and_notify_after_commit() {
         let (dir, workspace) = shared_workspace();
-        let initial = dispatch(&workspace, "system_get", json!({}), None).unwrap();
+        let initial = dispatch(&Caller::Gui, &workspace, "system_get", json!({}), None).unwrap();
         let revision = initial["revision"].as_u64().unwrap();
         let mut args = json!({
             "variables": [{"kind":"radius","surface":0,"min":15.0,"max":500.0}],
@@ -492,7 +507,7 @@ mod tests {
                 observed.lock().unwrap().push(revision);
             })
         };
-        let preview = dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        let preview = dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
         assert_eq!(preview["applied"], false);
         assert_eq!(preview["revision"], revision);
         assert!(
@@ -502,19 +517,19 @@ mod tests {
         assert!(observed.lock().unwrap().is_empty());
 
         args["apply"] = json!(true);
-        assert!(dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).is_err());
+        assert!(dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).is_err());
         args["revision"] = json!(revision);
-        let applied = dispatch(&workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        let applied = dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
         assert_eq!(applied["applied"], true);
         assert_eq!(applied["revision"], revision + 1);
         assert_eq!(applied["system"], preview["system"]);
         assert_eq!(
-            dispatch(&workspace, "system_get", json!({}), None).unwrap()["system"],
+            dispatch(&Caller::Gui, &workspace, "system_get", json!({}), None).unwrap()["system"],
             applied["system"]
         );
-        assert!(dispatch(&workspace, "optimize", args, Some(&notifier)).is_err());
+        assert!(dispatch(&Caller::Gui, &workspace, "optimize", args, Some(&notifier)).is_err());
         assert_eq!(*observed.lock().unwrap(), [revision + 1]);
-        let history = dispatch(&workspace, "history_list", json!({}), None).unwrap();
+        let history = dispatch(&Caller::Gui, &workspace, "history_list", json!({}), None).unwrap();
         assert_eq!(history["entries"][1]["action"], "optimize");
     }
 
@@ -541,7 +556,7 @@ mod tests {
                 let workspace = workspace.clone();
                 let send = send.clone();
                 std::thread::spawn(move || {
-                    send.send((name, dispatch(&workspace, name, args, None)))
+                    send.send((name, dispatch(&Caller::Gui, &workspace, name, args, None)))
                         .unwrap();
                 })
             })
@@ -576,7 +591,7 @@ mod tests {
     #[test]
     fn history_navigation_persists_snapshots_and_restore_is_undoable() {
         let (dir, workspace) = shared_workspace();
-        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None).unwrap();
         let initial = call("system_get", json!({}));
         let mut system = initial["system"].clone();
         let initial_radius = system["surfaces"][0]["radius"].as_f64().unwrap();
@@ -627,7 +642,7 @@ mod tests {
     fn project_files_link_update_reopen_and_detach() {
         let (dir, workspace) = shared_workspace();
         let path = dir.path().join("system.json");
-        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None).unwrap();
         let initial = call("system_get", json!({}));
         let first = call(
             "project_save_as",
@@ -684,7 +699,7 @@ mod tests {
 
         drop(workspace);
         let workspace = Arc::new(RwLock::new(Workspace::open(path).unwrap()));
-        let call = |name, args| dispatch(&workspace, name, args, None).unwrap();
+        let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None).unwrap();
         assert_eq!(call("project_list", json!({})), list);
         let status = call("workspace_status", json!({}));
         let zmx_path = dir.path().join("projects/import.ZMX");
@@ -696,8 +711,7 @@ mod tests {
             json!({"path":"import.ZMX","revision":status["revision"]}),
         );
         assert_eq!(imported["linked"], false);
-        let save_zmx = dispatch(
-            &workspace,
+        let save_zmx = dispatch(&Caller::Gui, &workspace,
             "project_save_as",
             json!({"path":"import.ZMX","revision":imported["revision"]}),
             None,

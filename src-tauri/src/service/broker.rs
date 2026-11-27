@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Multi-threaded loopback JSON-RPC broker and MCP stdio relay.
-use super::{ChangeNotifier, SharedWorkspace, ToolCaller, data_dir, dispatch, tools};
+use super::{Caller, ChangeNotifier, Scope, SharedWorkspace, ToolCaller, data_dir, dispatch, tools};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -20,11 +20,12 @@ pub fn rpc(request: Value, engine: &mut impl ToolCaller) -> Option<Value> {
 
 pub fn rpc_shared(
     request: Value,
+    caller: &Caller,
     workspace: &SharedWorkspace,
     on_change: Option<&ChangeNotifier>,
 ) -> Option<Value> {
     respond(request, |name, args| {
-        dispatch(workspace, name, args, on_change)
+        dispatch(caller, workspace, name, args, on_change)
     })
 }
 
@@ -60,13 +61,17 @@ fn respond(
     })
 }
 
-pub fn serve(engine: SharedWorkspace) -> Result<(), String> {
-    serve_with_notifier(engine, None)
+pub fn serve(engine: SharedWorkspace, scope: Scope) -> Result<(), String> {
+    serve_with_notifier(engine, None, scope)
 }
 
+/// Serves broker requests. `scope` is this process's own `--allow-path` /
+/// `--allow-any-path` setting; each request is held to its union with the
+/// scope its relay forwards.
 pub fn serve_with_notifier(
     engine: SharedWorkspace,
     on_change: Option<ChangeNotifier>,
+    scope: Scope,
 ) -> Result<(), String> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -102,6 +107,7 @@ pub fn serve_with_notifier(
             let token = token.clone();
             let on_change = on_change.clone();
             let active = active.clone();
+            let scope = scope.clone();
             std::thread::spawn(move || {
                 struct Guard(Arc<AtomicUsize>);
                 impl Drop for Guard {
@@ -125,7 +131,14 @@ pub fn serve_with_notifier(
                 if req["token"].as_str() != Some(&*token) {
                     return;
                 }
-                if let Some(r) = rpc_shared(req["request"].clone(), &engine, on_change.as_ref()) {
+                let response = match Scope::from_envelope(&req["scope"]) {
+                    Ok(forwarded) => {
+                        let caller = Caller::Broker(scope.merge(&forwarded));
+                        rpc_shared(req["request"].clone(), &caller, &engine, on_change.as_ref())
+                    }
+                    Err(e) => Some(json!({"jsonrpc":"2.0","id":req["request"]["id"],"error":{"code":-32602,"message":e}})),
+                };
+                if let Some(r) = response {
                     let _ = writeln!(stream, "{r}");
                 }
             });
@@ -134,7 +147,10 @@ pub fn serve_with_notifier(
     Ok(())
 }
 
-pub fn relay() -> Result<(), String> {
+/// Relays MCP stdio to the running broker, forwarding this relay's file scope
+/// inside the authenticated envelope.
+pub fn relay(scope: Scope) -> Result<(), String> {
+    let forwarded = scope.envelope();
     for line in std::io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         let request: Value = match serde_json::from_str(&line) {
@@ -169,7 +185,7 @@ pub fn relay() -> Result<(), String> {
             writeln!(
                 stream,
                 "{}",
-                json!({"token":endpoint["token"],"request":request})
+                json!({"token":endpoint["token"],"request":request,"scope":forwarded})
             )
             .map_err(|e| e.to_string())?;
             let mut result = String::new();

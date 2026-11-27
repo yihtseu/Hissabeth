@@ -159,7 +159,7 @@ mod tests {
     }
 
     fn get(workspace: &SharedWorkspace, command: &str) -> Value {
-        dispatch(workspace, command, json!({}), None).unwrap()
+        dispatch(&Caller::Gui, workspace, command, json!({}), None).unwrap()
     }
 
     #[test]
@@ -168,8 +168,7 @@ mod tests {
         let before = get(&w, "system_get");
         let start = before["revision"].as_u64().unwrap();
         let notify: ChangeNotifier = Arc::new(move |revision| assert_eq!(revision, start + 2));
-        let report = dispatch(
-            &w,
+        let report = dispatch(&Caller::Gui, &w,
             "batch",
             json!({"revision":start, "steps":[
                 {"command":"project_new","args":{}},
@@ -195,7 +194,7 @@ mod tests {
         let history = get(&w, "history_list");
         assert_eq!(history["entries"].as_array().unwrap().len(), 2);
         assert_eq!(history["entries"][1]["action"], "batch");
-        dispatch(&w, "history_undo", json!({"revision":start+2}), None).unwrap();
+        dispatch(&Caller::Gui, &w, "history_undo", json!({"revision":start+2}), None).unwrap();
         let restored = get(&w, "system_get");
         assert_eq!(restored["system"], before["system"]);
         assert_eq!(restored["revision"], start + 3);
@@ -204,8 +203,7 @@ mod tests {
     #[test]
     fn failed_batch_restores_system_projects_history_and_files() {
         let (dir, w) = workspace();
-        dispatch(
-            &w,
+        dispatch(&Caller::Gui, &w,
             "project_save_as",
             json!({"path":"original","revision":get(&w,"system_get")["revision"]}),
             None,
@@ -221,8 +219,7 @@ mod tests {
         ];
         let bytes = paths.map(|p| std::fs::read(dir.path().join(p)).unwrap());
         let notify: ChangeNotifier = Arc::new(|_| panic!("rolled back batch notified observers"));
-        let report = dispatch(
-            &w,
+        let report = dispatch(&Caller::Gui, &w,
             "batch",
             json!({"steps":[
                 {"command":"bench_template","args":{"name":"michelson","apply":true}},
@@ -262,8 +259,7 @@ mod tests {
     fn partial_batch_keeps_only_the_successful_prefix() {
         let (dir, w) = workspace();
         let start = get(&w, "system_get")["revision"].as_u64().unwrap();
-        let report = dispatch(
-            &w,
+        let report = dispatch(&Caller::Gui, &w,
             "batch",
             json!({"rollback":false, "steps":[
                 {"command":"project_save_as","args":{"path":"kept"}},
@@ -303,8 +299,7 @@ mod tests {
             "workspace_retry",
             "capabilities",
         ] {
-            let result = dispatch(
-                &w,
+            let result = dispatch(&Caller::Gui, &w,
                 "batch",
                 json!({"steps":[{"command":command,"args":{}}]}),
                 None,
@@ -322,8 +317,7 @@ mod tests {
     fn batch_checks_the_starting_revision_before_any_step() {
         let (dir, w) = workspace();
         let before = get(&w, "system_get");
-        let error = dispatch(
-            &w,
+        let error = dispatch(&Caller::Gui, &w,
             "batch",
             json!({"revision":before["revision"].as_u64().unwrap()+1,
             "rollback":false, "steps":[{"command":"project_save_as","args":{"path":"never"}}]}),
@@ -332,6 +326,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "System changed; read it again before editing");
         assert_eq!(get(&w, "system_get"), before);
-        assert!(!dir.path().join("projects").exists());
+        assert!(!dir.path().join("projects/never.hissabeth.json").exists());
     }
 }

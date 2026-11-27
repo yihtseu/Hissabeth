@@ -1,5 +1,5 @@
 use hissabeth_lib::service::{
-    SharedWorkspace, Workspace, dispatch, registry::registry, rpc_shared,
+    Caller, Scope, SharedWorkspace, Workspace, dispatch, registry::registry, rpc_shared,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
@@ -13,7 +13,7 @@ fn workspace() -> (tempfile::TempDir, SharedWorkspace) {
 }
 
 fn call(workspace: &SharedWorkspace, command: &str, args: Value) -> Value {
-    dispatch(workspace, command, args, None).unwrap()
+    dispatch(&Caller::Gui, workspace, command, args, None).unwrap()
 }
 
 fn get(workspace: &SharedWorkspace, command: &str) -> Value {
@@ -145,7 +145,7 @@ fn assert_rejected(
         "jsonrpc":"2.0", "id":1, "method":"tools/call",
         "params":{"name":command, "arguments":args}
     });
-    let reply = rpc_shared(request, w, None).unwrap();
+    let reply = rpc_shared(request, &Caller::Broker(Scope::default()), w, None).unwrap();
     let result = &reply["result"];
     let message = result["content"][0]["text"].as_str().unwrap_or("");
     assert!(
@@ -173,7 +173,7 @@ fn registered_tools_reject_malformed_arguments_without_changing_workspace() {
             "Invalid type",
         );
         let deep = (0..1000).fold(Value::Null, |value, _| Value::Array(vec![value]));
-        let error = dispatch(&w, name, deep, None).unwrap_err();
+        let error = dispatch(&Caller::Gui, &w, name, deep, None).unwrap_err();
         assert_eq!(error, "Invalid type at arguments", "{name} (deep nesting)");
         assert_eq!(get(&w, "system_get"), snapshot, "{name} (deep nesting)");
         let check =
