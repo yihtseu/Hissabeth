@@ -116,6 +116,60 @@ bun run format:check
 bun run build
 ```
 
+### Optical reference validation
+
+The [oracle corpus](src-tauri/tests/oracle/cases) currently passes **54/58 checks
+across 12 cases** in Rust and through `hissabeth --engine --run`. Four Geopter
+pupil comparisons are expected failures. The corpus also covers analytic thin
+and thick lenses, a cemented doublet, mirrors, and published prescriptions from
+[Kingslake and Johnson, §2.5](https://www.sciencedirect.com/science/article/pii/B9780123743015000061)
+and [Sasián's Cooke triplet lecture](https://wp.optics.arizona.edu/jsasian/wp-content/uploads/sites/33/2016/03/L20_OPTI517_Cooke_triplet.pdf).
+The literature focal lengths use the published precision, and the Petzval sums
+use the published radii with the reference project's d-line indices.
+
+If `reference/upstream` is absent, fetch the pinned prescriptions:
+
+```sh
+git clone --filter=blob:none --no-checkout https://github.com/heterophyllus/Geopter reference/upstream
+git -C reference/upstream sparse-checkout set example
+git -C reference/upstream checkout --detach 0edfbf52fcf0e3fc660e5ae33c354fd7a6be80d7
+```
+
+Run the corpus in-process, or add the headless CLI run with the second command:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test oracle
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test oracle oracle_ -- --include-ignored --nocapture
+```
+
+Each case accepts an inline native `prescription.system` or a Geopter
+`prescription.file` relative to `reference/upstream`. Checks use the tool's
+arguments. A `geometric_mtf` check adds `frequency` in cycles/mm to select a
+sample. `exact` compares counts and strings directly. `tight` defaults to
+`abs = 1e-12, rel = 1e-9`, and `loose` to `abs = 1e-6, rel = 1e-3`.
+The numeric limit is `max(abs, rel * |expected|)` with per-check overrides.
+Unexpected failures and unexpected passes of `xfail` checks fail the run.
+
+To regenerate the Geopter expectations, add the source directories to a sparse
+checkout and initialize its JSON header submodule. Build the existing C++ adapter,
+then pass it the upstream file followed by the AGF catalogs. Copy the JSON
+fields for first-order checks, `chief_rays[field_index][1]` for chief ray image
+height, or the requested field and axis sample from `--geometric` for MTF.
+The CI oracle job caches the C++ objects with ccache and verifies the frozen
+values as well as running both Rust paths.
+
+```bash
+git -C reference/upstream sparse-checkout add geopter/optical 3rdparty/eigen-3.3.9 3rdparty/json
+git -C reference/upstream submodule update --init --depth 1 -- 3rdparty/json
+cmake -S src-tauri/tests/oracle -B src-tauri/target/oracle-cpp
+cmake --build src-tauri/target/oracle-cpp --parallel 2
+export GEOPTER_ORACLE="$PWD/src-tauri/target/oracle-cpp/geopter_oracle"
+catalogs=(src-tauri/data/glass/*.[aA][gG][fF])
+"$GEOPTER_ORACLE" reference/upstream/example/dbgauss.json "${catalogs[@]}"
+"$GEOPTER_ORACLE" --geometric reference/upstream/example/book/kingslake_doublet.json "${catalogs[@]}"
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test oracle geopter_snapshots_match_cpp_oracle -- --ignored --nocapture
+```
+
 ## Releases
 
 The [Release workflow](.github/workflows/release.yml) builds tagged installers:

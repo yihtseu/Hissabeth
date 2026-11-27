@@ -1,0 +1,10 @@
+{
+  "name": "Sasi\u00e1n Cooke triplet after Geiser",
+  "prescription": {
+    "file": "example/book/sasian_triplet.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 50, "tolerance": {"class": "tight", "abs": 0.005}, "source": "literature:José Sasián, University of Arizona OPTI 517, Cooke Triplet, prescription table; https://wp.optics.arizona.edu/jsasian/wp-content/uploads/sites/33/2016/03/L20_OPTI517_Cooke_triplet.pdf"},
+    {"quantity": "petzval_sum", "args": {}, "expected": 0.007014020016834158, "tolerance": {"class": "tight"}, "source": "literature:José Sasián, University of Arizona OPTI 517, Cooke Triplet, prescription table; https://wp.optics.arizona.edu/jsasian/wp-content/uploads/sites/33/2016/03/L20_OPTI517_Cooke_triplet.pdf"}
+  ]
+}

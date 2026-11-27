@@ -1,0 +1,13 @@
+{
+  "name": "Geopter Canon RF 50 mm",
+  "prescription": {
+    "file": "example/patent_data/photo/Canon_RF_50mmF12.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 51.10006315880529, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "bfl", "args": {}, "expected": 14.600052550157471, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "entrance_pupil_distance", "args": {}, "expected": 36.372826253380744, "tolerance": {"class": "tight"}, "source": "geopter", "xfail": "Geopter pupil output loses precision when tracing the chief ray from its 1e10 mm infinity sentinel."},
+    {"quantity": "exit_pupil_radius", "args": {}, "expected": 25.84494220665094, "tolerance": {"class": "tight"}, "source": "geopter", "xfail": "Geopter pupil output loses precision when tracing the chief ray from its 1e10 mm infinity sentinel."},
+    {"quantity": "ray_image_y", "args": {"field_index": 1, "x": 0, "y": 0}, "expected": 13.989456926165523, "tolerance": {"class": "tight", "abs": 1e-06}, "source": "geopter"}
+  ]
+}

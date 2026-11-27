@@ -1,0 +1,48 @@
+{
+  "name": "Cemented crown-flint doublet",
+  "prescription": {
+    "system": {
+      "bench": null,
+      "name": "Cemented crown-flint doublet",
+      "note": "Interface powers 0.0125, -0.004 and 0.012 per mm give A = 0.92825 and C = -0.019839 per mm.",
+      "surfaces": [
+        {
+          "radius": 40, "conic": 0, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "First", "thickness": 6, "material": "1.5:60",
+          "interaction": "refract", "gap_solve": {"kind": "fixed"}
+        },
+        {
+          "radius": -25, "conic": 0, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "Second", "thickness": 4, "material": "1.6:35",
+          "interaction": "refract", "gap_solve": {"kind": "fixed"}
+        },
+        {
+          "radius": -50, "conic": 0, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "Third", "thickness": 50, "material": "AIR",
+          "interaction": "refract", "gap_solve": {"kind": "fixed"}
+        }
+      ],
+      "fields": [{"x": 0, "y": 0, "weight": 1, "vignetting": [0, 0, 0, 0], "color": [0, 0, 0, 1]}],
+      "wavelengths": [{"value": 587.562, "weight": 1, "color": [0, 0, 0, 1]}],
+      "reference_wavelength": 0,
+      "field_type": "angle",
+      "pupil": {"kind": "entrance_pupil_diameter", "value": 4},
+      "pupil_mapping": "real_stop",
+      "object_distance": null,
+      "object_material": "AIR",
+      "object_label": "Object",
+      "image_label": "Image",
+      "object_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "image_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "stop_index": 0,
+      "temperature": 20,
+      "pressure": 101325,
+      "custom_glasses": []
+    }
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 50.405766419678415, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "bfl", "args": {}, "expected": 46.78915267906648, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "petzval_sum", "args": {}, "expected": 0.014166666666666666, "tolerance": {"class": "tight"}, "source": "analytic"}
+  ]
+}

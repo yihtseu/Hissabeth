@@ -1,0 +1,41 @@
+{
+  "name": "Concave paraboloid",
+  "prescription": {
+    "system": {
+      "bench": null,
+      "name": "Concave paraboloid",
+      "note": "",
+      "surfaces": [
+        {
+          "radius": -100, "conic": -1, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "First", "thickness": -50, "material": "AIR",
+          "interaction": "reflect", "gap_solve": {"kind": "fixed"}
+        }
+      ],
+      "fields": [{"x": 0, "y": 0, "weight": 1, "vignetting": [0, 0, 0, 0], "color": [0, 0, 0, 1]}],
+      "wavelengths": [{"value": 587.562, "weight": 1, "color": [0, 0, 0, 1]}],
+      "reference_wavelength": 0,
+      "field_type": "angle",
+      "pupil": {"kind": "entrance_pupil_diameter", "value": 4},
+      "pupil_mapping": "real_stop",
+      "object_distance": null,
+      "object_material": "AIR",
+      "object_label": "Object",
+      "image_label": "Image",
+      "object_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "image_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "stop_index": 0,
+      "temperature": 20,
+      "pressure": 101325,
+      "custom_glasses": []
+    }
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 50, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "bfl", "args": {}, "expected": -50, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "petzval_sum", "args": {}, "expected": -0.02, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "image_direction", "args": {}, "expected": -1, "tolerance": {"class": "exact"}, "source": "analytic"},
+    {"quantity": "spot_blocked", "args": {"field_index": 0, "sampling": {"kind": "grid", "count": 9}}, "expected": 0, "tolerance": {"class": "exact"}, "source": "analytic"},
+    {"quantity": "ray_image_y", "args": {"field_index": 0, "x": 0, "y": 2}, "expected": 0, "tolerance": {"class": "tight"}, "source": "analytic"}
+  ]
+}

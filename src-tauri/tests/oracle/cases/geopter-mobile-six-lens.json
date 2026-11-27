@@ -1,0 +1,13 @@
+{
+  "name": "Geopter Six-element mobile lens",
+  "prescription": {
+    "file": "example/patent_data/mobile/Apple_mobile_6lens.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 3.9995464698224894, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "bfl", "args": {}, "expected": 0.5993376001928139, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "entrance_pupil_distance", "args": {}, "expected": 0.29669911643245234, "tolerance": {"class": "tight"}, "source": "geopter", "xfail": "Geopter pupil output loses precision when tracing the chief ray from its 1e10 mm infinity sentinel."},
+    {"quantity": "exit_pupil_radius", "args": {}, "expected": 0.8503667451614619, "tolerance": {"class": "tight"}, "source": "geopter", "xfail": "Geopter pupil output loses precision when tracing the chief ray from its 1e10 mm infinity sentinel."},
+    {"quantity": "ray_image_y", "args": {"field_index": 1, "x": 0, "y": 0}, "expected": 2.030054266117854, "tolerance": {"class": "tight", "abs": 1e-06}, "source": "geopter"}
+  ]
+}

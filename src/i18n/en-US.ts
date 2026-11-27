@@ -402,6 +402,8 @@ export default {
         imageNa: 'Paraxial image NA',
         objectNa: 'Paraxial object NA',
         ffd: 'Front focal distance',
+        petzval: 'Petzval sum',
+        petzvalTip: 'Signed vertex curvature sum for centered rotationally symmetric systems',
         rmsSpot: 'RMS spot radius',
     },
     sampling: {

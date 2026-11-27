@@ -219,6 +219,8 @@ export interface Paraxial {
     /** Null when the system is afocal (no finite focal length). */
     efl: number | null;
     bfl: number | null;
+    /** Signed Petzval sum in mm⁻¹ for a centered rotationally symmetric prescription. */
+    petzval_sum: number | null;
     f_number: number | null;
     matrix: number[];
     /** Null for an afocal system with an object at infinity. */

@@ -1,0 +1,44 @@
+{
+  "name": "Concave and convex mirrors with cancelling Petzval terms",
+  "prescription": {
+    "system": {
+      "bench": null,
+      "name": "Concave and convex mirrors with cancelling Petzval terms",
+      "note": "",
+      "surfaces": [
+        {
+          "radius": -100, "conic": 0, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "First", "thickness": -20, "material": "AIR",
+          "interaction": "reflect", "gap_solve": {"kind": "fixed"}
+        },
+        {
+          "radius": -100, "conic": 0, "even": [], "odd": [], "aperture": 5, "clear_aperture": true,
+          "semi_diameter": 0, "label": "Second", "thickness": 75, "material": "AIR",
+          "interaction": "reflect", "gap_solve": {"kind": "fixed"}
+        }
+      ],
+      "fields": [{"x": 0, "y": 0, "weight": 1, "vignetting": [0, 0, 0, 0], "color": [0, 0, 0, 1]}],
+      "wavelengths": [{"value": 587.562, "weight": 1, "color": [0, 0, 0, 1]}],
+      "reference_wavelength": 0,
+      "field_type": "angle",
+      "pupil": {"kind": "entrance_pupil_diameter", "value": 4},
+      "pupil_mapping": "real_stop",
+      "object_distance": null,
+      "object_material": "AIR",
+      "object_label": "Object",
+      "image_label": "Image",
+      "object_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "image_surface": {"radius": 0, "conic": 0, "even": [], "odd": [], "aperture": 1, "clear_aperture": false, "semi_diameter": 0},
+      "stop_index": 0,
+      "temperature": 20,
+      "pressure": 101325,
+      "custom_glasses": []
+    }
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 125, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "bfl", "args": {}, "expected": 75, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "petzval_sum", "args": {}, "expected": 0, "tolerance": {"class": "tight"}, "source": "analytic"},
+    {"quantity": "image_direction", "args": {}, "expected": 1, "tolerance": {"class": "exact"}, "source": "analytic"}
+  ]
+}

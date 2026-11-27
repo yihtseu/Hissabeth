@@ -358,6 +358,9 @@ impl Ray {
 pub(crate) struct Paraxial {
     efl: Option<f64>,
     bfl: Option<f64>,
+    /// Sum of vertex curvatures times (1 / n_before - 1 / n_after), in mm⁻¹.
+    /// Indices are signed for propagation direction. Requires a centered radial system.
+    petzval_sum: Option<f64>,
     f_number: Option<f64>,
     matrix: [f64; 4],
     matrix_basis: &'static str,
@@ -740,6 +743,22 @@ impl System {
             },
         ))
     }
+    fn petzval_sum(&self, w: f64, mut n: f64) -> Result<Option<f64>, String> {
+        let mut sum = 0.;
+        for surface in &self.surfaces {
+            let profile = surface.profile();
+            if surface.transform.is_some() || !profile.is_radial() {
+                return Ok(None);
+            }
+            let (next, _) = self.paraxial_step(surface, n, w)?;
+            let Ok((curvature, _, _)) = profile.hessian2(0., 0.) else {
+                return Ok(None);
+            };
+            sum += curvature * (n.recip() - next.recip());
+            n = next;
+        }
+        Ok(sum.is_finite().then_some(sum))
+    }
     pub fn pupil_matrix(&self, w: f64) -> Result<Matrix, String> {
         if self.stop_index == 0 {
             return Ok(Matrix::identity());
@@ -866,6 +885,7 @@ impl System {
         Ok(Paraxial {
             efl,
             bfl,
+            petzval_sum: self.petzval_sum(w, n0)?,
             f_number,
             matrix: [m.a, m.b, m.c, m.d],
             matrix_basis: "height, direction_sign * physical_index * dy/dz",
@@ -1010,6 +1030,24 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn petzval_uses_zernike_vertex_curvature_for_radial_surfaces() {
+        let mut s = System {
+            surfaces: vec![Surface::sphere(50., 50., "1.5:60", 5.)],
+            ..Default::default()
+        };
+        s.surfaces[0].zernike = Some(SagZernike {
+            normalize: 10.,
+            coefficients: vec![0., 0., 0., 0.25],
+        });
+        let report = s.paraxial(587.562).unwrap();
+        // The 0.25 mm defocus term contributes 4 * 0.25 / 10² to curvature.
+        assert!((report["petzval_sum"].as_f64().unwrap() - 0.01).abs() < 1e-12);
+
+        s.surfaces[0].zernike.as_mut().unwrap().coefficients.push(0.25);
+        assert!(s.paraxial(587.562).unwrap()["petzval_sum"].is_null());
+    }
+
     #[test]
     fn configuration_overrides_apply_only_to_the_resolved_copy() {
         let mut s = System {

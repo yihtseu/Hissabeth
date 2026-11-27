@@ -1,0 +1,13 @@
+{
+  "name": "Geopter Double Gauss",
+  "prescription": {
+    "file": "example/dbgauss.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 100.00344795161521, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "bfl", "args": {}, "expected": 61.48520799771328, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "entrance_pupil_distance", "args": {}, "expected": 57.912970632690794, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "exit_pupil_radius", "args": {}, "expected": 28.659583758772143, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "ray_image_y", "args": {"field_index": 1, "x": 0, "y": 0}, "expected": 17.546227533807873, "tolerance": {"class": "tight", "abs": 1e-06}, "source": "geopter"}
+  ]
+}

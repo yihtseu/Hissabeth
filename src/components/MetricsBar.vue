@@ -12,6 +12,11 @@ const fixed = (v: number | null, _digits: number): string =>
 const rmsSpot = computed(() =>
     props.spot ? `${(props.spot.rms_radius * 1000).toFixed(2)} µm` : tr('common.dash'),
 );
+const petzvalSum = computed(
+    () =>
+        props.paraxial.petzval_sum?.toPrecision(preferences.preferences.display.decimals + 1) ??
+        tr('common.dash'),
+);
 </script>
 
 <template>
@@ -70,6 +75,10 @@ const rmsSpot = computed(() =>
         <div>
             <dt>{{ tr('metrics.ffd') }}</dt>
             <dd>{{ fixed(paraxial.front_focal_distance, 3) }} <small>mm</small></dd>
+        </div>
+        <div>
+            <dt :title="tr('metrics.petzvalTip')">{{ tr('metrics.petzval') }}</dt>
+            <dd>{{ petzvalSum }} <small>mm⁻¹</small></dd>
         </div>
         <div>
             <dt>{{ tr('metrics.rmsSpot') }}</dt>

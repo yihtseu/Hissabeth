@@ -392,6 +392,8 @@ export default {
         imageNa: '近轴像方 NA',
         objectNa: '近轴物方 NA',
         ffd: '前焦距',
+        petzval: 'Petzval 和',
+        petzvalTip: '同轴旋转对称系统各表面的有符号顶点曲率加权和',
         rmsSpot: 'RMS 点列半径',
     },
     sampling: {

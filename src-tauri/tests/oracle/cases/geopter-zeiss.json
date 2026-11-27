@@ -1,0 +1,13 @@
+{
+  "name": "Geopter Zeiss compact 35 mm",
+  "prescription": {
+    "file": "example/patent_data/photo/Zeiss_35mmF2_compact.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 35.00003097574739, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "bfl", "args": {}, "expected": 1.992538773954422, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "entrance_pupil_distance", "args": {}, "expected": 16.831008560779853, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "exit_pupil_radius", "args": {}, "expected": 5.966456951808523, "tolerance": {"class": "tight"}, "source": "geopter"},
+    {"quantity": "ray_image_y", "args": {"field_index": 1, "x": 0, "y": 0}, "expected": 6.519316979627971, "tolerance": {"class": "tight", "abs": 1e-06}, "source": "geopter"}
+  ]
+}

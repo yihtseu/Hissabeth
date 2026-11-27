@@ -1,0 +1,22 @@
+{
+  "name": "Kingslake and Johnson cemented doublet",
+  "prescription": {
+    "file": "example/book/kingslake_doublet.json"
+  },
+  "checks": [
+    {"quantity": "efl", "args": {}, "expected": 12, "tolerance": {"class": "tight", "abs": 1e-05}, "source": "literature:Kingslake and Johnson, Lens Design Fundamentals (2nd ed.), §2.5, Fig. 2.12; https://www.sciencedirect.com/science/article/pii/B9780123743015000061"},
+    {"quantity": "petzval_sum", "args": {}, "expected": 0.060190977403770066, "tolerance": {"class": "tight"}, "source": "literature:Kingslake and Johnson, Lens Design Fundamentals (2nd ed.), §2.5, Fig. 2.12; https://www.sciencedirect.com/science/article/pii/B9780123743015000061"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 25.0}, "expected": 0.9467770770966173, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 50.0}, "expected": 0.7987145585704326, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 100.0}, "expected": 0.35679129918884467, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 25.0}, "expected": 0.9467770770966174, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 50.0}, "expected": 0.7987145585704326, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 0, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 100.0}, "expected": 0.35679129918884467, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 25.0}, "expected": 0.7860549127731371, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 50.0}, "expected": 0.31419708963681375, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "x", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 100.0}, "expected": 0.14362377875380572, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 25.0}, "expected": 0.5245624596839575, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 50.0}, "expected": 0.10272444541709157, "tolerance": {"class": "loose"}, "source": "geopter"},
+    {"quantity": "geometric_mtf", "args": {"field_index": 1, "axis": "y", "sampling": {"kind": "grid", "count": 17}, "spectrum": {"kind": "polychromatic"}, "max_frequency": 100, "frequency": 100.0}, "expected": 0.12776666998307173, "tolerance": {"class": "loose"}, "source": "geopter"}
+  ]
+}
