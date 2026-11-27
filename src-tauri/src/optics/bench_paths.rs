@@ -72,7 +72,7 @@ pub struct Assertion {
 type Edge<'a> = (&'a str, &'a str);
 type Connections<'a> = HashMap<&'a str, Vec<Edge<'a>>>;
 
-pub(super) struct NominalPaths<'a> {
+pub(in crate::optics) struct NominalPaths<'a> {
     routes: Vec<(&'a Branch, Vec<Edge<'a>>)>,
     inputs: HashMap<Edge<'a>, &'a str>,
 }
@@ -206,11 +206,19 @@ impl Bench {
 }
 
 impl NominalPaths<'_> {
-    pub(super) fn input(&self, from: &Port) -> &str {
+    pub(crate) fn input(&self, from: &Port) -> &str {
         self.inputs
             .get(&(from.element.as_str(), from.port.as_str()))
             .copied()
             .unwrap_or("in")
+    }
+
+    pub(crate) fn branch_ending_at(&self, from: &Port, to: &str) -> Option<&Branch> {
+        self.routes.iter().find_map(|(branch, route)| {
+            (branch.to.element == to
+                && route.last() == Some(&(from.element.as_str(), from.port.as_str())))
+                .then_some(*branch)
+        })
     }
 }
 
@@ -300,6 +308,8 @@ pub struct BranchPath {
     pub nominal_match: bool,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     pub(crate) interruption: Option<PathBreak>,
+    #[serde(skip)]
+    pub(crate) end_segment: Option<usize>,
 }
 
 enum Step {
@@ -419,6 +429,7 @@ impl PathIndex {
             ports: Vec::new(),
             nominal_match: false,
             interruption: None,
+            end_segment: None,
         };
         let mut arrival = start_segment;
         for (i, &(element, port)) in route.iter().enumerate() {
@@ -469,6 +480,7 @@ impl PathIndex {
             }
         }
         result.nominal_match = true;
+        result.end_segment = arrival;
         result
     }
 }

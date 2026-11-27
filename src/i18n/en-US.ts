@@ -108,7 +108,8 @@ export default {
             'Run tolerance sensitivity and 100-trial Monte Carlo yield analysis on the current lens with back-focus compensation.',
     },
     bench: {
-        autoRotation: 'Solve rotation with Auto-aim',
+        autoRotation: 'Leave rotation unresolved',
+        aimExistingRotation: 'Adjust angles with Auto-aim',
         autoDirection: 'Adjust launch direction with Auto-aim',
         example: 'Load split-beam example',
         undo: 'Undo',
@@ -2155,6 +2156,7 @@ export default {
         templateLoaded: 'Loaded lab template: {name}.',
         templateStaged: 'Staged template {name} in draft; click Save bench to commit.',
         autoAimDone: 'Auto-aimed {n} optical elements; click Save bench to commit.',
+        autoAimConflict: 'Auto-aim could not align {ports}.',
         saved: 'Saved laser bench to workspace.',
         addedPart: 'Added {id} ({part}) to bench draft.',
         dumpAdded: 'Placed beam dump {id} on escaped beam path.',

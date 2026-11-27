@@ -281,13 +281,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_auto_aim,
                 Mutate,
                 None,
-                "Solve omitted or null element rotations from nominal connections. Explicit rotations remain fixed; source directions are adjustable only with aim_direction=true. Optional hole snapping and uniform Z move elements outside stages. Set apply=true with the current revision to save a fully resolved result."
+                "Solve omitted or null rotations and rotations with aim_rotation=true. Stage rotations are fixed; source directions are adjustable with aim_direction=true. Align two incident branches at each combiner using a shared reflected/transmitted output. Both separation measures must be below 1e-6 in mm and mrad. Residuals are relative to the first incoming branch. On conflict, return ok=false, the input ports, and the original bench. Optional hole snapping and uniform Z move elements outside stages. Set apply=true with the current revision to save a successful result."
             ),
             tool!(
                 bench_lab_check,
                 Read,
                 None,
-                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate saved equal_opl assertions as the first named branch minus the second in mm or um. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
             ),
             tool!(
                 bench_alignment_guide,

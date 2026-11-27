@@ -405,16 +405,20 @@ pub(super) fn bench_auto_aim(
     target: Target<'_>,
     args: p::BenchAutoAim,
 ) -> Result<Preview<bench_lab::AimResult>, String> {
-    let aim = |scene: &bench::Bench| {
-        bench_lab::aim(scene, args.snap_holes.unwrap_or(false), args.uniform_z)
+    let aim = |scene: &bench::Bench, system: &System| {
+        bench_lab::aim(scene, args.snap_holes.unwrap_or(false), args.uniform_z, system)
     };
     if args.apply == Some(true) {
         let revision = args.revision.ok_or("Missing arguments.revision")?;
         return target.edit(revision, |e| {
-            let data = aim(selected(&e.system, &args.bench)?)?;
-            let revision = save_bench(e, &data.bench, revision, "bench_auto_aim")?;
+            let data = aim(selected(&e.system, &args.bench)?, &e.system)?;
+            let revision = if data.ok {
+                save_bench(e, &data.bench, revision, "bench_auto_aim")?
+            } else {
+                revision
+            };
             Ok(Preview {
-                applied: true,
+                applied: data.ok,
                 revision: Some(revision),
                 data,
             })
@@ -422,17 +426,22 @@ pub(super) fn bench_auto_aim(
     }
     if let Some(scene) = args.bench {
         target.standalone()?;
+        let data = if scene.elements.iter().any(|e| e.kind == bench::Kind::LensGroup) {
+            target.system(|system, _| aim(&scene, system))?
+        } else {
+            aim(&scene, &System::default())?
+        };
         return Ok(Preview {
             applied: false,
             revision: None,
-            data: aim(&scene)?,
+            data,
         });
     }
     target.system(|s, r| {
         Ok(Preview {
             applied: false,
             revision: Some(r),
-            data: aim(selected(s, &None)?)?,
+            data: aim(selected(s, &None)?, s)?,
         })
     })
 }

@@ -739,8 +739,9 @@ mod tests {
         assert_eq!(first["to_element"], "BS1");
         assert!((first["opl_mm"].as_f64().unwrap() - 150.).abs() <= 1e-9);
         let check = e.call("bench_lab_check", json!({"require_pass":true})).unwrap();
-        assert_eq!(check["assertions"].as_array().unwrap().len(), 1);
+        assert_eq!(check["assertions"].as_array().unwrap().len(), 2);
         assert_eq!(check["assertions"][0]["status"], "pass");
+        assert_eq!(check["assertions"][1]["status"], "pass");
         let saved: Value = serde_json::from_slice(&std::fs::read(&e.path).unwrap()).unwrap();
         assert_eq!(saved["bench"]["branches"], scene["branches"]);
         assert_eq!(saved["bench"]["assertions"], scene["assertions"]);
@@ -749,6 +750,67 @@ mod tests {
         assert!(old["bench"].get("branches").is_none());
         let traced = e.call("bench_trace", old).unwrap();
         assert!((traced["power"]["detected"].as_f64().unwrap() - 1.).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn combiner_tools_measure_correct_and_reject_locked_mirror_error() {
+        let mut e = engine("bench-combiner-aim");
+        let revision = e.revision;
+        let saved = e.call("bench_template", json!({
+            "name":"mach_zehnder", "apply":true, "revision":revision
+        })).unwrap();
+        let mut draft = saved["bench"].clone();
+        let revision = saved["revision"].clone();
+        let yaw = draft["elements"][1]["rotation"][2].as_f64().unwrap();
+        draft["elements"][1]["rotation"][2] = json!(yaw + 0.5);
+        draft["assertions"].as_array_mut().unwrap().push(json!({
+            "id":"overlap", "kind":"colinear", "branches":["arm_a","arm_b"],
+            "target":0., "unit":"mrad", "tolerance":1e-6
+        }));
+        let check = e.call("bench_lab_check", json!({"bench":draft})).unwrap();
+        let overlap = &check["assertions"][1];
+        let tilt = 1_f64.to_radians();
+        let position = std::f64::consts::SQRT_2 * 200. * tilt.sin() / (tilt.cos() - tilt.sin());
+        let angle = 1000. * tilt;
+        assert_eq!(overlap["status"], "fail");
+        assert!((overlap["value"]["position_mm"].as_f64().unwrap() - position).abs() < 1e-9);
+        assert!((overlap["value"]["angle_mrad"].as_f64().unwrap() - angle).abs() < 1e-9);
+
+        let locked = e.call("bench_auto_aim", json!({
+            "bench":draft, "apply":true, "revision":revision
+        })).unwrap();
+        assert_eq!(locked["ok"], false);
+        assert_eq!(locked["applied"], false);
+        assert_eq!(locked["conflicts"], json!([
+            {"element":"BS2","port":"in_a"}, {"element":"BS2","port":"in_b"}
+        ]));
+        assert_eq!(locked["adjusted_elements"], json!([]));
+        assert_eq!(locked["bench"], draft);
+        assert_eq!(locked["revision"], revision);
+        let unchanged = e.call("bench_get", json!({})).unwrap();
+        assert_eq!(unchanged["revision"], revision);
+        assert_eq!(unchanged["bench"], saved["bench"]);
+        assert!((locked["residuals"][1]["position_mm"].as_f64().unwrap() - position).abs() < 1e-9);
+
+        draft["elements"][1]["aim_rotation"] = json!(true);
+        let solved = e.call("bench_auto_aim", json!({
+            "bench":draft, "apply":true, "revision":revision
+        })).unwrap();
+        assert_eq!(solved["ok"], true);
+        assert_eq!(solved["applied"], true);
+        assert_eq!(solved["conflicts"], json!([]));
+        assert_eq!(solved["adjusted_elements"], json!(["M1"]));
+        for (index, element) in solved["bench"]["elements"].as_array().unwrap().iter().enumerate() {
+            if index != 1 {
+                assert_eq!(*element, draft["elements"][index]);
+            }
+        }
+        for residual in solved["residuals"].as_array().unwrap() {
+            assert!(residual["position_mm"].as_f64().unwrap() < 1e-6);
+            assert!(residual["angle_mrad"].as_f64().unwrap() < 1e-6);
+        }
+        let check = e.call("bench_lab_check", json!({"require_pass":true})).unwrap();
+        assert_eq!(check["assertions"][1]["status"], "pass");
     }
 
     #[test]

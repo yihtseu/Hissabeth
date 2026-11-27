@@ -275,6 +275,7 @@ async function loadTemplate(name: string): Promise<void> {
 async function runAutoAim(): Promise<void> {
     const active = ensureDraft();
     if (!active || !props.online) return;
+    const input = canonicalJson(active);
     error.value = '';
     statusMsg.value = '';
     try {
@@ -283,8 +284,30 @@ async function runAutoAim(): Promise<void> {
             snap_holes: snapHoles.value,
             apply: false,
         });
+        if (!alive || canonicalJson(draft.value) !== input) return;
+        const residuals = res.residuals.map((r) => {
+            const separation =
+                r.position_mm == null || r.angle_mrad == null
+                    ? ''
+                    : ` ${r.position_mm.toExponential(3)} mm / ${r.angle_mrad.toExponential(3)} mrad`;
+            const interruption = r.break
+                ? ` (${r.break.element} / ${r.break.port}, ${r.break.reason})`
+                : '';
+            return `${r.branch}${separation}${interruption}`;
+        });
+        if (!res.ok) {
+            const ports = res.conflicts.map(({ element, port }) => `${element} / ${port}`);
+            error.value = [
+                tr('benchLab.autoAimConflict', { ports: ports.join(', ') }),
+                ...residuals,
+            ].join(' · ');
+            return;
+        }
         draft.value = res.bench;
-        statusMsg.value = tr('benchLab.autoAimDone', { n: res.adjusted_elements.length });
+        statusMsg.value = [
+            tr('benchLab.autoAimDone', { n: res.adjusted_elements.length }),
+            ...residuals,
+        ].join(' · ');
         schedulePreview();
     } catch (e) {
         error.value = errorMessage(e);
@@ -1267,6 +1290,18 @@ defineExpose({ saveBench, discardBench });
                                 />
                             </label>
                             <template v-if="entity.rotation">
+                                <label v-if="!selectedStage">
+                                    {{ tr('bench.aimExistingRotation') }}
+                                    <input
+                                        type="checkbox"
+                                        :checked="entity.aim_rotation"
+                                        @change="
+                                            entity.aim_rotation =
+                                                ($event.target as HTMLInputElement).checked ||
+                                                undefined
+                                        "
+                                    />
+                                </label>
                                 <label>
                                     Roll (°)
                                     <input

@@ -2,8 +2,9 @@
 use super::{
     System,
     bench::{
-        self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchReport, Connection,
-        Element, Kind, Mount, PathBreak, Polarization, Port, Stage, StagePose, StagePzt, Trace,
+        self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
+        Connection, Element, Kind, Mount, PathBreak, Polarization, Port, Stage, StagePose, StagePzt,
+        Trace,
     },
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
 };
@@ -14,6 +15,10 @@ use std::{
     f64::consts::{PI, TAU},
     fmt::Write,
 };
+
+#[path = "bench_alignment.rs"]
+mod alignment_solver;
+use alignment_solver::{AimResidual, Combiner, Separation, measure};
 
 const FORK_REACH: f64 = 22.;
 const DIRECT_REACH: f64 = 1.5;
@@ -358,6 +363,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         kind: hardware.kind,
         position,
         rotation: Some(normal_rotation(normal)),
+        aim_rotation: false,
         aperture: hardware.aperture,
         body_radius: hardware.body_radius,
         focal_length: hardware.focal_length,
@@ -568,23 +574,29 @@ fn reflective(kind: Kind) -> bool {
 }
 
 pub fn auto_aim(bench: &Bench, snap_holes: bool, uniform_z: Option<f64>) -> Result<Value, String> {
-    serde_json::to_value(aim(bench, snap_holes, uniform_z)?).map_err(|e| e.to_string())
+    serde_json::to_value(aim(bench, snap_holes, uniform_z, &System::default())?)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(schemars::JsonSchema, Serialize)]
 pub(crate) struct AimResult {
     pub bench: Bench,
+    pub ok: bool,
     adjusted_elements: Vec<String>,
     warnings: Vec<String>,
+    conflicts: Vec<Port>,
+    residuals: Vec<AimResidual>,
 }
 
 pub(crate) fn aim(
     bench: &Bench,
     snap_holes: bool,
     uniform_z: Option<f64>,
+    system: &System,
 ) -> Result<AimResult, String> {
-    let bench = bench.resolved_stages()?;
-    bench.validate_draft()?;
+    let original = bench;
+    let bench = original.resolved_stages()?;
+    let paths = bench.draft_paths()?;
     if uniform_z.is_some_and(|z| !z.is_finite() || z <= 0.) {
         return Err("Uniform Z must be finite and positive".into());
     }
@@ -612,6 +624,10 @@ pub(crate) fn aim(
         .enumerate()
         .map(|(i, e)| (e.id.clone(), i))
         .collect();
+    let combiners = Combiner::find(&bench, &paths);
+    let adjustable: Vec<_> = scene.elements.iter().map(|e| {
+        !stage_members.contains(&e.id) && (e.rotation.is_none() || e.aim_rotation)
+    }).collect();
     let mut pending = VecDeque::new();
     let mut warnings = Vec::new();
     for source in &mut scene.sources {
@@ -633,8 +649,9 @@ pub(crate) fn aim(
     let mut incoming = HashMap::new();
     while let Some((i, direction)) = pending.pop_front() {
         let element = &scene.elements[i];
+        let combiner = combiners.iter().find(|c| c.index == i);
         if let Some(&first) = incoming.get(&i) {
-            if dot(first, direction) < 1. - 1e-9 {
+            if combiner.is_none() && dot(first, direction) < 1. - 1e-9 {
                 warnings.push(format!(
                     "{} receives multiple directions; aimed for the first path",
                     element.id
@@ -643,7 +660,8 @@ pub(crate) fn aim(
             continue;
         }
         incoming.insert(i, direction);
-        let mut normal = (!reflective(element.kind)).then_some(direction);
+        let mut normal = combiner.and_then(|c| c.nominal_normal(&scene))
+            .or_else(|| (!reflective(element.kind)).then_some(direction));
         for link in scene.connections.iter().filter(|c| c.from == element.id) {
             let j = indices[&link.to];
             let Ok(out) = unit(sub(scene.elements[j].position, element.position)) else {
@@ -653,6 +671,10 @@ pub(crate) fn aim(
                 ));
                 continue;
             };
+            pending.push_back((j, out));
+            if combiner.is_some() {
+                continue;
+            }
             if link.port == "reflected" {
                 normal = unit(sub(out, direction)).ok();
                 if normal.is_none() {
@@ -667,11 +689,14 @@ pub(crate) fn aim(
                     element.id, link.to
                 ));
             }
-            pending.push_back((j, out));
         }
-        if element.rotation.is_none() {
+        if adjustable[i] {
             if let Some(normal) = normal {
-                scene.elements[i].rotation = Some(normal_rotation(normal));
+                let mut angles = normal_rotation(normal);
+                if let Some(rotation) = element.rotation {
+                    angles[0] = rotation[0];
+                }
+                scene.elements[i].rotation = Some(angles);
             } else if !scene.connections.iter().any(|c| c.from == element.id && c.port == "reflected") {
                 warnings.push(format!("{}: no reflected target to aim at", element.id));
             }
@@ -683,17 +708,26 @@ pub(crate) fn aim(
         }
     }
     scene.validate_draft()?;
-    let adjusted: Vec<_> = scene
-        .elements
-        .iter()
-        .zip(&bench.elements)
-        .filter(|(new, old)| new.rotation != old.rotation || new.position != old.position)
-        .map(|(e, _)| e.id.clone())
-        .collect();
+    let (conflicts, residuals) =
+        alignment_solver::align(&mut scene, &bench, system, &combiners, &adjustable)?;
+    let ok = conflicts.is_empty();
+    let mut adjusted_elements = vec![];
+    if ok {
+        adjusted_elements.extend(
+            scene.elements.iter().zip(&bench.elements)
+                .filter(|(new, old)| new.rotation != old.rotation || new.position != old.position)
+                .map(|(element, _)| element.id.clone()),
+        );
+    } else {
+        scene = original.clone();
+    }
     Ok(AimResult {
         bench: scene,
-        adjusted_elements: adjusted,
+        ok,
+        adjusted_elements,
         warnings,
+        conflicts,
+        residuals,
     })
 }
 
@@ -1207,7 +1241,7 @@ enum AssertionStatus {
 struct AssertionResult {
     assertion: String,
     branches: [String; 2],
-    value: Option<f64>,
+    value: Option<AssertionValue>,
     unit: AssertionUnit,
     target: f64,
     tolerance: f64,
@@ -1217,16 +1251,39 @@ struct AssertionResult {
     interruption: Option<PathBreak>,
 }
 
-fn equal_opl(a: &BranchReport, b: &BranchReport, from: &Port) -> Result<f64, PathBreak> {
-    if let Some(interruption) = a.interruption.as_ref().or(b.interruption.as_ref()) {
+#[derive(Clone, Copy, schemars::JsonSchema, Serialize)]
+#[serde(untagged)]
+enum AssertionValue {
+    Opl(f64),
+    Colinear(Separation),
+}
+
+impl AssertionValue {
+    fn in_unit(self, unit: AssertionUnit) -> f64 {
+        match self {
+            Self::Opl(value) => unit.convert_mm(value),
+            Self::Colinear(separation) => match unit {
+                AssertionUnit::Mrad => separation.angle_mrad,
+                _ => unit.convert_mm(separation.position_mm),
+            },
+        }
+    }
+}
+
+fn reached<'a>(report: &'a BranchReport, from: &Port) -> Result<&'a BranchPath, PathBreak> {
+    if let Some(interruption) = &report.interruption {
         return Err(interruption.clone());
     }
-    let ([a], [b]) = (a.paths.as_slice(), b.paths.as_slice()) else {
+    let [path] = report.paths.as_slice() else {
         return Err(PathBreak::new(&from.element, &from.port, "ambiguous_start"));
     };
-    if let Some(interruption) = a.interruption.as_ref().or(b.interruption.as_ref()) {
+    if let Some(interruption) = &path.interruption {
         return Err(interruption.clone());
     }
+    Ok(path)
+}
+
+fn equal_opl(a: &BranchPath, b: &BranchPath, from: &Port) -> Result<f64, PathBreak> {
     // Both paths were built from the same split arrival, so they share a source and wavelength.
     if a.start_segment != b.start_segment {
         return Err(PathBreak::new(&from.element, &from.port, "different_start"));
@@ -1234,15 +1291,42 @@ fn equal_opl(a: &BranchReport, b: &BranchReport, from: &Port) -> Result<f64, Pat
     Ok(a.opl_mm - b.opl_mm)
 }
 
+fn colinear(
+    trace: &Trace, bench: &Bench, branches: [&Branch; 2], paths: [&BranchPath; 2],
+) -> Result<Separation, PathBreak> {
+    let [a, b] = branches.map(|branch| &branch.to);
+    if a.element != b.element {
+        return Err(PathBreak::new(&b.element, &b.port, "different_combiner"));
+    }
+    if !bench.elements.iter().any(|e| e.id == a.element && matches!(e.kind, Kind::Splitter | Kind::Pbs)) {
+        return Err(PathBreak::new(&a.element, &a.port, "not_a_combiner"));
+    }
+    let [first, second] = paths.map(|path| path.end_segment.expect("reached branch endpoint"));
+    if first == second {
+        return Err(PathBreak::new(&b.element, &b.port, "same_arrival"));
+    }
+    measure(trace, [first, second], b).map(|overlap| overlap.separation)
+}
+
 fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
     let reports: HashMap<_, _> = trace.branches.iter().map(|report| (report.id.as_str(), report)).collect();
     let branches: HashMap<_, _> = bench.branches.iter().map(|branch| (branch.id.as_str(), branch)).collect();
-    bench.assertions.iter().filter(|assertion| assertion.kind == AssertionKind::EqualOpl).map(|a| {
-        let [first, second] = a.branches.each_ref().map(String::as_str);
-        let compared = equal_opl(reports[first], reports[second], &branches[first].from)
-            .map(|value| a.unit.convert_mm(value));
-        let value = compared.as_ref().ok().copied();
-        let residual = value.map(|value| value - a.target);
+    bench.assertions.iter().map(|a| {
+        let [first, second] = a.branches.each_ref().map(|id| branches[id.as_str()]);
+        let compared = reached(reports[first.id.as_str()], &first.from).and_then(|pa| {
+            let pb = reached(reports[second.id.as_str()], &second.from)?;
+            match a.kind {
+                AssertionKind::EqualOpl => equal_opl(pa, pb, &first.from).map(AssertionValue::Opl),
+                AssertionKind::Colinear => colinear(trace, bench, [first, second], [pa, pb])
+                    .map(AssertionValue::Colinear),
+            }
+        });
+        let measured = compared.as_ref().ok().copied();
+        let value = measured.map(|value| match value {
+            AssertionValue::Opl(_) => AssertionValue::Opl(value.in_unit(a.unit)),
+            _ => value,
+        });
+        let residual = measured.map(|value| value.in_unit(a.unit) - a.target);
         let status = match residual {
             Some(residual) if residual.abs() <= a.tolerance => AssertionStatus::Pass,
             Some(_) => AssertionStatus::Fail,
@@ -1430,7 +1514,7 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
     for result in &assertions {
         let (code, target, message) = match result.status {
             AssertionStatus::Pass => continue,
-            AssertionStatus::Fail => ("assertion_failed", None, format!("{}: OPL residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
+            AssertionStatus::Fail => ("assertion_failed", None, format!("{}: residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
             AssertionStatus::Unreachable => {
                 let location = result.interruption.as_ref().unwrap();
                 ("assertion_unreachable", Some(location.element.as_str()), format!("{}: {} / {} ({})", result.assertion, location.element, location.port, location.reason))
@@ -2236,10 +2320,16 @@ mod tests {
             assert_eq!(a.rotation, bench.stages[0].reference_pose["M3"].rotation);
             assert_eq!(b.rotation, bench.stages[0].reference_pose["M4"].rotation);
         }
-        let aimed = aim(&bench, true, Some(85.)).unwrap();
+        let aimed = aim(&bench, true, Some(85.), &system).unwrap();
+        assert!(aimed.ok);
         assert_eq!(aimed.bench.elements[1].position[2], 75.);
         assert_eq!(aimed.bench.elements[1].position[0], 547.501);
         assert_eq!(aimed.bench.elements[0].position[2], 85.);
+        assert!(!aimed.adjusted_elements.iter().any(|id| bench.stages[0].members.contains(id)));
+        let conflicted = aim(&bench, true, Some(115.), &system).unwrap();
+        assert!(!conflicted.ok);
+        assert_eq!(conflicted.bench.elements[0].position[2], 75.);
+        assert_eq!(conflicted.bench.elements[1].position, bench.elements[1].position);
     }
 
     #[test]
@@ -2286,7 +2376,15 @@ mod tests {
     #[test]
     fn interrupted_arms_identify_the_physical_obstacle_or_missed_input() {
         let system = System::default();
-        let bench = template("mach_zehnder").unwrap();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.push(Assertion {
+            id: "overlap".into(),
+            kind: AssertionKind::Colinear,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Mrad,
+            tolerance: 1e-6,
+        });
         let mut blocked = bench.clone();
         blocked.elements.push(mount_element("STOP", DUMP, [250., 300., 75.], [0., 1., 0.]));
         let trace = blocked.trace(&system).unwrap();
@@ -2302,12 +2400,52 @@ mod tests {
             (missed, json!({"element":"M1", "port":"in", "reason":"missed_target"})),
         ] {
             let check = lab_check(&scene, &system).unwrap();
-            let result = &check["assertions"][0];
-            assert_eq!(result["status"], "unreachable");
-            assert_eq!(result["value"], Value::Null);
-            assert_eq!(result["residual"], Value::Null);
-            assert_eq!(result["break"], expected);
+            for result in check["assertions"].as_array().unwrap() {
+                assert_eq!(result["status"], "unreachable");
+                assert_eq!(result["value"], Value::Null);
+                assert_eq!(result["residual"], Value::Null);
+                assert_eq!(result["break"], expected);
+            }
         }
+    }
+
+    #[test]
+    fn auto_aim_refines_to_the_fixed_arms_off_center_ray() {
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.elements[1].rotation.as_mut().unwrap()[2] += 0.5;
+        bench.elements[2].aim_rotation = true;
+        bench.elements[3].aim_rotation = true;
+        bench.assertions.push(Assertion {
+            id: "overlap".into(),
+            kind: AssertionKind::Colinear,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Um,
+            tolerance: 1e-3,
+        });
+
+        let initial = lab_check(&bench, &system).unwrap();
+        let overlap = &initial["assertions"][1];
+        assert_eq!(overlap["status"], "fail");
+        assert!((overlap["residual"].as_f64().unwrap()
+            - 1000. * overlap["value"]["position_mm"].as_f64().unwrap()).abs() < 1e-9);
+
+        let aimed = aim(&bench, false, None, &system).unwrap();
+        assert!(aimed.ok, "{:?}", aimed.conflicts);
+        assert_eq!(aimed.adjusted_elements, ["M2", "BS2"]);
+        assert_eq!(aimed.bench.elements[1].rotation, bench.elements[1].rotation);
+        let trace = aimed.bench.trace(&system).unwrap();
+        let [first, second] = trace.branches.as_slice() else { panic!("expected two arms") };
+        let points = [first, second].map(|report| {
+            trace.segments[report.paths[0].end_segment.unwrap()].to
+        });
+        assert!(norm(sub(points[0], points[1])) < 1e-6);
+        assert!(norm(sub(points[0], bench.elements[3].position)) > 3.);
+        let report = lab_check(&aimed.bench, &system).unwrap();
+        let overlap = &report["assertions"][1];
+        assert_eq!(overlap["status"], "pass");
+        assert!(overlap["value"]["angle_mrad"].as_f64().unwrap() < 1e-6);
     }
 
     #[test]

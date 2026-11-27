@@ -129,10 +129,13 @@ interface ToolMap {
             revision?: number;
         };
         result: {
+            ok: boolean;
             bench: import('./bench').Bench;
             adjusted_elements: string[];
             warnings: string[];
-            applied?: boolean;
+            conflicts: import('./bench').BenchPort[];
+            residuals: import('./bench').BenchAimResidual[];
+            applied: boolean;
             revision?: number;
         };
     };

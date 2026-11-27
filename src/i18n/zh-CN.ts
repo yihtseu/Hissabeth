@@ -103,7 +103,8 @@ export default {
             '对当前镜头执行常规公差灵敏度分析和 100 次带后截距补偿的蒙特卡洛良率仿真，列出最敏感的面。',
     },
     bench: {
-        autoRotation: '由自动准直求解姿态',
+        autoRotation: '留空姿态角度',
+        aimExistingRotation: '允许自动准直调整角度',
         autoDirection: '允许自动准直调整光源方向',
         example: '载入分光示例',
         undo: '撤销',
@@ -2081,6 +2082,7 @@ export default {
         templateLoaded: '已载入实验模板：{name}。',
         templateStaged: '已在草稿中载入模板 {name}；点击“保存光台”提交。',
         autoAimDone: '已自动解算 {n} 个元件角度；点击“保存光台”提交。',
+        autoAimConflict: '自动准直无法对齐 {ports}。',
         saved: '激光光台已保存到工作区。',
         addedPart: '已添加 {id}（{part}）到光台草稿。',
         dumpAdded: '已在逃逸光路上放置挡光器 {id}。',

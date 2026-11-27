@@ -12,8 +12,10 @@ use std::{
 #[path = "bench_paths.rs"]
 mod paths;
 pub use paths::{Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, Port};
+pub(super) use paths::BranchPath;
 pub(crate) use paths::PathBreak;
-use paths::{Departure, Flight, NominalPaths, PathIndex};
+pub(super) use paths::NominalPaths;
+use paths::{Departure, Flight, PathIndex};
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,9 +110,12 @@ pub struct Element {
     pub kind: Kind,
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub position: V3,
-    /// Fixed angles in degrees [roll, pitch, yaw], or null for auto-aim.
+    /// Angles in degrees [roll, pitch, yaw], or null for an unresolved rotation.
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
     pub rotation: Option<V3>,
+    /// Allow auto-aim to adjust a numeric rotation. Stage rotations are always fixed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aim_rotation: bool,
     #[schemars(range(min = 1e-09, max = 1e5))]
     pub aperture: f64,
     #[schemars(range(min = 1e-09, max = 1e5))]
@@ -166,9 +171,11 @@ struct ElementInput {
     kind: Kind,
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
     position: V3,
-    /// Fixed angles in degrees [roll, pitch, yaw], or null for auto-aim.
+    /// Angles in degrees [roll, pitch, yaw], or null for an unresolved rotation.
     #[schemars(inner(range(min = -1e6, max = 1e6)))]
     rotation: Option<V3>,
+    #[serde(default)]
+    aim_rotation: bool,
     #[schemars(range(min = 1e-09, max = 1e5))]
     aperture: Option<f64>,
     #[schemars(range(min = 1e-09, max = 1e5))]
@@ -232,6 +239,7 @@ impl From<ElementInput> for Element {
             kind: input.kind,
             position: input.position,
             rotation: input.rotation,
+            aim_rotation: input.aim_rotation,
             aperture,
             body_radius: input.body_radius.unwrap_or(aperture.max(15.)),
             focal_length: input.focal_length.unwrap_or(focal_length),
@@ -459,6 +467,9 @@ pub(crate) fn cross(a: V3, b: V3) -> V3 {
         a[0] * b[1] - a[1] * b[0],
     ]
 }
+fn reflect(direction: V3, normal: V3) -> V3 {
+    sub(direction, scale(normal, 2. * dot(direction, normal)))
+}
 pub(crate) fn ports(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::Mirror | Kind::CurvedMirror => &["reflected"],
@@ -594,7 +605,7 @@ impl Bench {
         self.draft_paths().map(|_| ())
     }
 
-    fn draft_paths(&self) -> Result<NominalPaths<'_>, String> {
+    pub(super) fn draft_paths(&self) -> Result<NominalPaths<'_>, String> {
         if self.name.len() > 256
             || !valid_vec(self.origin)
             || self
@@ -777,6 +788,8 @@ pub struct Segment {
     pub flight: Option<Flight>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jones: Option<[[f64; 2]; 2]>,
+    #[serde(skip)]
+    pub(super) axial: bool,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct Termination {
@@ -823,6 +836,15 @@ pub struct Trace {
     pub detectors: Vec<DetectorMap>,
     pub balance_error: f64,
     pub warnings: Vec<String>,
+    #[serde(skip)]
+    pub(super) splitter_outputs: HashMap<usize, [Option<V3>; 2]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TraceMode {
+    Physical,
+    Axial,
+    Nominal,
 }
 type Jones = [[f64; 2]; 2];
 
@@ -903,6 +925,7 @@ impl Packet {
             status: status.into(),
             flight,
             jones: self.jones,
+            axial: self.departure.nominal,
         }
     }
 
@@ -1159,6 +1182,40 @@ impl Bench {
         Ok(())
     }
 
+    fn surface_hit(
+        element: &Element,
+        system: &System,
+        position: V3,
+        direction: V3,
+        bounded: bool,
+    ) -> Option<(f64, Option<usize>)> {
+        let p = local(sub(position, element.position), element.rotation());
+        let d = local(direction, element.rotation());
+        if element.kind == Kind::LensGroup {
+            let mut vertex = 0.;
+            let mut nearest = None;
+            for (i, surface) in system.surfaces.iter().enumerate() {
+                if let Ok(hit) =
+                    surface.profile().intersect([p[1], p[2], p[0]], [d[1], d[2], d[0]], vertex)
+                    && (!bounded || hit.point[0].hypot(hit.point[1]) <= element.body_radius)
+                    && hit.distance > 1e-7
+                    && nearest.is_none_or(|(distance, _)| hit.distance < distance)
+                {
+                    nearest = Some((hit.distance, Some(i)));
+                }
+                vertex += surface.thickness;
+            }
+            nearest
+        } else if d[0].abs() > 1e-12 {
+            let distance = -p[0] / d[0];
+            let hit = add(p, scale(d, distance));
+            (distance > 1e-7 && (!bounded || hit[1].hypot(hit[2]) <= element.body_radius))
+                .then_some((distance, None))
+        } else {
+            None
+        }
+    }
+
     fn nearest<'a>(
         &'a self,
         system: &System,
@@ -1171,32 +1228,13 @@ impl Bench {
             if exclude == Some(e.id.as_str()) {
                 continue;
             }
-            let p = local(sub(position, e.position), e.rotation());
-            let d = local(direction, e.rotation());
             let mut take = |distance: f64, mount: bool, surface: Option<usize>| {
                 if distance > 1e-7 && closest.is_none_or(|a| distance < a.0) {
                     closest = Some((distance, e, mount, surface));
                 }
             };
-            if e.kind == Kind::LensGroup {
-                let mut vertex = 0.;
-                for (i, surface) in system.surfaces.iter().enumerate() {
-                    if let Ok(hit) =
-                        surface
-                            .profile()
-                            .intersect([p[1], p[2], p[0]], [d[1], d[2], d[0]], vertex)
-                        && hit.point[0].hypot(hit.point[1]) <= e.body_radius
-                    {
-                        take(hit.distance, false, Some(i));
-                    }
-                    vertex += surface.thickness;
-                }
-            } else if d[0].abs() > 1e-12 {
-                let distance = -p[0] / d[0];
-                let hit = add(p, scale(d, distance));
-                if hit[1].hypot(hit[2]) <= e.body_radius {
-                    take(distance, false, None);
-                }
+            if let Some((distance, face)) = Self::surface_hit(e, system, position, direction, true) {
+                take(distance, false, face);
             }
             if let Some(distance) = mount_hit(e, position, direction, self.origin[2]) {
                 take(distance, true, None);
@@ -1354,8 +1392,17 @@ impl Bench {
     }
 
     pub(super) fn trace_resolved(&self, system: &System) -> Result<Trace, String> {
+        self.trace_mode(system, TraceMode::Physical)
+    }
+
+    pub(super) fn trace_alignment(&self, system: &System, nominal: bool) -> Result<Trace, String> {
+        self.trace_mode(system, if nominal { TraceMode::Nominal } else { TraceMode::Axial })
+    }
+
+    fn trace_mode(&self, system: &System, mode: TraceMode) -> Result<Trace, String> {
         let nominal = self.validated_paths()?;
         self.validate_groups(system)?;
+        let directed = mode == TraceMode::Nominal;
         let mut paths = PathIndex::default();
         let media = group_media(system);
         let mut out = Trace {
@@ -1367,6 +1414,7 @@ impl Bench {
             detectors: vec![],
             balance_error: 0.,
             warnings: vec![],
+            splitter_outputs: HashMap::new(),
         };
         let mut maps: HashMap<&str, DetectorAccum> = HashMap::new();
         let next = |id: &str, port: &str| {
@@ -1388,7 +1436,8 @@ impl Bench {
             ))?;
             let v = cross(d, u);
             let mut offsets = vec![[0., 0., 0.]];
-            for ring in 1..=s.rings {
+            let rings = if mode == TraceMode::Physical { s.rings } else { 0 };
+            for ring in 1..=rings {
                 for j in 0..6 * ring {
                     let a = std::f64::consts::TAU * j as f64 / (6 * ring) as f64;
                     offsets.push(add(
@@ -1397,7 +1446,7 @@ impl Bench {
                     ));
                 }
             }
-            let count = offsets.len();
+            let count = 1 + 3 * s.rings * (s.rings + 1);
             let air = system.material_index("AIR", s.wavelength)?;
             out.power.launched += s.power;
             for (i, offset) in offsets.into_iter().enumerate() {
@@ -1413,7 +1462,7 @@ impl Bench {
                         port: Port::new(&s.id, "out"),
                         previous: None,
                         arrival: None,
-                        nominal: i == 0 && !self.branches.is_empty(),
+                        nominal: i == 0 && (mode != TraceMode::Physical || !self.branches.is_empty()),
                     },
                     air,
                     wavelength: s.wavelength,
@@ -1422,6 +1471,9 @@ impl Bench {
             }
         }
         while let Some(ray) = queue.pop_front() {
+            if directed && ray.expected.is_none() {
+                continue;
+            }
             let cutoff = ray.power < self.min_power
                 || ray.depth >= self.max_interactions
                 || out.segments.len() >= 50_000;
@@ -1433,7 +1485,14 @@ impl Bench {
                 out.terminations.push(ray.finish(None, position, "budget", last));
                 continue;
             }
-            let closest = self.nearest(system, ray.p, ray.d, None);
+            let closest = if directed {
+                self.elements.iter().find(|e| Some(&e.id) == ray.expected.as_ref()).and_then(|e| {
+                    let (distance, face) = Self::surface_hit(e, system, ray.p, ray.d, false)?;
+                    Some((distance, e, false, face))
+                })
+            } else {
+                self.nearest(system, ray.p, ray.d, None)
+            };
             let Some((distance, e, mount, face)) = closest else {
                 let end = add(
                     ray.p,
@@ -1459,7 +1518,7 @@ impl Bench {
                 Some("mount_obstruction")
             } else if ray.expected.as_ref().is_some_and(|id| id != &e.id) {
                 Some("unexpected_hit")
-            } else if h[1].hypot(h[2]) > e.aperture {
+            } else if !directed && h[1].hypot(h[2]) > e.aperture {
                 Some("clipped")
             } else if e.kind == Kind::LensGroup
                 && (face != Some(0) || local(ray.d, e.rotation())[0] <= 0.)
@@ -1488,7 +1547,7 @@ impl Bench {
             }
             if e.kind == Kind::LensGroup {
                 let group_size = system.surfaces.len();
-                if e.ghosts > 0 {
+                if !directed && e.ghosts > 0 {
                     self.trace_group_ghosts(system, (&mut out, &mut paths), &mut queue, &ray, e, arrival)?;
                     continue;
                 }
@@ -1545,7 +1604,7 @@ impl Bench {
                                 blocked = Some(("group_geometry", departure.port.clone()));
                                 break;
                             }
-                            if let Some((distance, obstacle, mount, _)) =
+                            if !directed && let Some((distance, obstacle, mount, _)) =
                                 self.nearest(system, last, direction, Some(&e.id))
                                 && distance < length - 1e-7
                             {
@@ -1627,7 +1686,7 @@ impl Bench {
                 continue;
             }
             let n = rotate([1., 0., 0.], e.rotation());
-            let reflected = sub(ray.d, scale(n, 2. * dot(ray.d, n)));
+            let reflected = reflect(ray.d, n);
             let incidence = dot(ray.d, n).abs();
             let films = |c: &Coating| {
                 c.layers
@@ -1711,7 +1770,7 @@ impl Bench {
                     continue;
                 }
                 let mut kept = fraction;
-                if let Some(model) = &e.scatter {
+                if !directed && let Some(model) = &e.scatter {
                     let axis = scale(n, if dot(d, n) >= 0. { 1. } else { -1. });
                     let tis = model.tis(d, axis);
                     if tis > 0. {
@@ -1741,6 +1800,11 @@ impl Bench {
                     }
                 }
                 if kept > 0. {
+                    if ray.departure.nominal && matches!(e.kind, Kind::Splitter | Kind::Pbs) {
+                        // Slots store transmitted then reflected chief-ray directions.
+                        let outputs = out.splitter_outputs.entry(arrival).or_default();
+                        outputs[usize::from(port == "reflected")] = Some(d);
+                    }
                     queue.push_back(Packet {
                         source: ray.source.clone(),
                         branch: format!("{}/{}:{}", ray.branch, e.id, port),
@@ -1798,7 +1862,9 @@ impl Bench {
             - out.power.blocked
             - out.power.escaped
             - out.power.truncated;
-        out.warnings = self.assembly_report().warnings;
+        if mode == TraceMode::Physical {
+            out.warnings = self.assembly_report().warnings;
+        }
         Ok(out)
     }
     pub fn assembly(&self) -> Value {
@@ -1963,6 +2029,7 @@ pub fn example() -> Bench {
         kind,
         position,
         rotation: Some([0., 0., yaw]),
+        aim_rotation: false,
         aperture: 12.5,
         body_radius: 15.,
         focal_length: 100.,

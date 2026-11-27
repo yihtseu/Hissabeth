@@ -39,8 +39,10 @@ export interface BenchElement {
     label: string;
     kind: BenchKind;
     position: Vec3;
-    /** Fixed [roll, pitch, yaw] in degrees. Null requests auto-aim. */
+    /** Angles [roll, pitch, yaw] in degrees. Null leaves the rotation unresolved. */
     rotation: Vec3 | null;
+    /** Allow auto-aim to adjust numeric angles. Stage rotations are fixed. */
+    aim_rotation?: boolean;
     aperture: number;
     body_radius: number;
     focal_length: number;
@@ -304,12 +306,22 @@ export interface BenchLabIssue {
 export interface BenchAssertionResult {
     assertion: string;
     branches: [string, string];
-    value: number | null;
+    value: number | BenchSeparation | null;
     unit: BenchAssertionUnit;
     target: number;
     tolerance: number;
     residual: number | null;
     status: 'pass' | 'fail' | 'unreachable';
+    break?: BenchPathBreak;
+}
+export interface BenchSeparation {
+    position_mm: number;
+    angle_mrad: number;
+}
+export interface BenchAimResidual {
+    branch: string;
+    position_mm: number | null;
+    angle_mrad: number | null;
     break?: BenchPathBreak;
 }
 export interface BenchLabCheck {
@@ -436,6 +448,7 @@ export function benchProblems(value: unknown): string[] {
                 !BENCH_KINDS.includes(e.kind) ||
                 (e.label != null && typeof e.label !== 'string') ||
                 (e.rotation != null && !vector(e.rotation)) ||
+                (e.aim_rotation !== undefined && typeof e.aim_rotation !== 'boolean') ||
                 ![e.aperture, e.body_radius, e.focal_length, e.reflectance, e.transmittance].every(
                     (v) => v == null || Number.isFinite(v),
                 ) ||
