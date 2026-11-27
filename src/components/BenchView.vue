@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import {
     Crosshair,
     Download,
@@ -100,9 +100,26 @@ const groupSummary = computed(() => {
     };
 });
 const trace = ref<BenchTrace | null>(null);
-const labCheck = ref<BenchLabCheck | null>(null);
+const labEdit = ref(0);
+const labInput = computed(() => ({
+    revision: props.revision,
+    bench: scene.value,
+    edit: labEdit.value,
+}));
+const labSnapshot = shallowRef<{ input: typeof labInput.value; report: BenchLabCheck }>();
+const labRevisionMismatch = ref(false);
+const labCheck = computed(() => labSnapshot.value?.report ?? null);
+const labStale = computed(
+    () =>
+        labSnapshot.value?.input !== labInput.value ||
+        labRevisionMismatch.value ||
+        !props.online ||
+        props.stale ||
+        props.refreshPending,
+);
 const pending = ref(false);
 const labPending = ref(false);
+const labError = ref('');
 const error = ref('');
 const statusMsg = ref('');
 const branch = ref('');
@@ -185,18 +202,26 @@ async function run(): Promise<void> {
 
 async function runLabCheck(): Promise<void> {
     const request = ++labToken;
-    const active = scene.value;
-    if (!active || !props.online) {
-        labCheck.value = null;
+    const input = labInput.value;
+    labError.value = '';
+    if (!input.bench || !props.online) {
+        if (!input.bench) labSnapshot.value = undefined;
         labPending.value = false;
         return;
     }
+    const current = () => alive && request === labToken && props.online && input === labInput.value;
     labPending.value = true;
     try {
-        const res = await callTool('bench_lab_check', benchDirty.value ? { bench: active } : {});
-        if (alive && request === labToken) labCheck.value = res;
-    } catch {
-        if (alive && request === labToken) labCheck.value = null;
+        const report = await callTool(
+            'bench_lab_check',
+            benchDirty.value ? { bench: input.bench } : {},
+        );
+        if (!current()) return;
+        labRevisionMismatch.value = report.revision !== input.revision;
+        if (labRevisionMismatch.value) labError.value = tr('benchLab.revisionChanged');
+        else labSnapshot.value = { input, report };
+    } catch (e) {
+        if (current()) labError.value = errorMessage(e);
     } finally {
         if (alive && request === labToken) labPending.value = false;
     }
@@ -205,6 +230,7 @@ async function runLabCheck(): Promise<void> {
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let stagePreviewTimer: ReturnType<typeof setTimeout> | undefined;
 function schedulePreview(stageMotion = false): void {
+    labEdit.value++;
     if (stageMotion && stagePreviewTimer === undefined) {
         stagePreviewTimer = setTimeout(() => {
             stagePreviewTimer = undefined;
@@ -527,7 +553,7 @@ const failures = computed(
 const problemIds = computed(
     () =>
         new Set(
-            (labCheck.value?.issues ?? [])
+            (labStale.value ? [] : (labCheck.value?.issues ?? []))
                 .filter((i) => i.severity === 'error' || i.severity === 'warning')
                 .map((i) => i.element_id)
                 .filter((id): id is string => !!id),
@@ -591,7 +617,8 @@ const grid = computed(() => {
 });
 
 const gaussianPolygons = computed(() => {
-    if (!showGaussian.value || !labCheck.value?.gaussian.segments.length) return [];
+    if (!showGaussian.value || labStale.value || !labCheck.value?.gaussian.segments.length)
+        return [];
     return labCheck.value.gaussian.segments
         .map((seg) => {
             const p0 = project(seg.from);
@@ -743,8 +770,12 @@ function move(event: PointerEvent): void {
             b.elements.find((e) => e.id === dragging!.id) ??
             b.sources.find((s) => s.id === dragging!.id);
         if (target) {
-            target.position[0] = nx;
-            target.position[1] = ny;
+            if (target.position[0] !== nx || target.position[1] !== ny) {
+                dragging.moved = true;
+                target.position[0] = nx;
+                target.position[1] = ny;
+                labEdit.value++;
+            }
             hoverCoord.value = {
                 x: nx,
                 y: ny,
@@ -798,13 +829,14 @@ function downloadBlob(content: string, filename: string, mime: string): void {
 }
 
 async function exportDeliverable(): Promise<void> {
-    if (!props.online || !scene.value) return;
+    const input = labInput.value;
+    if (!props.online || !input.bench) return;
     error.value = '';
     try {
         if (exportFormat.value === 'csv') {
             const report = await callTool(
                 'bench_assembly',
-                benchDirty.value ? { bench: scene.value } : {},
+                benchDirty.value ? { bench: input.bench } : {},
             );
             const rows = [
                 [
@@ -855,9 +887,13 @@ async function exportDeliverable(): Promise<void> {
             return;
         }
         const out = await callTool('bench_export_blueprint', {
-            ...(benchDirty.value ? { bench: scene.value } : {}),
+            ...(benchDirty.value ? { bench: input.bench } : {}),
             format: exportFormat.value,
         });
+        if (out.format === 'svg' && (input !== labInput.value || out.revision !== input.revision)) {
+            error.value = tr('benchLab.revisionChanged');
+            return;
+        }
         downloadBlob(out.content, out.filename, out.mime);
         statusMsg.value = tr('benchLab.exported', { file: out.filename });
     } catch (e) {
@@ -1563,6 +1599,8 @@ defineExpose({ saveBench, discardBench });
                 :saving="saving"
                 :lab-check="labCheck"
                 :lab-pending="labPending"
+                :lab-stale="labStale"
+                :lab-error="labError"
                 @select="selected = $event"
                 @add-from-catalog="addFromCatalog"
                 @add-beam-dump="addBeamDumpAt"

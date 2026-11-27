@@ -54,11 +54,16 @@ fn selected<'a>(
 fn bench_report<T>(
     target: &Target<'_>,
     draft: Option<bench::Bench>,
-    run: impl FnOnce(&bench::Bench, &System) -> Result<T, String>,
+    run: impl FnOnce(&bench::Bench, &System, u64) -> Result<T, String>,
 ) -> Result<BenchReport<T>, String> {
-    Ok(BenchReport {
-        saved: draft.is_none(),
-        snapshot: analysis(target, |s| run(selected(s, &draft)?, s))?,
+    target.system(|system, revision| {
+        Ok(BenchReport {
+            saved: draft.is_none(),
+            snapshot: Revisioned {
+                revision,
+                data: run(selected(system, &draft)?, system, revision)?,
+            },
+        })
     })
 }
 
@@ -324,14 +329,14 @@ pub(super) fn bench_trace(
     target: &Target<'_>,
     args: p::BenchDraft,
 ) -> Result<BenchReport<bench::Trace>, String> {
-    bench_report(target, args.bench, |b, s| b.trace(s))
+    bench_report(target, args.bench, |b, s, _| b.trace(s))
 }
 
 pub(super) fn bench_assembly(
     target: &Target<'_>,
     args: p::BenchDraft,
 ) -> Result<BenchReport<bench::Assembly>, String> {
-    bench_report(target, args.bench, |b, _| {
+    bench_report(target, args.bench, |b, _, _| {
         let b = b.resolved_stages()?;
         b.validate()?;
         Ok(b.assembly_report())
@@ -342,7 +347,7 @@ pub(super) fn bench_lab_check(
     target: &Target<'_>,
     args: p::BenchCheck,
 ) -> Result<BenchReport<bench_lab::LabCheck>, String> {
-    bench_report(target, args.bench, |bench, system| {
+    bench_report(target, args.bench, |bench, system, _| {
         let report = bench_lab::check(bench, system)?;
         if args.require_pass {
             report.require_pass()?;
@@ -355,15 +360,18 @@ pub(super) fn bench_alignment_guide(
     target: &Target<'_>,
     args: p::BenchDraft,
 ) -> Result<BenchReport<bench_lab::Guide>, String> {
-    bench_report(target, args.bench, bench_lab::alignment)
+    bench_report(target, args.bench, |b, s, _| bench_lab::alignment(b, s))
 }
 
 pub(super) fn bench_export_blueprint(
     target: &Target<'_>,
     args: p::BenchExportBlueprint,
 ) -> Result<BenchReport<bench_lab::Blueprint>, String> {
-    bench_report(target, args.bench, |b, s| {
-        bench_lab::export_blueprint_report(b, s, &args.format)
+    let saved = args.bench.is_none();
+    bench_report(target, args.bench, |b, s, revision| {
+        bench_lab::export_blueprint_report(
+            b, s, &args.format, Some(bench_lab::BlueprintRevision { revision, saved }),
+        )
     })
 }
 

@@ -831,6 +831,17 @@ mod tests {
         assert_eq!(positions["M4"]["position"], json!([552.501, 325., 75.]));
         assert!(e.system.bench.is_none());
 
+        let check = e.call("bench_lab_check", json!({"bench":scene})).unwrap();
+        assert_eq!(check["revision"], revision);
+        assert_eq!(check["saved"], false);
+        assert_eq!(check["stages"], json!([{"id":"delay", "position_mm":2.5, "pzt_um":1.}]));
+        assert_eq!(check["branches"][1]["stage_ids"], json!(["delay"]));
+        assert_eq!(check["branches"][1]["paths"][0]["opl_mm"], delayed["opl_mm"]);
+        assert_eq!(check["assertions"][0]["status"], "fail");
+        assert!((check["assertions"][0]["value"].as_f64().unwrap() - 605.002).abs() <= 1e-9);
+        assert_eq!(check["assertions"][1]["status"], "pass");
+        assert_eq!(check["assertions"][2]["status"], "pass");
+
         let assembly = e.call("bench_assembly", json!({"bench":scene})).unwrap();
         assert_eq!(assembly["items"][1]["position"], positions["M3"]["position"]);
         let saved = e.call("bench_set", json!({"bench":scene,"revision":revision})).unwrap();

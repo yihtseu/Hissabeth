@@ -54,6 +54,14 @@ impl AssertionUnit {
             _ => value,
         }
     }
+
+    pub(in crate::optics) fn symbol(self) -> &'static str {
+        match self {
+            Self::Mm => "mm",
+            Self::Um => "µm",
+            Self::Mrad => "mrad",
+        }
+    }
 }
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -294,6 +302,8 @@ pub struct BranchReport {
     pub paths: Vec<BranchPath>,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     pub(crate) interruption: Option<PathBreak>,
+    #[serde(skip)]
+    pub(in crate::optics) stage_ids: Vec<String>,
 }
 
 #[derive(schemars::JsonSchema, Debug, Serialize)]
@@ -310,6 +320,8 @@ pub struct BranchPath {
     pub(crate) interruption: Option<PathBreak>,
     #[serde(skip)]
     pub(crate) end_segment: Option<usize>,
+    #[serde(skip)]
+    pub(in crate::optics) segment_indices: Vec<usize>,
 }
 
 enum Step {
@@ -373,6 +385,9 @@ impl PathIndex {
         nominal: &NominalPaths<'_>,
         segments: &[Segment],
     ) -> Vec<BranchReport> {
+        let stage_by_member: HashMap<_, _> = bench.stages.iter().flat_map(|stage| {
+            stage.members.iter().map(|member| (member.as_str(), stage.id.as_str()))
+        }).collect();
         nominal
             .routes
             .iter()
@@ -402,10 +417,18 @@ impl PathIndex {
                 let interruption = paths.is_empty().then(|| {
                     PathBreak::new(&branch.from.element, &branch.from.port, "start_not_reached")
                 });
+                let stage_ids: HashSet<_> = route.iter().map(|&(element, _)| element)
+                    .chain([branch.to.element.as_str()])
+                    .filter_map(|element| stage_by_member.get(element).copied())
+                    .collect();
                 BranchReport {
                     id: branch.id.clone(),
                     paths,
                     interruption,
+                    stage_ids: bench.stages.iter()
+                        .filter(|stage| stage_ids.contains(stage.id.as_str()))
+                        .map(|stage| stage.id.clone())
+                        .collect(),
                 }
             })
             .collect()
@@ -430,6 +453,7 @@ impl PathIndex {
             nominal_match: false,
             interruption: None,
             end_segment: None,
+            segment_indices: Vec::new(),
         };
         let mut arrival = start_segment;
         for (i, &(element, port)) in route.iter().enumerate() {
@@ -496,14 +520,13 @@ impl BranchPath {
         let mut between = Vec::new();
         let mut next = Some(last);
         while next != start {
-            let flight = segments[next.expect("linked propagation")]
-                .flight
-                .as_ref()
-                .unwrap();
-            between.push(flight);
-            next = flight.previous_segment;
+            let at = next.expect("linked propagation");
+            between.push(at);
+            next = segments[at].flight.as_ref().unwrap().previous_segment;
         }
-        for flight in between.into_iter().rev() {
+        for at in between.into_iter().rev() {
+            let flight = segments[at].flight.as_ref().unwrap();
+            self.segment_indices.push(at);
             self.length_mm += flight.length_mm;
             self.opl_mm += flight.opl_mm;
             self.push_port(Port::new(&flight.from_element, &flight.from_port));

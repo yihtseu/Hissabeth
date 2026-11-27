@@ -305,7 +305,10 @@ export interface BenchLabIssue {
 }
 export interface BenchAssertionResult {
     assertion: string;
+    kind: BenchAssertion['kind'];
     branches: [string, string];
+    /** Input endpoint of the second arm, at the comparison element. */
+    at: BenchPort;
     value: number | BenchSeparation | null;
     unit: BenchAssertionUnit;
     target: number;
@@ -325,14 +328,35 @@ export interface BenchAimResidual {
     break?: BenchPathBreak;
 }
 export interface BenchLabCheck {
-    revision?: number;
+    revision: number;
+    saved: boolean;
     readiness_score: number;
     passed: boolean;
     counts: { errors: number; warnings: number; info: number };
     issues: BenchLabIssue[];
+    stages: { id: string; position_mm: number; pzt_um: number | null }[];
+    branches: {
+        id: string;
+        stage_ids: string[];
+        color: string | null;
+        paths: {
+            source: string;
+            wavelength_nm: number;
+            /** Accumulated only up to the interruption for an incomplete path. */
+            opl_mm: number;
+            break?: BenchPathBreak;
+        }[];
+        break?: BenchPathBreak;
+    }[];
     assertions: BenchAssertionResult[];
-    gaussian: { segments: BenchGaussianSegment[]; hits: BenchGaussianHit[] };
-    recommended_beam_dumps: { branch: string; position: Vec3; direction: Vec3; power: number }[];
+    gaussian: { segments: BenchGaussianSegment[]; hits: BenchGaussianHit[]; units: 'mm' };
+    recommended_beam_dumps: {
+        branch: string;
+        source: string;
+        position: Vec3;
+        direction: Vec3;
+        power: number;
+    }[];
     clamping: {
         element_id: string;
         hole: [number, number];
@@ -372,6 +396,8 @@ export interface BenchAlignmentGuide {
     safety_notes: string[];
 }
 export interface BenchBlueprintExport {
+    revision: number;
+    saved: boolean;
     format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
     filename: string;
     mime: string;

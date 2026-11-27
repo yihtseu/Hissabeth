@@ -139,6 +139,7 @@ interface ToolMap {
             revision?: number;
         };
     };
+    /** Reads stage, path, assertion and lab diagnostics from a single revisioned calculation. */
     bench_lab_check: {
         args: { bench?: import('./bench').BenchInput; require_pass?: boolean };
         result: import('./bench').BenchLabCheck;

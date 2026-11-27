@@ -15,6 +15,8 @@ const workspace=resolve(target,`bench-ui-${Date.now()}`);
 await mkdir(workspace,{recursive:true});
 const calls: any[]=[];const errors: string[]=[];let engine!: import('node:child_process').ChildProcess;let browser!: import('@playwright/test').Browser;let id=0;
 let holdNextTrace=false;let releaseTrace: ((v?: unknown) => void) | undefined;let held=false;
+let holdNextLab = false;
+let releaseLab: (() => void) | undefined;
 async function start(){
     await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});
     engine=spawn(resolve(target,'debug/hissabeth'),['--engine'],{env:{...process.env,HISSABETH_DATA_DIR:workspace},stdio:['ignore','ignore','pipe']});
@@ -56,6 +58,11 @@ try {
         if(command==='optical_call'){
             const result=await optical(args.name,args.args);
             if(args.name==='bench_trace'&&holdNextTrace){holdNextTrace=false;held=true;await new Promise(r=>{releaseTrace=r;});held=false;}
+            if (args.name === 'bench_lab_check' && holdNextLab) {
+                holdNextLab = false;
+                await new Promise<void>(resolve => { releaseLab = resolve; });
+                releaseLab = undefined;
+            }
             return result;
         }
         throw Error('Unexpected host command: '+command);
@@ -80,6 +87,14 @@ try {
         const stage = page.getByRole('group', { name: 'Delay stage delay' });
         await expect(stage).toBeVisible();
         const initialStage = await optical('bench_get');
+        const lab = page.getByRole('region', { name: 'Lab engineering assistant' });
+        const stageReading = lab.locator('[data-stage-reading="delay"]');
+        const delayArm = lab.locator('[data-branch-reading="arm_delay"]');
+        const oplAssertion = lab.locator('[data-assertion="delay_opl"]');
+        const outdated = lab.locator('[data-lab-stale]');
+        await expect(lab.getByRole('status')).toContainText(`Revision ${initialStage.revision} · Saved bench`);
+        await expect(oplAssertion).toContainText('ΔOPL 600 mm');
+        await expect(oplAssertion.locator('.badge')).toHaveText('Pass');
         await page.locator('.bench-element-list').getByRole('button', { name: /^M3\b/ }).click();
         const mirrorX = page.locator('.bench-inspector').getByRole('spinbutton', { name: 'X (mm)' });
         const position = stage.getByRole('spinbutton', { name: 'Position (mm)' });
@@ -101,19 +116,64 @@ try {
 
         await position.fill('2.5');
         await position.press('Tab');
+        await expect(stageReading).toContainText('Position 2.5 mm');
+        await expect(oplAssertion).toContainText('ΔOPL 605 mm');
+
+        holdNextLab = true;
+        await lab.getByRole('button', { name: 'Refresh', exact: true }).click();
+        await expect.poll(() => Boolean(releaseLab)).toBe(true);
         const pzt = stage.getByRole('spinbutton', { name: 'PZT (µm)' });
         await pzt.fill('1');
         await pzt.press('Tab');
         await expect(mirrorX).toHaveValue('552.501');
+        await expect(stageReading).toContainText('PZT 1 µm');
+        await expect(outdated).toHaveCount(0);
+        releaseLab!();
+        await expect.poll(() => Boolean(releaseLab)).toBe(false);
+        await expect(lab.getByRole('status')).toContainText(`Revision ${initialStage.revision} · Bench draft`);
+        await expect(lab.locator('[data-branch-reading="arm_reference"]')).toContainText('OPL 125 mm');
+        await expect(delayArm).toContainText('Delay stage delay OPL 730.002 mm');
+        await expect(oplAssertion).toContainText('ΔOPL 605.002 mm');
+        await expect(oplAssertion).toContainText('tolerance ±0.001 mm');
+        await expect(oplAssertion.locator('.badge')).toHaveText('Fail');
+        await expect(lab.locator('[data-assertion="combiner_angle"]')).toContainText(/Δr .* mm · Δθ .* mrad/);
+        await expect(lab.locator('[data-assertion="combiner_angle"] .badge')).toHaveText('Pass');
+
+        const downloaded = page.waitForEvent('download');
+        await page.getByRole('button', { name: 'Export', exact: true }).click();
+        const svgFile = await (await downloaded).path();
+        const drawing = await readFile(svgFile, 'utf8');
+        const svgReadings = await page.evaluate(svg => {
+            const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
+            const highlight = document.querySelector('[data-branch="arm_delay"]')!;
+            const swatch = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            swatch.style.color = highlight.getAttribute('stroke')!;
+            return {
+                color: swatch.style.color,
+                assertion: document.querySelector('[data-kind="assertion"][data-id="delay_opl"]')!.textContent,
+                title: document.querySelector('#title-block')!.textContent,
+            };
+        }, drawing);
+        await expect(delayArm.locator('.arm-swatch')).toHaveCSS('background-color', svgReadings.color);
+        assert(svgReadings.assertion?.includes('ΔOPL 605.002 mm'));
+        assert(svgReadings.title?.includes(`Revision ${initialStage.revision} · bench draft`));
+
         assert.deepEqual(await optical('bench_get'), initialStage, 'Preview must preserve the saved stage');
         const save = page.getByRole('button', { name: 'Save bench', exact: true });
+        holdNextLab = true;
         await save.click();
         await expect(save).toHaveCount(0);
+        await expect.poll(() => Boolean(releaseLab)).toBe(true);
+        await expect(outdated).toHaveText('Results out of date');
+        await expect(stageReading).toContainText('PZT 1 µm');
+        releaseLab!();
         const saved = await optical('bench_trace');
+        await expect(outdated).toHaveCount(0);
+        await expect(lab.getByRole('status')).toContainText(`Revision ${saved.revision} · Saved bench`);
         const opl = saved.branches.find((branch: { id: string }) => branch.id === 'arm_delay').paths[0].opl_mm;
         assert(Math.abs(opl - 730.002) <= 1e-9, `Saved delay arm OPL: ${opl}`);
         assert.deepEqual(errors, []);
-        console.log('PASS: delay stage previews while dragging, rejects overtravel, and saves the traced PZT pose');
+        console.log('PASS: delay stage preview, revisioned lab readings, and SVG agree after coarse and PZT motion');
     } else if(process.argv.includes('--lifecycle')) {
         await expect(page.locator('.bench-ledger')).toBeVisible();
         await page.locator('[data-element="G"] .bench-center').click();
@@ -209,4 +269,4 @@ try {
     await writeFile(resolve(target,'bench-ui-evidence.json'),JSON.stringify({status:'passed',workspace,scenarios:['real prescription group and continued rays','table/3D/section selection','conversation fixture saves through real MCP','revision refresh','late reply rejection','read-only controls and keyboard','CSV assembly','1600/768/480 screenshots','engine restart','conversation-only recovery'],limits:['SDK conversation is a fixture; optical broker is real','native pointer behavior not exercised'],errors,calls:calls.map(({command,name})=>({command,name}))},null,2));
     console.log('PASS: unified optical viewer with real Rust group tracing and conversation edit fixture');
     }
-} finally {if(releaseTrace)releaseTrace();if(browser)await browser.close();await new Promise(r=>server.close(r));if(engine&&engine.exitCode===null)engine.kill();}
+} finally {if(releaseTrace)releaseTrace();if(releaseLab)releaseLab();if(browser)await browser.close();await new Promise(r=>server.close(r));if(engine&&engine.exitCode===null)engine.kill();}

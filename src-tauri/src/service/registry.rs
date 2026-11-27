@@ -287,7 +287,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_lab_check,
                 Read,
                 None,
-                "Review optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+                "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, SVG highlight color), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
             ),
             tool!(
                 bench_alignment_guide,
@@ -299,7 +299,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_export_blueprint,
                 Read,
                 None,
-                "Return a lab blueprint or alignment SOP with its filename, MIME type and text content."
+                "Return a lab blueprint or alignment SOP with its filename, MIME type and text content. SVG shows the project revision, stage readings, branch OPL, assertion results and highlighted stage-controlled arms."
             ),
             tool!(
                 Meta, workspace_status,

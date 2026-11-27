@@ -564,6 +564,19 @@ pub fn template(name: &str) -> Result<Bench, String> {
             to: Port::new("BS2", input),
             via: vec![],
         }).collect();
+        // At zero the delay arm has two 300 mm legs in addition to the reference length.
+        scene.assertions = [
+            ("delay_opl", AssertionKind::EqualOpl, 600., AssertionUnit::Mm, 1e-3),
+            ("combiner_position", AssertionKind::Colinear, 0., AssertionUnit::Mm, 1e-3),
+            ("combiner_angle", AssertionKind::Colinear, 0., AssertionUnit::Mrad, 1e-3),
+        ].into_iter().map(|(id, kind, target, unit, tolerance)| Assertion {
+            id: id.into(),
+            kind,
+            branches: ["arm_delay".into(), "arm_reference".into()],
+            target,
+            unit,
+            tolerance,
+        }).collect();
     }
     scene.validate()?;
     Ok(scene)
@@ -1223,10 +1236,45 @@ pub(crate) struct LabCheck {
     passed: bool,
     counts: IssueCounts,
     issues: Vec<Issue>,
-    assertions: Vec<AssertionResult>,
+    #[serde(flatten)]
+    readings: LabReadings,
     gaussian: GaussianEnvelope,
     recommended_beam_dumps: Vec<BeamDump>,
     clamping: Vec<Clamping>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct LabReadings {
+    stages: Vec<StageReading>,
+    branches: Vec<BranchReading>,
+    assertions: Vec<AssertionResult>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct StageReading {
+    id: String,
+    position_mm: f64,
+    pzt_um: Option<f64>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct BranchReading {
+    id: String,
+    stage_ids: Vec<String>,
+    color: Option<&'static str>,
+    paths: Vec<PathReading>,
+    #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
+    interruption: Option<PathBreak>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+struct PathReading {
+    source: String,
+    wavelength_nm: f64,
+    /// Optical length accumulated up to the interruption if the path is incomplete.
+    opl_mm: f64,
+    #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
+    interruption: Option<PathBreak>,
 }
 
 #[derive(schemars::JsonSchema, Serialize)]
@@ -1237,10 +1285,23 @@ enum AssertionStatus {
     Unreachable,
 }
 
+impl AssertionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
 #[derive(schemars::JsonSchema, Serialize)]
 struct AssertionResult {
     assertion: String,
+    kind: AssertionKind,
     branches: [String; 2],
+    /// Input endpoint of the second arm, at the comparison element.
+    at: Port,
     value: Option<AssertionValue>,
     unit: AssertionUnit,
     target: f64,
@@ -1334,7 +1395,9 @@ fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
         };
         AssertionResult {
             assertion: a.id.clone(),
+            kind: a.kind,
             branches: a.branches.clone(),
+            at: second.to.clone(),
             value,
             unit: a.unit,
             target: a.target,
@@ -1344,6 +1407,31 @@ fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
             interruption: compared.err(),
         }
     }).collect()
+}
+
+fn lab_readings(bench: &Bench, trace: &Trace) -> LabReadings {
+    const STAGE_ARM_COLORS: &[&str] = &["#a85c00", "#7554a3", "#26734d", "#b04375", "#2162a1"];
+    let mut colors = STAGE_ARM_COLORS.iter().copied().cycle();
+    LabReadings {
+        stages: bench.stages.iter().map(|stage| StageReading {
+            id: stage.id.clone(),
+            position_mm: stage.position_mm,
+            pzt_um: stage.pzt.as_ref().map(|pzt| pzt.value_um),
+        }).collect(),
+        branches: trace.branches.iter().map(|report| BranchReading {
+            id: report.id.clone(),
+            color: if report.stage_ids.is_empty() { None } else { colors.next() },
+            stage_ids: report.stage_ids.clone(),
+            paths: report.paths.iter().map(|path| PathReading {
+                source: path.source.clone(),
+                wavelength_nm: path.wavelength_nm,
+                opl_mm: path.opl_mm,
+                interruption: path.interruption.clone(),
+            }).collect(),
+            interruption: report.interruption.clone(),
+        }).collect(),
+        assertions: check_assertions(bench, trace),
+    }
 }
 
 impl LabCheck {
@@ -1510,11 +1598,11 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
             clamping_offset_mm: free.map(|(_, d)| d),
         });
     }
-    let assertions = check_assertions(bench, trace);
-    for result in &assertions {
+    let readings = lab_readings(bench, trace);
+    for result in &readings.assertions {
         let (code, target, message) = match result.status {
             AssertionStatus::Pass => continue,
-            AssertionStatus::Fail => ("assertion_failed", None, format!("{}: residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
+            AssertionStatus::Fail => ("assertion_failed", Some(result.at.element.as_str()), format!("{}: residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
             AssertionStatus::Unreachable => {
                 let location = result.interruption.as_ref().unwrap();
                 ("assertion_unreachable", Some(location.element.as_str()), format!("{}: {} / {} ({})", result.assertion, location.element, location.port, location.reason))
@@ -1539,7 +1627,7 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
             info,
         },
         issues,
-        assertions,
+        readings,
         gaussian: gaussian.report(),
         recommended_beam_dumps: dumps,
         clamping,
@@ -1769,10 +1857,120 @@ fn xml(text: &str) -> String {
     safe
 }
 
-fn svg(bench: &Bench, grid: &Grid, gaussian: &Envelope<'_>) -> Result<String, String> {
+fn reading_number(value: f64) -> String {
+    if value == 0. {
+        "0".into()
+    } else if value.abs() < 1e-6 || value.abs() >= 1e9 {
+        format!("{value:.6e}")
+    } else {
+        format!("{value:.9}").trim_end_matches('0').trim_end_matches('.').into()
+    }
+}
+
+fn interruption_text(at: &PathBreak) -> String {
+    format!("{} / {} ({})", at.element, at.port, at.reason)
+}
+
+struct ReadingCard<'a> {
+    kind: &'static str,
+    id: &'a str,
+    color: &'static str,
+    lines: Vec<String>,
+}
+
+fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
+    let stages = readings.stages.iter().map(|stage| {
+        let mut lines = vec![
+            format!("Delay stage {}", stage.id),
+            format!("Position {} mm", reading_number(stage.position_mm)),
+        ];
+        if let Some(value) = stage.pzt_um {
+            lines.push(format!("PZT {} µm", reading_number(value)));
+        }
+        ReadingCard { kind: "stage", id: &stage.id, color: "#243b53", lines }
+    });
+    let branches = readings.branches.iter().map(|branch| {
+        let mut lines = vec![branch.id.clone()];
+        lines.extend(branch.stage_ids.iter().map(|id| format!("Delay stage {id}")));
+        if let Some(at) = &branch.interruption {
+            lines.push(format!("OPL unavailable · {}", interruption_text(at)));
+        }
+        for path in &branch.paths {
+            if branch.paths.len() > 1 {
+                lines.push(format!("{} · {} nm", path.source, reading_number(path.wavelength_nm)));
+            }
+            let value = reading_number(path.opl_mm);
+            lines.push(match &path.interruption {
+                Some(at) => format!("Partial OPL {value} mm · {}", interruption_text(at)),
+                None => format!("OPL {value} mm"),
+            });
+        }
+        ReadingCard {
+            kind: "branch", id: &branch.id, color: branch.color.unwrap_or("#243b53"), lines,
+        }
+    });
+    let assertions = readings.assertions.iter().map(|result| {
+        let unit = result.unit.symbol();
+        let title = match result.kind {
+            AssertionKind::EqualOpl => "ΔOPL",
+            AssertionKind::Colinear => "Colinearity",
+        };
+        let mut lines = vec![
+            format!("{title} · {} · {}", result.assertion, result.status.as_str()),
+            result.branches.join(" / "),
+        ];
+        match result.value {
+            Some(AssertionValue::Opl(value)) => {
+                lines.push(format!("ΔOPL {} {unit}", reading_number(value)));
+            }
+            Some(AssertionValue::Colinear(value)) => lines.push(format!(
+                "Δr {} mm · Δθ {} mrad", reading_number(value.position_mm), reading_number(value.angle_mrad),
+            )),
+            None => {}
+        }
+        lines.push(format!(
+            "Target {} {unit} · tolerance ±{} {unit}",
+            reading_number(result.target), reading_number(result.tolerance),
+        ));
+        if let Some(residual) = result.residual {
+            lines.push(format!("Residual {} {unit}", reading_number(residual)));
+        }
+        lines.push(match &result.interruption {
+            Some(at) => interruption_text(at),
+            None => format!("{} / {}", result.at.element, result.at.port),
+        });
+        ReadingCard {
+            kind: "assertion",
+            id: &result.assertion,
+            color: match result.status {
+                AssertionStatus::Pass => "#26734d",
+                _ => "#b42318",
+            },
+            lines,
+        }
+    });
+    stages.chain(branches).chain(assertions).collect()
+}
+
+fn svg(
+    bench: &Bench,
+    grid: &Grid,
+    gaussian: &Envelope<'_>,
+    trace: &Trace,
+    version: Option<BlueprintRevision>,
+) -> Result<String, String> {
     let [w, h] = bench.table_size;
-    let page_width = w + 64.;
-    let page_height = h + 108.;
+    let readings = lab_readings(bench, trace);
+    let cards = reading_cards(&readings);
+    let card_width = cards.iter().flat_map(|card| &card.lines)
+        .map(|line| line.chars().count()).max().map_or(0., |chars| chars as f64 * 4. + 12.);
+    let columns = (((w + 6.) / (card_width + 6.)) as usize).max(1);
+    let card_height = |row: &[ReadingCard<'_>]| {
+        8. + 6. * row.iter().map(|card| card.lines.len()).max().unwrap_or(0) as f64
+    };
+    let card_area: f64 = cards.chunks(columns).map(|row| card_height(row) + 6.).sum();
+    let page_width = w.max(card_width) + 64.;
+    let page_height = h + 108. + card_area;
     let pt = |[x, y, _]: V3| [x - grid.origin[0], h - (y - grid.origin[1])];
     let points = |p: [V3; 4]| {
         p.map(|p| {
@@ -1861,6 +2059,18 @@ fn svg(bench: &Bench, grid: &Grid, gaussian: &Envelope<'_>) -> Result<String, St
         )
         .unwrap();
     }
+    out.push_str("</g><g id=\"stage-arms\" stroke-width=\"1.5\">\n");
+    for (branch, report) in readings.branches.iter().zip(&trace.branches) {
+        let Some(color) = branch.color else { continue };
+        writeln!(out, r##"<g data-branch="{}" stroke="{color}">"##, xml(&branch.id)).unwrap();
+        for index in report.paths.iter().flat_map(|path| &path.segment_indices) {
+            let segment = &trace.segments[*index];
+            let [x1, y1] = pt(segment.from);
+            let [x2, y2] = pt(segment.to);
+            writeln!(out, r##"<line x1="{x1:.4}" y1="{y1:.4}" x2="{x2:.4}" y2="{y2:.4}"/>"##).unwrap();
+        }
+        out.push_str("</g>\n");
+    }
     out.push_str(
         r##"</g></g><g id="optics" fill="#102a43" font-family="sans-serif" font-size="4">
 "##,
@@ -1888,14 +2098,40 @@ fn svg(bench: &Bench, grid: &Grid, gaussian: &Envelope<'_>) -> Result<String, St
         r##"</g><g id="title-block" font-family="sans-serif" fill="#102a43">
 <path d="M 0 {title_y} H {w}" stroke="#829ab1"/>
 <text x="0" y="{}" font-size="7">{}</text>
-<text x="0" y="{}" font-size="4">Hissabeth · {w} × {h} mm · {} mm hole pitch · 1 unit = 1 mm</text>
-</g></svg>"##,
+<text x="0" y="{}" font-size="4">Hissabeth · {w} × {h} mm · {} mm hole pitch · 1 unit = 1 mm</text>"##,
         title_y + 12.,
         xml(&bench.name),
         title_y + 22.,
         grid.pitch
     )
     .unwrap();
+    if let Some(version) = version {
+        let input = if version.saved { "saved bench" } else { "bench draft" };
+        writeln!(out, r##"<text x="0" y="{}" font-size="4">Revision {} · {input}</text>"##,
+            title_y + 29., version.revision).unwrap();
+    }
+    let mut y = title_y + 36.;
+    out.push_str(r##"</g><g id="lab-readings" font-family="sans-serif" font-size="4">"##);
+    for row in cards.chunks(columns) {
+        let height = card_height(row);
+        for (column, card) in row.iter().enumerate() {
+            let x = column as f64 * (card_width + 6.);
+            let color = card.color;
+            writeln!(
+                out,
+                r##"<g data-kind="{}" data-id="{}" transform="translate({x} {y})" fill="{color}">
+<rect width="{card_width}" height="{height}" rx="2" fill="#fff" stroke="{color}" stroke-width=".5"/>"##,
+                card.kind, xml(card.id),
+            ).unwrap();
+            for (index, line) in card.lines.iter().enumerate() {
+                let line_y = 7 + 6 * index;
+                writeln!(out, r##"<text x="5" y="{line_y}">{}</text>"##, xml(line)).unwrap();
+            }
+            out.push_str("</g>\n");
+        }
+        y += height + 6.;
+    }
+    out.push_str("</g></svg>");
     Ok(out)
 }
 
@@ -2230,13 +2466,20 @@ pub(crate) struct Blueprint {
     content: String,
 }
 
+pub(crate) struct BlueprintRevision {
+    pub revision: u64,
+    pub saved: bool,
+}
+
 pub fn export_blueprint(bench: &Bench, system: &System, format: &str) -> Result<Value, String> {
-    serde_json::to_value(export_blueprint_report(bench, system, format)?).map_err(|e| e.to_string())
+    serde_json::to_value(export_blueprint_report(bench, system, format, None)?)
+        .map_err(|e| e.to_string())
 }
 pub(crate) fn export_blueprint_report(
     bench: &Bench,
     system: &System,
     format: &str,
+    version: Option<BlueprintRevision>,
 ) -> Result<Blueprint, String> {
     if !FORMATS.contains(&format) {
         return Err(format!(
@@ -2253,11 +2496,13 @@ pub(crate) fn export_blueprint_report(
         let trace = center_trace(bench, system)?;
         let gaussian = envelope(bench, system, &trace)?;
         match format {
-            "svg" => (
-                "svg",
-                "image/svg+xml",
-                svg(bench, &Grid::new(bench)?, &gaussian)?,
-            ),
+            "svg" => {
+                let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
+                let content = svg(
+                    bench, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), version,
+                )?;
+                ("svg", "image/svg+xml", content)
+            }
             "dxf" => (
                 "dxf",
                 "image/vnd.dxf",
@@ -2284,6 +2529,66 @@ mod tests {
 
     fn close(got: f64, expected: f64) {
         assert!((got - expected).abs() < 1e-8, "{got} vs {expected}");
+    }
+
+    #[test]
+    fn svg_prints_delay_readings_and_assertion_status_at_the_traced_locations() {
+        fn group<'a>(svg: &'a str, attributes: &str) -> (&'a str, Vec<&'a str>) {
+            let opening = format!("<g {attributes}");
+            let (_, group) = svg.split_once(&opening).unwrap();
+            let (group, _) = group.split_once("</g>").unwrap();
+            let (attributes, body) = group.split_once('>').unwrap();
+            let text = body.split("<text ").skip(1).map(|node| {
+                node.split_once('>').unwrap().1.split_once("</text>").unwrap().0
+            }).collect();
+            (attributes, text)
+        }
+
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        bench.stages[0].position_mm = 2.5;
+        bench.stages[0].pzt.as_mut().unwrap().value_um = 1.;
+        let drawing = export_blueprint_report(
+            &bench, &system, "svg", Some(BlueprintRevision { revision: 17, saved: false }),
+        ).unwrap().content;
+        assert!(drawing.contains(">Revision 17 · bench draft</text>"));
+
+        let (_, stage) = group(&drawing, r#"data-kind="stage" data-id="delay""#);
+        assert_eq!(stage, ["Delay stage delay", "Position 2.5 mm", "PZT 1 µm"]);
+        let (_, reference) = group(&drawing, r#"data-kind="branch" data-id="arm_reference""#);
+        let (arm_style, delay) = group(&drawing, r#"data-kind="branch" data-id="arm_delay""#);
+        let opl = |reading: &str| reading.strip_prefix("OPL ").unwrap()
+            .strip_suffix(" mm").unwrap().parse::<f64>().unwrap();
+        // Each of the two folded legs grows by the total displacement 2.501 mm.
+        close(opl(reference[1]), 125.);
+        close(opl(delay[2]), 730.002);
+        let color = arm_style.split_once("fill=\"").unwrap().1.split('"').next().unwrap();
+        let (highlight, _) = group(&drawing, r#"data-branch="arm_delay""#);
+        assert_eq!(highlight, format!(" stroke=\"{color}\""));
+        let arm_geometry = drawing.split_once(r#"data-branch="arm_delay""#).unwrap().1
+            .split_once("</g>").unwrap().0;
+        assert_eq!(arm_geometry.matches("<line ").count(), 3);
+        assert!(arm_geometry.contains(r#"x2="552.5010""#));
+
+        let (failed_style, failed) = group(&drawing, r#"data-kind="assertion" data-id="delay_opl""#);
+        assert!(failed_style.contains(r##"fill="#b42318""##));
+        assert!(failed.contains(&"ΔOPL · delay_opl · fail"));
+        close(failed[2].strip_prefix("ΔOPL ").unwrap().strip_suffix(" mm").unwrap()
+            .parse().unwrap(), 605.002);
+        assert!(failed.contains(&"Target 600 mm · tolerance ±0.001 mm"));
+        assert!(failed.contains(&"BS2 / in_a"));
+        let (_, colinear) = group(&drawing, r#"data-kind="assertion" data-id="combiner_angle""#);
+        assert!(colinear.contains(&"Colinearity · combiner_angle · pass"));
+        let (position, angle) = colinear[2].strip_prefix("Δr ").unwrap().split_once(" mm · Δθ ").unwrap();
+        close(position.parse().unwrap(), 0.);
+        close(angle.strip_suffix(" mrad").unwrap().parse().unwrap(), 0.);
+
+        bench.elements.push(mount_element("STOP", DUMP, [400., 200., 75.], [1., 0., 0.]));
+        let blocked = export_blueprint_report(&bench, &system, "svg", None).unwrap().content;
+        let (style, unavailable) = group(&blocked, r#"data-kind="assertion" data-id="delay_opl""#);
+        assert!(style.contains(r##"fill="#b42318""##));
+        assert!(unavailable.contains(&"ΔOPL · delay_opl · unreachable"));
+        assert!(unavailable.contains(&"STOP / in (unexpected_hit)"));
     }
 
     #[test]

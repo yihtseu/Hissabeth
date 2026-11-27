@@ -15,6 +15,7 @@ import type {
     BenchAlignmentGuide,
     BenchCatalogItem,
     BenchLabCheck,
+    BenchPathBreak,
     BenchStage,
     Vec3,
 } from '../bench';
@@ -31,6 +32,8 @@ const props = defineProps<{
     saving: boolean;
     labCheck: BenchLabCheck | null;
     labPending: boolean;
+    labStale: boolean;
+    labError: string;
 }>();
 
 const emit = defineEmits<{
@@ -143,6 +146,9 @@ const scoreClass = computed(() => {
 
 const fmt = (n: number | null | undefined, digits = 2) =>
     n === null || n === undefined ? '—' : n.toFixed(digits);
+const reading = (n: number) => Number(n.toPrecision(10)).toString();
+const interruption = ({ element, port, reason }: BenchPathBreak) =>
+    `${element} / ${port} (${reason})`;
 </script>
 
 <template>
@@ -194,7 +200,7 @@ const fmt = (n: number | null | undefined, digits = 2) =>
                 @click="subtab = 'audit'"
             >
                 <ShieldAlert :size="14" /> {{ tr('benchLab.tabAudit') }}
-                <span v-if="labCheck" class="badge" :class="scoreClass">
+                <span v-if="labCheck && !labStale" class="badge" :class="scoreClass">
                     {{ labCheck.readiness_score }}/100
                 </span>
             </button>
@@ -237,8 +243,139 @@ const fmt = (n: number | null | undefined, digits = 2) =>
 
         <!-- TAB 1: LAB READINESS & CLEARANCE AUDIT -->
         <div v-if="subtab === 'audit'" class="lab-body">
+            <p v-if="labError" class="json-error" role="alert">{{ labError }}</p>
             <p v-if="labPending && !labCheck" class="note">{{ tr('benchLab.checking') }}</p>
             <template v-else-if="labCheck">
+                <p class="lab-revision" role="status">
+                    <span v-if="labStale" class="badge badge-warn" data-lab-stale>{{
+                        tr('benchLab.readings.stale')
+                    }}</span>
+                    {{ tr('benchLab.readings.revision', { revision: labCheck.revision }) }}
+                    ·
+                    {{ tr(labCheck.saved ? 'benchLab.readings.saved' : 'benchLab.readings.draft') }}
+                    <span v-if="labPending && labStale" class="note">{{
+                        tr('benchLab.checking')
+                    }}</span>
+                </p>
+
+                <div v-if="labCheck.stages.length || labCheck.branches.length" class="lab-section">
+                    <h4>{{ tr('benchLab.readings.paths') }}</h4>
+                    <ul class="lab-readings">
+                        <li
+                            v-for="stage in labCheck.stages"
+                            :key="`stage:${stage.id}`"
+                            :data-stage-reading="stage.id"
+                        >
+                            <b>{{ tr('benchLab.stageTitle', { stage: stage.id }) }}</b>
+                            <span>{{
+                                tr('benchLab.readings.position', {
+                                    value: reading(stage.position_mm),
+                                })
+                            }}</span>
+                            <span v-if="stage.pzt_um !== null"
+                                >PZT {{ reading(stage.pzt_um) }} µm</span
+                            >
+                        </li>
+                        <li
+                            v-for="arm in labCheck.branches"
+                            :key="`branch:${arm.id}`"
+                            :data-branch-reading="arm.id"
+                        >
+                            <b>
+                                <span
+                                    v-if="arm.color"
+                                    class="arm-swatch"
+                                    :style="{ backgroundColor: arm.color }"
+                                ></span>
+                                {{ arm.id }}
+                            </b>
+                            <span v-for="stage in arm.stage_ids" :key="stage" class="note">
+                                {{ tr('benchLab.stageTitle', { stage }) }}
+                            </span>
+                            <span v-if="arm.break" class="note">
+                                {{ tr('benchLab.readings.unavailable') }} ·
+                                {{ interruption(arm.break) }}
+                            </span>
+                            <span v-for="(path, index) in arm.paths" :key="index">
+                                <span v-if="arm.paths.length > 1" class="note"
+                                    >{{ path.source }} · {{ path.wavelength_nm }} nm ·
+                                </span>
+                                {{
+                                    tr(
+                                        path.break
+                                            ? 'benchLab.readings.partialOpl'
+                                            : 'benchLab.readings.opl',
+                                        { value: reading(path.opl_mm) },
+                                    )
+                                }}
+                                <span v-if="path.break" class="note">
+                                    · {{ interruption(path.break) }}</span
+                                >
+                            </span>
+                        </li>
+                    </ul>
+                </div>
+
+                <div v-if="labCheck.assertions.length" class="lab-section">
+                    <h4>{{ tr('benchLab.readings.assertions') }}</h4>
+                    <ul class="lab-readings">
+                        <li
+                            v-for="result in labCheck.assertions"
+                            :key="result.assertion"
+                            :data-assertion="result.assertion"
+                            :class="{ 'failed-assertion': result.status !== 'pass' }"
+                        >
+                            <b>{{ result.assertion }}</b>
+                            <span class="note">{{
+                                tr(`benchLab.readings.kind.${result.kind}`)
+                            }}</span>
+                            <span
+                                class="badge"
+                                :class="result.status === 'pass' ? 'badge-ok' : 'badge-bad'"
+                            >
+                                {{ tr(`benchLab.readings.status.${result.status}`) }}
+                            </span>
+                            <span class="note">{{ result.branches.join(' / ') }}</span>
+                            <span v-if="typeof result.value === 'number'">
+                                ΔOPL {{ reading(result.value) }}
+                                {{ result.unit === 'um' ? 'µm' : result.unit }}
+                            </span>
+                            <span v-else-if="result.value">
+                                Δr {{ reading(result.value.position_mm) }} mm · Δθ
+                                {{ reading(result.value.angle_mrad) }} mrad
+                            </span>
+                            <small class="assertion-detail">
+                                <template v-if="result.residual !== null">
+                                    {{
+                                        tr('benchLab.readings.residual', {
+                                            value: reading(result.residual),
+                                            unit: result.unit === 'um' ? 'µm' : result.unit,
+                                        })
+                                    }}
+                                    ·
+                                </template>
+                                {{
+                                    tr('benchLab.readings.limit', {
+                                        target: reading(result.target),
+                                        tolerance: reading(result.tolerance),
+                                        unit: result.unit === 'um' ? 'µm' : result.unit,
+                                    })
+                                }}
+                            </small>
+                            <span v-if="result.break" class="assertion-detail">
+                                {{
+                                    tr('benchLab.readings.interrupted', {
+                                        location: interruption(result.break),
+                                    })
+                                }}
+                            </span>
+                            <small v-else class="assertion-detail note"
+                                >{{ result.at.element }} / {{ result.at.port }}</small
+                            >
+                        </li>
+                    </ul>
+                </div>
+
                 <dl class="metrics">
                     <div>
                         <dt>{{ tr('benchLab.readiness') }}</dt>
@@ -326,6 +463,7 @@ const fmt = (n: number | null | undefined, digits = 2) =>
                                         <button
                                             type="button"
                                             class="small primary"
+                                            :disabled="labStale"
                                             @click="
                                                 emit(
                                                     'addBeamDump',
@@ -654,6 +792,44 @@ const fmt = (n: number | null | undefined, digits = 2) =>
     align-items: center;
     gap: 6px;
     margin-bottom: 6px;
+}
+.lab-revision {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 12px;
+}
+.lab-readings {
+    display: grid;
+    gap: 6px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.lab-readings li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    align-items: baseline;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+.lab-readings .failed-assertion {
+    border-color: var(--danger);
+}
+.assertion-detail {
+    flex-basis: 100%;
+}
+.arm-swatch {
+    display: inline-block;
+    width: 1em;
+    height: 0.32em;
+    vertical-align: middle;
 }
 .issue-list {
     list-style: none;
