@@ -92,6 +92,32 @@ export interface BenchElement {
     layer?: string | null;
     /** Field action on apertures and mirrors. Only `nd` changes traced power; the rest act in bench_field. */
     action?: BenchAction | null;
+    /** Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs. */
+    readout?: BenchReadout | null;
+}
+export interface BenchReadout {
+    /** 1–16 ROIs: [y, z, width, height] in mm along the detector-local y and z axes. */
+    ports: { id: string; roi: [number, number, number, number] }[];
+    modes: {
+        basis: 'hermite_gauss' | 'laguerre_gauss' | 'custom';
+        /** [m, n] for Hermite–Gauss or [p, l] for Laguerre–Gauss; empty for custom. */
+        indices?: [number, number][];
+        /** Hermite–Gauss superpositions, normalised on use. */
+        custom?: {
+            label: string;
+            terms: { hg: [number, number]; coefficient: [number, number] }[];
+        }[];
+        /** 1/e² intensity radius (um). */
+        waist_um: number;
+        normalization?: 'power' | 'amplitude';
+    };
+    /** plus − minus forms the real or imaginary part of `signal` (default "balanced"). */
+    balanced_pairs?: {
+        signal?: string;
+        plus: string;
+        minus: string;
+        quadrature: 'real' | 'imag';
+    }[];
 }
 export type BenchAction =
     | { kind: 'nd'; od: number }
@@ -889,6 +915,29 @@ export interface BenchFieldArm {
     phase_rad: number;
     opl_mm: number;
     geometric_tilt_mrad: [number, number] | null;
+}
+export interface BenchModeReading {
+    index: string;
+    /** Power-normalized: coupled power; amplitude-normalized: overlap over the mode's peak intensity. */
+    intensity: number;
+    /** Coupled power over the ROI power. */
+    fraction: number;
+}
+export interface BenchReadoutReading {
+    saved: boolean;
+    revision: number;
+    detector: string;
+    wavelength_nm: number;
+    realizations: number;
+    normalization: 'power' | 'amplitude';
+    ports: { id: string; arms: string[]; power: number; modes: BenchModeReading[] }[];
+    signals: {
+        pair: string;
+        real: number;
+        imag: number;
+        modes: { index: string; real: number; imag: number }[];
+    }[];
+    warnings: string[];
 }
 export interface BenchFieldReading {
     saved: boolean;

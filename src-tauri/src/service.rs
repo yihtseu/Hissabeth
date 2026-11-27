@@ -431,6 +431,16 @@ mod tests {
         assert_eq!(field["arms"][0]["branch"], "arm_a");
         assert_eq!(field["intensity"].as_array().unwrap().len(), 32);
         assert!(call("bench_field", json!({"bench":mz,"branch":"arm_a","port":{"element":"BS2","port":"in_a"}})).is_err());
+        let hybrid = call("bench_template", json!({"name":"modal_hybrid"})).unwrap()["bench"].clone();
+        let readout = call("bench_readout", json!({"bench":hybrid,"detector":"CAM"})).unwrap();
+        assert_eq!(readout["saved"], false);
+        assert_eq!(readout["ports"].as_array().unwrap().len(), 4);
+        assert_eq!(readout["ports"][0]["modes"].as_array().unwrap().len(), 4);
+        assert_eq!(readout["ports"][0]["modes"][0]["index"], "HG0,0");
+        assert_eq!(readout["signals"][0]["pair"], "iq");
+        assert!(readout["revision"].is_u64());
+        assert!(call("bench_readout", json!({"bench":hybrid,"detector":"KI+"})).is_err());
+        assert!(call("bench_readout", json!({"bench":hybrid,"detector":"CAM","realizations":0})).is_err());
     }
 
     fn shared_workspace() -> (tempfile::TempDir, SharedWorkspace) {

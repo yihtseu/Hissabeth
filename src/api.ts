@@ -157,6 +157,11 @@ interface ToolMap {
         };
         result: import('./bench').BenchFieldReading;
     };
+    /** Modal camera readout of a detector: per-ROI mode intensities and balanced signals. */
+    bench_readout: {
+        args: { bench?: import('./bench').BenchInput; detector: string; realizations?: number };
+        result: import('./bench').BenchReadoutReading;
+    };
     bench_alignment_guide: {
         args: { bench?: import('./bench').BenchInput };
         result: import('./bench').BenchAlignmentGuide;

@@ -201,6 +201,7 @@ struct Scope {
     bench_auto_aim: bool,
     bench_lab_check: bool,
     bench_field: &'static str,
+    bench_readout: &'static str,
     bench_alignment_guide: bool,
     bench_blueprint_exports: &'static [&'static str],
     bench_detector_maps: bool,
@@ -369,6 +370,15 @@ pub(super) fn bench_field(
         arrays: args.arrays,
     };
     bench_report(target, args.bench, |b, s, _| bench_lab::field::field(b, s, &request))
+}
+
+pub(super) fn bench_readout(
+    target: &Target<'_>,
+    args: p::BenchReadout,
+) -> Result<BenchReport<bench_lab::field::readout::ReadoutReading>, String> {
+    bench_report(target, args.bench, |b, s, _| {
+        bench_lab::field::readout::readout(b, s, &args.detector, args.realizations)
+    })
 }
 
 pub(super) fn bench_alignment_guide(
@@ -1366,6 +1376,7 @@ pub(super) fn capabilities(target: &Target<'_>, _: p::Empty) -> Result<Capabilit
         bench_auto_aim: true,
         bench_lab_check: true,
         bench_field: "band-limited angular spectrum per traced arm with thin-element phases and spatial actions",
+        bench_readout: "ROI modal projection (Hermite-Gauss, Laguerre-Gauss, custom) and balanced quadrature pairs",
         bench_alignment_guide: true,
         bench_blueprint_exports: bench_lab::FORMATS,
         bench_detector_maps: true,

@@ -47,6 +47,9 @@ use std::{
     ops::{Add, AddAssign, Mul, Sub},
 };
 
+#[path = "bench_readout.rs"]
+pub(crate) mod readout;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct C {
     re: f64,
@@ -287,6 +290,7 @@ impl Screen {
 }
 
 /// Element interaction on an arm, applied before the flight at `step`.
+#[derive(Clone)]
 struct Event<'a> {
     step: usize,
     element: &'a Element,
@@ -298,6 +302,7 @@ struct Event<'a> {
     index: f64,
 }
 
+#[derive(Clone)]
 struct Arm<'a> {
     label: String,
     source: &'a Source,
@@ -1141,34 +1146,31 @@ fn downsample(grid: Grid, values: impl Fn(usize) -> C, block: usize) -> Vec<Vec<
         .collect()
 }
 
-pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> Result<FieldReading, String> {
-    let scene = bench.resolved_stages()?;
-    let bench = scene.as_ref();
-    bench.validate()?;
-    let trace = bench.trace_resolved(system)?;
-    let realizations = request.realizations.unwrap_or(1);
-    if !(1..=256).contains(&realizations) {
-        return Err("realizations must be 1..256".into());
-    }
-    let arms = select(bench, &trace, request)?
-        .into_iter()
-        .map(|(label, path)| arm(bench, &trace, label, path))
-        .collect::<Result<Vec<_>, _>>()?;
-    let reference = &arms[0];
+/// Coherence, flux cross-weights and carrier choice of arms superposed on the
+/// first arm's plane.
+struct Coupling {
+    gamma: Vec<Vec<f64>>,
+    weights: Vec<Vec<C>>,
+    carriers: Vec<bool>,
+    uncarried: Vec<String>,
+}
+
+fn couple(arms: &[Arm]) -> Result<Coupling, String> {
+    couple_on(arms, &arms[0])
+}
+
+/// `couple` on the plane and grid of `reference`, which need not be an arm of
+/// the group (a readout ROI on the detector face).
+fn couple_on(arms: &[Arm], reference: &Arm) -> Result<Coupling, String> {
     let grid = reference.grid;
     if arms.iter().any(|a| a.grid != grid) {
         return Err("Arms at the target need sources with the same field grid and pitch".into());
     }
-    let random = arms
-        .iter()
-        .any(|a| a.events.iter().any(|e| matches!(e.element.action, Some(Action::Rgg { .. }))));
-    let runs = if random { realizations } else { 1 };
     let n = arms.len();
     let gamma: Vec<Vec<f64>> = (0..n).map(|a| (0..n).map(|b| coherence(&arms[a], &arms[b])).collect()).collect();
     let weights: Vec<Vec<C>> = (0..n)
         .map(|a| (0..n).map(|b| flux(arms[a].wave(), arms[b].wave(), reference.end.direction).scale(gamma[a][b])).collect())
         .collect();
-    let projection: Vec<C> = arms.iter().map(|a| inner(a.vector, reference.vector)).collect();
     // The mapping carrier must advance less than π per sample. An arm that
     // couples to no other may drop it: its intensity does not depend on it.
     let mut carriers = vec![true; n];
@@ -1190,6 +1192,46 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
         carriers[a] = false;
         uncarried.push(arm.label.clone());
     }
+    Ok(Coupling { gamma, weights, carriers, uncarried })
+}
+
+/// Every arm's field for one realization, resampled onto the first arm's plane.
+fn realize(
+    trace: &Trace,
+    arms: &[Arm],
+    carriers: &[bool],
+    realization: usize,
+    screens: &mut Screens,
+    band: &mut Band,
+) -> Result<Vec<Vec<C>>, String> {
+    arms.iter()
+        .zip(carriers)
+        .map(|(arm, &carrier)| map(arm, &arms[0], compute(trace, arm, realization, screens, band)?, carrier))
+        .collect()
+}
+
+pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> Result<FieldReading, String> {
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
+    bench.validate()?;
+    let trace = bench.trace_resolved(system)?;
+    let realizations = request.realizations.unwrap_or(1);
+    if !(1..=256).contains(&realizations) {
+        return Err("realizations must be 1..256".into());
+    }
+    let arms = select(bench, &trace, request)?
+        .into_iter()
+        .map(|(label, path)| arm(bench, &trace, label, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let reference = &arms[0];
+    let grid = reference.grid;
+    let random = arms
+        .iter()
+        .any(|a| a.events.iter().any(|e| matches!(e.element.action, Some(Action::Rgg { .. }))));
+    let runs = if random { realizations } else { 1 };
+    let n = arms.len();
+    let Coupling { gamma, weights, carriers, uncarried } = couple(&arms)?;
+    let projection: Vec<C> = arms.iter().map(|a| inner(a.vector, reference.vector)).collect();
     let mut near = vec![0.; grid.len()];
     let mut far = vec![0.; grid.len()];
     let mut cross = vec![vec![C::ZERO; n]; n];
@@ -1199,11 +1241,7 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
     let mut screens = Screens::new();
     let mut band = Band { sin: 1., dropped: 0. };
     for realization in 0..runs {
-        let fields = arms
-            .iter()
-            .zip(&carriers)
-            .map(|(arm, &carrier)| map(arm, reference, compute(&trace, arm, realization, &mut screens, &mut band)?, carrier))
-            .collect::<Result<Vec<_>, String>>()?;
+        let fields = realize(&trace, &arms, &carriers, realization, &mut screens, &mut band)?;
         intensity(&fields, &weights, &mut near);
         let spectra: Vec<Vec<C>> = fields
             .iter()

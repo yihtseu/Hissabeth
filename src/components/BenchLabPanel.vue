@@ -16,6 +16,7 @@ import type {
     BenchCatalogItem,
     BenchLabCheck,
     BenchPathBreak,
+    BenchReadoutReading,
     BenchStage,
     Vec3,
 } from '../bench';
@@ -137,6 +138,62 @@ onMounted(() => {
     void loadCatalog();
 });
 
+// Modal camera readouts follow the lab check: one revisioned request per
+// detector that declares a readout, refreshed whenever the check reruns. Each
+// result keeps the bench snapshot it was computed from and is shown only while
+// that snapshot is current and its revision matches a fresh lab check.
+const readoutResults = ref<{ snapshot: string; readings: BenchReadoutReading[] }>();
+const readoutError = ref('');
+let readoutRequest = 0;
+let requestSnapshot = '';
+const benchSnapshot = computed(() => JSON.stringify(props.bench));
+const readouts = computed(() => {
+    const result = readoutResults.value;
+    if (!result || result.snapshot !== benchSnapshot.value || props.labStale) return [];
+    return result.readings.filter((r) => r.revision === props.labCheck?.revision);
+});
+async function loadReadouts(): Promise<void> {
+    const detectors = props.bench.elements
+        .filter((e) => e.kind === 'detector' && e.readout)
+        .map((e) => e.id);
+    const request = ++readoutRequest;
+    const snapshot = benchSnapshot.value;
+    requestSnapshot = snapshot;
+    const bench = JSON.parse(snapshot) as Bench;
+    readoutResults.value = undefined;
+    readoutError.value = '';
+    if (!props.online || detectors.length === 0) return;
+    try {
+        const readings = await Promise.all(
+            detectors.map((detector) => callTool('bench_readout', { bench, detector })),
+        );
+        if (request !== readoutRequest || snapshot !== benchSnapshot.value) return;
+        readoutResults.value = { snapshot, readings };
+    } catch (e) {
+        if (request !== readoutRequest || snapshot !== benchSnapshot.value) return;
+        readoutError.value = errorMessage(e);
+    }
+}
+watch(
+    () => props.labCheck,
+    () => void loadReadouts(),
+    { immediate: true },
+);
+watch(benchSnapshot, (snapshot) => {
+    // An edit invalidates the shown readings at once; the next lab check reloads
+    // them. A request already started for this very snapshot is kept.
+    if (snapshot === requestSnapshot) return;
+    readoutRequest++;
+    readoutResults.value = undefined;
+    readoutError.value = '';
+});
+const peak = (r: BenchReadoutReading) =>
+    Math.max(1e-300, ...r.ports.flatMap((p) => p.modes.map((m) => m.intensity)));
+const cellShade = (r: BenchReadoutReading, value: number) =>
+    `color-mix(in srgb, var(--accent, #0d9488) ${Math.round((100 * value) / peak(r))}%, transparent)`;
+const modalValue = (n: number) =>
+    Math.abs(n) < 1e-9 ? '0' : Math.abs(n) < 1e-3 ? n.toExponential(1) : n.toFixed(3);
+
 const scoreClass = computed(() => {
     const score = props.labCheck?.readiness_score ?? 0;
     if (score >= 85) return 'badge-ok';
@@ -257,6 +314,73 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                         tr('benchLab.checking')
                     }}</span>
                 </p>
+
+                <p v-if="readoutError" class="json-error" role="alert">{{ readoutError }}</p>
+                <div
+                    v-for="r in readouts"
+                    :key="`readout:${r.detector}`"
+                    class="lab-section"
+                    :data-modal-readout="r.detector"
+                >
+                    <h4>
+                        {{
+                            tr('benchLab.readings.modal', {
+                                detector: r.detector,
+                                normalization: tr(
+                                    `benchLab.readings.normalization.${r.normalization}`,
+                                ),
+                            })
+                        }}
+                        <span class="note">{{
+                            tr('benchLab.readings.revision', { revision: r.revision })
+                        }}</span>
+                    </h4>
+                    <table class="modal-heatmap">
+                        <thead>
+                            <tr>
+                                <th></th>
+                                <th v-for="m in r.ports[0]?.modes ?? []" :key="m.index">
+                                    {{ m.index }}
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="port in r.ports" :key="port.id">
+                                <th :title="port.arms.join(', ')">{{ port.id }}</th>
+                                <td
+                                    v-for="m in port.modes"
+                                    :key="m.index"
+                                    :data-port="port.id"
+                                    :data-mode="m.index"
+                                    :style="{ backgroundColor: cellShade(r, m.intensity) }"
+                                    :title="
+                                        tr('benchLab.readings.fraction', {
+                                            value: fmt(100 * m.fraction, 1),
+                                        })
+                                    "
+                                >
+                                    {{ modalValue(m.intensity) }}
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <ul v-if="r.signals.length" class="lab-readings">
+                        <li
+                            v-for="signal in r.signals"
+                            :key="signal.pair"
+                            :data-signal="signal.pair"
+                        >
+                            <b>{{ signal.pair }}</b>
+                            <span>{{
+                                tr('benchLab.readings.quadratures', {
+                                    real: modalValue(signal.real),
+                                    imag: modalValue(signal.imag),
+                                })
+                            }}</span>
+                        </li>
+                    </ul>
+                    <p v-for="w in r.warnings" :key="w" class="note">{{ w }}</p>
+                </div>
 
                 <div v-if="labCheck.stages.length || labCheck.branches.length" class="lab-section">
                     <h4>{{ tr('benchLab.readings.paths') }}</h4>
@@ -967,6 +1091,17 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
     align-items: center;
     color: var(--muted);
     font-size: 12px;
+}
+.modal-heatmap {
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+}
+.modal-heatmap th,
+.modal-heatmap td {
+    border: 1px solid var(--border, #d0d7de);
+    padding: 3px 8px;
+    text-align: right;
 }
 .lab-readings {
     display: grid;

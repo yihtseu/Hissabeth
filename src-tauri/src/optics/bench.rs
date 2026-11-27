@@ -257,6 +257,9 @@ pub struct Element {
     /// Parametric action on the transverse field leaving an aperture plate or plane mirror.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
+    /// Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readout: Option<Readout>,
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -334,6 +337,9 @@ struct ElementInput {
     /// Parametric action on the transverse field leaving an aperture plate or plane mirror.
     #[serde(default)]
     action: Option<Action>,
+    /// Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs.
+    #[serde(default)]
+    readout: Option<Readout>,
 }
 
 impl From<ElementInput> for Element {
@@ -375,6 +381,7 @@ impl From<ElementInput> for Element {
             phase: input.phase,
             layer: input.layer,
             action: input.action,
+            readout: input.readout,
         }
     }
 }
@@ -594,6 +601,207 @@ impl Action {
                 (0.1..=1e5).contains(correlation_um) && (0. ..=100.).contains(roughness_waves)
             }
         }
+    }
+}
+/// Modal camera readout on a detector (bench_readout). Every named branch ending
+/// at the detector contributes to each port whose ROI it lights; each port maps
+/// its arms, with their spatial carriers, onto the detector face and projects
+/// the coherent field inside the ROI on the modes centred on the ROI.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Readout {
+    #[schemars(length(min = 1, max = 16))]
+    pub ports: Vec<ReadoutPort>,
+    pub modes: ModeBasis,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub balanced_pairs: Vec<BalancedPair>,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadoutPort {
+    pub id: String,
+    /// [y, z, width, height] in mm on the detector face: the ROI centre along
+    /// the detector-local y and z axes and its full extent along each.
+    #[schemars(inner(range(min = -1e5, max = 1e5)))]
+    pub roi: [f64; 4],
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeFamily {
+    /// HG_mn(x, y) with indices [m, n] along the detector-local y and z axes.
+    HermiteGauss,
+    /// LG_pl(r, φ) with indices [p, l], φ measured from local y towards z.
+    LaguerreGauss,
+    /// Superpositions of Hermite–Gauss modes given in `custom`.
+    Custom,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeNormalization {
+    /// Unit-power mode functions: a mode reading is the power coupled into it.
+    #[default]
+    Power,
+    /// Unit-peak-amplitude mode functions.
+    Amplitude,
+}
+/// Mode basis on the detector, centred on each port's ROI centre, with waist
+/// `waist_um` (1/e² intensity radius) and a flat phase front in the port plane.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModeBasis {
+    pub basis: ModeFamily,
+    /// [m, n] for Hermite–Gauss or [p, l] for Laguerre–Gauss; empty for custom.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub indices: Vec<[i32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub custom: Vec<CustomMode>,
+    #[schemars(range(min = 0.1, max = 1e6))]
+    pub waist_um: f64,
+    #[serde(default)]
+    pub normalization: ModeNormalization,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomMode {
+    pub label: String,
+    /// Σ coefficient·HG_mn, normalised on use.
+    #[schemars(length(min = 1, max = 16))]
+    pub terms: Vec<ModeTerm>,
+}
+impl ModeBasis {
+    /// Highest Hermite–Gauss order per axis among the modes (2p + |l| for
+    /// Laguerre–Gauss), which sets the finest feature of the basis.
+    pub fn sampling_order(&self) -> u32 {
+        match self.basis {
+            ModeFamily::HermiteGauss => self.indices.iter().flatten().map(|i| i.unsigned_abs()).max(),
+            ModeFamily::LaguerreGauss => self.indices.iter().map(|[p, l]| 2 * p.unsigned_abs() + l.unsigned_abs()).max(),
+            ModeFamily::Custom => self.custom.iter().flat_map(|c| &c.terms).flat_map(|t| t.hg).max(),
+        }
+        .unwrap_or(0)
+    }
+}
+impl CustomMode {
+    /// Coefficients summed per distinct HG index, in first-appearance order.
+    pub fn merged(&self) -> Vec<([u32; 2], [f64; 2])> {
+        let mut out: Vec<([u32; 2], [f64; 2])> = Vec::new();
+        for t in &self.terms {
+            match out.iter_mut().find(|(hg, _)| *hg == t.hg) {
+                Some((_, c)) => *c = [c[0] + t.coefficient[0], c[1] + t.coefficient[1]],
+                None => out.push((t.hg, t.coefficient)),
+            }
+        }
+        out
+    }
+}
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModeTerm {
+    #[schemars(inner(range(min = 0, max = 20)))]
+    pub hg: [u32; 2],
+    /// [re, im]
+    pub coefficient: [f64; 2],
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quadrature {
+    Real,
+    Imag,
+}
+/// Differential pair: plus minus minus port readings form the `quadrature`
+/// component of signal `signal`.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BalancedPair {
+    #[serde(default = "balanced_signal")]
+    pub signal: String,
+    pub plus: String,
+    pub minus: String,
+    pub quadrature: Quadrature,
+}
+fn balanced_signal() -> String {
+    "balanced".into()
+}
+impl ModeBasis {
+    /// Mode labels in reading order.
+    pub(crate) fn labels(&self) -> Vec<String> {
+        match self.basis {
+            ModeFamily::HermiteGauss => self.indices.iter().map(|[m, n]| format!("HG{m},{n}")).collect(),
+            ModeFamily::LaguerreGauss => self.indices.iter().map(|[p, l]| format!("LG{p},{l}")).collect(),
+            ModeFamily::Custom => self.custom.iter().map(|c| c.label.clone()).collect(),
+        }
+    }
+}
+impl Readout {
+    pub(crate) fn valid(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        for p in &self.ports {
+            if p.id.is_empty() || !ids.insert(p.id.as_str()) {
+                return Err(format!("readout port ids must be unique and non-empty: {:?}", p.id));
+            }
+            let [y, z, w, h] = p.roi;
+            if ![y, z, w, h].iter().all(|v| v.is_finite() && v.abs() <= 1e5) || w <= 0. || h <= 0. {
+                return Err(format!("readout port {} needs a finite ROI with positive width and height", p.id));
+            }
+        }
+        if self.ports.is_empty() || self.ports.len() > 16 {
+            return Err("readout needs 1–16 ports".into());
+        }
+        let m = &self.modes;
+        if !(0.1..=1e6).contains(&m.waist_um) {
+            return Err("readout waist_um must be 0.1–1e6".into());
+        }
+        let count = match m.basis {
+            ModeFamily::HermiteGauss => {
+                if !m.custom.is_empty() || m.indices.iter().flatten().any(|i| !(0..=20).contains(i)) {
+                    return Err("Hermite–Gauss modes take indices [m, n] in 0..20 and no custom modes".into());
+                }
+                m.indices.len()
+            }
+            ModeFamily::LaguerreGauss => {
+                if !m.custom.is_empty() || m.indices.iter().any(|[p, l]| !(0..=10).contains(p) || !(-20..=20).contains(l)) {
+                    return Err("Laguerre–Gauss modes take indices [p, l] with p in 0..10, |l| ≤ 20 and no custom modes".into());
+                }
+                m.indices.len()
+            }
+            ModeFamily::Custom => {
+                let mut labels = HashSet::new();
+                if !m.indices.is_empty()
+                    || m.custom.iter().any(|c| {
+                        c.label.is_empty()
+                            || !labels.insert(c.label.as_str())
+                            || !(1..=16).contains(&c.terms.len())
+                            || c.terms.iter().any(|t| t.hg.iter().any(|i| *i > 20) || !t.coefficient.iter().all(|v| v.is_finite() && v.abs() <= 1e6))
+                            || {
+                                // Repeated HG indices add; a mode whose terms cancel has no shape.
+                                let scale = c.terms.iter().map(|t| t.coefficient[0].hypot(t.coefficient[1])).sum::<f64>();
+                                let norm = c.merged().iter().map(|(_, k)| k[0].hypot(k[1])).fold(0., f64::max);
+                                norm <= 1e-9 * scale
+                            }
+                    })
+                {
+                    return Err("custom modes need unique labels and 1–16 Hermite–Gauss terms (indices 0..20) with finite coefficients that do not cancel to zero (repeated indices add), and no indices".into());
+                }
+                m.custom.len()
+            }
+        };
+        if !(1..=16).contains(&count) {
+            return Err("readout needs 1–16 modes".into());
+        }
+        if self.balanced_pairs.len() > 16 {
+            return Err("readout takes at most 16 balanced pairs".into());
+        }
+        for pair in &self.balanced_pairs {
+            if pair.signal.is_empty() || pair.plus == pair.minus || !ids.contains(pair.plus.as_str()) || !ids.contains(pair.minus.as_str()) {
+                return Err(format!(
+                    "balanced pair {}: plus and minus must be two different readout ports",
+                    pair.signal
+                ));
+            }
+        }
+        Ok(())
     }
 }
 /// Mutual coherence of sources: sources sharing `group` (for example fibre
@@ -1305,6 +1513,12 @@ impl Bench {
                     "Ghost bounces require a lens group (0-2): {}",
                     e.id
                 ));
+            }
+            if let Some(r) = &e.readout {
+                if e.kind != Kind::Detector {
+                    return Err(format!("Invalid readout on {}: readouts need a detector", e.id));
+                }
+                r.valid().map_err(|m| format!("Invalid readout on {}: {m}", e.id))?;
             }
             if let Some(bins) = e.pixels
                 && (e.kind != Kind::Detector || bins.iter().any(|b| !(2..=128).contains(b)))
@@ -2888,7 +3102,15 @@ impl Bench {
                         d,
                         power: ray.power * kept,
                         depth: ray.depth + 1,
-                        expected: next(&e.id, port),
+                        expected: next(&e.id, port).filter(|to| {
+                            // A combiner's output port carries one beam per input, in
+                            // different directions; the connection names where the beam
+                            // heading towards it goes, so the other beam is unrouted.
+                            !matches!(e.kind, Kind::Splitter | Kind::Pbs)
+                                || self.elements.iter().find(|t| &t.id == to).is_none_or(|t| {
+                                    unit(sub(t.position, hit)).is_ok_and(|u| dot(u, d) > std::f64::consts::FRAC_1_SQRT_2)
+                                })
+                        }),
                         departure: Departure {
                             port: Port::new(&e.id, port),
                             previous: Some(previous),
@@ -3152,6 +3374,7 @@ pub fn example() -> Bench {
         phase: None,
         layer: None,
         action: None,
+        readout: None,
     };
     Bench {
         name: "Split laser experiment".into(),
@@ -3229,6 +3452,30 @@ pub(super) fn next_beam(beam: &[Port], element: &str, port: &str) -> Vec<Port> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn combiner_connections_route_only_the_beam_heading_to_their_target() {
+        // Both BS2 outputs name D1 (+x); the beam on each port that leaves along
+        // +y towards D2 carries no expectation, so it lands on D2 as detected.
+        let mut scene = super::super::bench_lab::template("mach_zehnder").unwrap();
+        for port in ["transmitted", "reflected"] {
+            scene.connections.push(Connection { from: "BS2".into(), port: port.into(), to: "D1".into() });
+        }
+        let system = System::default();
+        let trace = scene.trace(&system).unwrap();
+        accounted(&trace);
+        assert!(trace.terminations.iter().all(|t| t.reason == "detected"), "{:?}", trace.terminations);
+        for id in ["D1", "D2"] {
+            assert_eq!(trace.terminations.iter().filter(|t| t.element.as_deref() == Some(id)).count(), 2);
+        }
+        // A blocker in front of D1 still interrupts the routed beams.
+        let mut stop = scene.elements.iter().find(|e| e.id == "D1").unwrap().clone();
+        (stop.id, stop.kind, stop.position, stop.mount) = ("STOP".into(), Kind::Blocker, [550., 400., 75.], None);
+        scene.elements.push(stop);
+        let trace = scene.trace(&system).unwrap();
+        let hits: Vec<_> = trace.terminations.iter().map(|t| (t.element.as_deref().unwrap(), t.reason.as_str())).collect();
+        assert_eq!(hits.iter().filter(|h| **h == ("STOP", "unexpected_hit")).count(), 2, "{hits:?}");
+        assert_eq!(hits.iter().filter(|h| **h == ("D2", "detected")).count(), 2, "{hits:?}");
+    }
     #[test]
     fn half_wave_plate_switches_pbs_output_with_finite_extinction() {
         let mut scene = super::super::bench_lab::template("polarized_beam_combiner").unwrap();

@@ -15,6 +15,7 @@ const instructions =
     'Use bench_trace to inspect its continued path and power. For free-space benches, use bench_catalog for hardware, bench_template for mounted layouts, and bench_auto_aim to orient optics and snap mounts to the hole grid. ' +
     'Before treating a bench as lab-ready, use bench_lab_check to review 3ω clear aperture, clamping fork access, mount collisions, and beam dump positions. Use bench_alignment_guide for installation order and bench_export_blueprint for drawings and alignment SOPs. ' +
     'Use bench_field for interference, speckle, masks, SLMs and tip-tilt: give the source field sampling and a polarization, then read a branch end or superpose every branch at one input port. ' +
+    'Use bench_readout for modal cameras: give a detector a readout (ROI ports, a Hermite-Gauss, Laguerre-Gauss or custom mode basis, balanced pairs) and read per-port mode intensities and balanced quadratures; bench_template modal_hybrid is a four-port example. ' +
     'Report actual results and tool errors. Respond in the language of the user.';
 
 export interface BridgeRequest {

@@ -3,8 +3,9 @@ use super::{
     System,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
-        Connection, DispersionQuantity, Element, GlassPass, Kind, Mount, PathBreak, Polarization, Port, Region, RegionShape, Stage,
-        StagePose, StagePzt, Trace, next_beam,
+        BalancedPair, Connection, DispersionQuantity, Element, FieldProfile, FieldSampling, GlassPass, Kind, ModeBasis, ModeFamily,
+        ModeNormalization, Mount, PathBreak, PhasePlate, Polarization, Port, Quadrature, Readout, ReadoutPort, Region, RegionShape,
+        Stage, StagePose, StagePzt, Trace, next_beam,
     },
     interval::{Dual, Iv, Real},
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
@@ -375,6 +376,7 @@ pub(crate) const TEMPLATES: &[&str] = &[
     "beam_expander_focus",
     "periscope_routing",
     "three_arm",
+    "modal_hybrid",
 ];
 
 fn normal_rotation([x, y, z]: V3) -> V3 {
@@ -414,8 +416,14 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         phase: None,
         layer: None,
         action: None,
+        readout: None,
     }
 }
+
+/// Modal hybrid ports: id, LO phase on the port's combiner and the camera
+/// offset (mm) its steering mirror aims at.
+const HYBRID_PORTS: [(&str, f64, f64); 4] =
+    [("I+", 0., -37.5), ("I-", PI, -12.5), ("Q+", PI / 2., 12.5), ("Q-", 1.5 * PI, 37.5)];
 
 pub fn template(name: &str) -> Result<Bench, String> {
     const X: V3 = [1., 0., 0.];
@@ -430,6 +438,8 @@ pub fn template(name: &str) -> Result<Bench, String> {
     scene.connections.clear();
     let at = |x, y| [x, y, 75.];
     let mut place = |id, part, p, n| scene.elements.push(mount_element(id, part, p, n));
+    // Connections of templates that build their element IDs at run time.
+    let mut built: Vec<Connection> = Vec::new();
     let (label, edges): (&str, &[(&str, &str, &str)]) = match name {
         "mach_zehnder" => {
             place("BS1", SPLITTER, at(250., 200.), FOLD);
@@ -580,6 +590,93 @@ pub fn template(name: &str) -> Result<Bench, String> {
                 ],
             )
         }
+        "modal_hybrid" => {
+            // BS0 splits signal (transmitted, +x) from local oscillator (reflected,
+            // +y). Tap chains along the row and column feed four combiners on the
+            // diagonal, so each combiner sees equal signal and LO path lengths and
+            // reflection counts. A combiner's transmitted LO carries the port phase
+            // (0, π, π/2, 3π/2); steering mirrors fold the four +x outputs straight
+            // down (−y) onto separate ROIs of one camera at normal incidence, so
+            // I+ − I− ∝ cos φ and Q+ − Q− ∝ sin φ for a signal phase φ on BS0.
+            scene.sources[0].position = [50., 150., 75.];
+            scene.sources[0].polarization = None;
+            scene.sources[0].field = Some(FieldSampling {
+                grid: [128, 128],
+                pitch_um: 50.,
+                profile: FieldProfile::Gaussian,
+                waist_um: 700.,
+                polarization: Some([[1., 0.], [0., 0.]]),
+            });
+            let wavelength = scene.sources[0].wavelength;
+            let mut element = |id: String, part, p, normal, reflectance: f64, phase: f64| {
+                let mut e = mount_element(&id, part, p, normal);
+                // Ideal splitting ratios keep the balanced pairs free of a DC offset.
+                e.reflectance = reflectance;
+                e.transmittance = 1. - reflectance;
+                e.phase = (phase != 0.).then_some(PhasePlate { radians: Some(phase), waves: None, at_wavelength_nm: wavelength });
+                scene.elements.push(e);
+            };
+            element("BS0".into(), SPLITTER, at(150., 150.), FOLD, 0.5, 0.);
+            let camera = at(575., 50.);
+            let mut dumps = Vec::new();
+            for (k, (port, phase, offset)) in HYBRID_PORTS.into_iter().enumerate() {
+                let x = 225. + 75. * k as f64;
+                let (part, tap) = if k == 3 { (MIRROR, 1.) } else { (SPLITTER, 1. / (4. - k as f64)) };
+                element(format!("TS{}", k + 1), part, at(x, 150.), FOLD, tap, 0.);
+                element(format!("TL{}", k + 1), part, at(150., x), FOLD, tap, 0.);
+                element(format!("C{port}"), SPLITTER, at(x, x), FOLD, 0.5, phase);
+                // The combiner's +y output (signal transmitted, LO reflected)
+                // carries the complementary fringe; dump it before the next LO row.
+                dumps.push(mount_element(&format!("D{port}"), DUMP, at(x, x + 45.), [0., -1., 0.]));
+                // Each later row folds 25 mm further out, so a −y fold passes
+                // beside the earlier rows' mirrors and lands on its own ROI.
+                element(format!("K{port}"), MIRROR, at(575. + offset, x), [-1., -1., 0.], 1., 0.);
+            }
+            scene.elements.extend(dumps);
+            let mut detector = mount_element("CAM", DETECTOR, camera, [0., -1., 0.]);
+            detector.label = "CAM (4-port camera)".into();
+            detector.aperture = 45.;
+            detector.body_radius = 50.;
+            detector.readout = Some(Readout {
+                ports: HYBRID_PORTS.map(|(id, _, offset)| ReadoutPort { id: id.into(), roi: [offset, 0., 5.6, 5.6] }).into(),
+                modes: ModeBasis {
+                    basis: ModeFamily::HermiteGauss,
+                    indices: vec![[0, 0], [1, 0], [0, 1], [1, 1]],
+                    custom: vec![],
+                    waist_um: 700.,
+                    normalization: ModeNormalization::Power,
+                },
+                balanced_pairs: [("I+", "I-", Quadrature::Real), ("Q+", "Q-", Quadrature::Imag)]
+                    .map(|(plus, minus, quadrature)| BalancedPair {
+                        signal: "iq".into(),
+                        plus: plus.into(),
+                        minus: minus.into(),
+                        quadrature,
+                    })
+                    .into(),
+            });
+            scene.elements.push(detector);
+            let mut edge = |from: &str, port: &str, to: &str| {
+                built.push(Connection { from: from.into(), port: port.into(), to: to.into() });
+            };
+            edge("S1", "out", "BS0");
+            edge("BS0", "transmitted", "TS1");
+            edge("BS0", "reflected", "TL1");
+            for k in 1..=4 {
+                let port = HYBRID_PORTS[k - 1].0;
+                for chain in ["TS", "TL"] {
+                    let tap = format!("{chain}{k}");
+                    edge(&tap, "reflected", &format!("C{port}"));
+                    if k < 4 {
+                        edge(&tap, "transmitted", &format!("{chain}{}", k + 1));
+                    }
+                }
+                edge(&format!("C{port}"), "reflected", &format!("K{port}"));
+                edge(&format!("C{port}"), "transmitted", &format!("K{port}"));
+                edge(&format!("K{port}"), "reflected", "CAM");
+            }
+            ("Four-port modal hybrid", &[])
+        }
         _ => {
             return Err(format!(
                 "Unknown bench template {name:?}. Choose {}",
@@ -596,6 +693,7 @@ pub fn template(name: &str) -> Result<Bench, String> {
             to: to.into(),
         })
         .collect();
+    scene.connections.extend(built);
     if name == "mach_zehnder" {
         scene.branches = [
             ("arm_a", "reflected", "in_a"),
@@ -616,6 +714,23 @@ pub fn template(name: &str) -> Result<Bench, String> {
             band_nm: None,
             quantity: None,
         }];
+    }
+    if name == "modal_hybrid" {
+        // Signal arms leave BS0 transmitted and LO arms reflected; each walks its
+        // tap chain to the port's combiner.
+        let mut branches = Vec::new();
+        for (k, (port, _, _)) in HYBRID_PORTS.into_iter().enumerate() {
+            for (arm, first, chain) in [("signal", "transmitted", "TS"), ("lo", "reflected", "TL")] {
+                let mut via = vec![Port::new("BS0", first)];
+                via.extend((1..=k).map(|i| Port::new(&format!("{chain}{i}"), "transmitted")));
+                if k < 3 {
+                    via.push(Port::new(&format!("{chain}{}", k + 1), "reflected"));
+                }
+                via.push(Port::new(&format!("C{port}"), if arm == "signal" { "reflected" } else { "transmitted" }));
+                branches.push(Branch { id: format!("{port} {arm}"), from: Port::new("S1", "out"), to: Port::new("CAM", "in"), via });
+            }
+        }
+        scene.branches = branches;
     }
     if name == "three_arm" {
         scene.branches = ["L", "C", "R"]
@@ -2505,8 +2620,16 @@ fn svg(
         8. + 6. * row.iter().map(|card| card.lines.len()).max().unwrap_or(0) as f64
     };
     let card_area: f64 = cards.chunks(columns).map(|row| card_height(row) + 6.).sum();
-    let page_width = w.max(card_width) + 64.;
-    let page_height = h + 108. + card_area;
+    let modal: Vec<(&str, Result<field::readout::ReadoutReading, String>)> = bench
+        .elements
+        .iter()
+        .filter(|e| e.readout.is_some())
+        .map(|e| (e.id.as_str(), field::readout::readout(bench, system, &e.id, None)))
+        .collect();
+    let modal_area: f64 = modal.iter().map(|(_, r)| modal_size(r)[1] + 6.).sum();
+    let modal_width = modal.iter().map(|(_, r)| modal_size(r)[0]).fold(0., f64::max);
+    let page_width = w.max(card_width).max(modal_width) + 64.;
+    let page_height = h + 108. + card_area + modal_area;
     let pt = |[x, y, _]: V3| [x - grid.origin[0], h - (y - grid.origin[1])];
     let points = |p: [V3; 4]| {
         p.map(|p| {
@@ -2641,7 +2764,7 @@ fn svg(
         grid.pitch
     )
     .unwrap();
-    if let Some(version) = version {
+    if let Some(version) = &version {
         let input = if version.saved { "saved bench" } else { "bench draft" };
         writeln!(out, r##"<text x="0" y="{}" font-size="4">Revision {} · {input}</text>"##,
             title_y + 29., version.revision).unwrap();
@@ -2667,8 +2790,100 @@ fn svg(
         }
         y += height + 6.;
     }
+    out.push_str("</g><g id=\"modal-readout\" font-family=\"sans-serif\" font-size=\"4\" fill=\"#102a43\">\n");
+    let revision = version.as_ref().map_or_else(String::new, |v| format!(" · revision {}", v.revision));
+    for (id, reading) in &modal {
+        modal_svg(&mut out, id, reading, &revision, y);
+        y += modal_size(reading)[1] + 6.;
+    }
     out.push_str("</g></svg>");
     Ok(out)
+}
+
+/// Heatmap cell size (mm) of the modal readout table: ports × modes.
+const MODAL_CELL: [f64; 2] = [26., 7.];
+
+fn modal_size(reading: &Result<field::readout::ReadoutReading, String>) -> [f64; 2] {
+    match reading {
+        Ok(r) => [
+            (22. + MODAL_CELL[0] * r.ports.first().map_or(0, |p| p.modes.len()) as f64).max(140.),
+            14. + MODAL_CELL[1] * (r.ports.len() + 1) as f64 + 6. * r.signals.len() as f64,
+        ],
+        Err(e) => [e.chars().count() as f64 * 2.2 + 40., 14.],
+    }
+}
+
+/// One detector's modal readout: a ports × modes heatmap of mode intensity
+/// (shaded relative to the table's largest intensity) and its balanced signals.
+fn modal_svg(out: &mut String, id: &str, reading: &Result<field::readout::ReadoutReading, String>, revision: &str, y: f64) {
+    // Readings below 1e-9 (of the 1-unit source scale) are numerical zeros.
+    let number = |v: f64| match v.abs() {
+        a if a < 1e-9 => "0".to_string(),
+        a if a < 1e-3 => format!("{v:.1e}"),
+        _ => format!("{v:.3}"),
+    };
+    writeln!(out, r##"<g data-detector="{}" transform="translate(0 {y})">"##, xml(id)).unwrap();
+    let r = match reading {
+        Ok(r) => r,
+        Err(e) => {
+            writeln!(out, r##"<text y="6" font-size="5">Modal readout {}{revision}</text><text y="12" fill="#b42318">{}</text></g>"##, xml(id), xml(e)).unwrap();
+            return;
+        }
+    };
+    let modes = r.ports.first().map_or(&[][..], |p| &p.modes[..]);
+    writeln!(
+        out,
+        r##"<text y="6" font-size="5">Modal readout {} · {} ports × {} modes · {} normalization{revision}</text>"##,
+        xml(id),
+        r.ports.len(),
+        modes.len(),
+        match r.normalization {
+            bench::ModeNormalization::Power => "power",
+            bench::ModeNormalization::Amplitude => "amplitude",
+        }
+    )
+    .unwrap();
+    let [cw, ch] = MODAL_CELL;
+    let top = 10.;
+    for (j, mode) in modes.iter().enumerate() {
+        writeln!(out, r##"<text x="{}" y="{}" text-anchor="middle">{}</text>"##, 22. + cw * (j as f64 + 0.5), top + 5., xml(&mode.index)).unwrap();
+    }
+    let peak = r.ports.iter().flat_map(|p| &p.modes).map(|m| m.intensity).fold(0., f64::max);
+    for (i, port) in r.ports.iter().enumerate() {
+        let row = top + ch * (i + 1) as f64;
+        writeln!(out, r##"<text x="0" y="{}">{}</text>"##, row + 5., xml(&port.id)).unwrap();
+        for (j, mode) in port.modes.iter().enumerate() {
+            let level = if peak > 0. { (mode.intensity / peak).clamp(0., 1.) } else { 0. };
+            let shade = |c: f64| (255. + (c - 255.) * level).round() as u8;
+            let (x, ink) = (22. + cw * j as f64, if level > 0.5 { "#fff" } else { "#102a43" });
+            writeln!(
+                out,
+                r##"<rect x="{x}" y="{row}" width="{cw}" height="{ch}" fill="#{:02x}{:02x}{:02x}" stroke="#bcccdc" stroke-width=".3" data-port="{}" data-mode="{}"/><text x="{}" y="{}" text-anchor="middle" fill="{ink}">{}</text>"##,
+                shade(0.),
+                shade(124.),
+                shade(145.),
+                xml(&port.id),
+                xml(&mode.index),
+                x + cw / 2.,
+                row + 5.,
+                number(mode.intensity)
+            )
+            .unwrap();
+        }
+    }
+    let base = top + ch * (r.ports.len() + 1) as f64;
+    for (k, signal) in r.signals.iter().enumerate() {
+        writeln!(
+            out,
+            r##"<text y="{}">{}: real {} · imag {}</text>"##,
+            base + 6. * (k + 1) as f64,
+            xml(&signal.pair),
+            number(signal.real),
+            number(signal.imag)
+        )
+        .unwrap();
+    }
+    out.push_str("</g>\n");
 }
 
 fn dxf(bench: &Bench, grid: &Grid, gaussian: &Envelope<'_>) -> Result<String, String> {
@@ -3147,6 +3362,32 @@ mod tests {
 
     fn close(got: f64, expected: f64) {
         assert!((got - expected).abs() < 1e-8, "{got} vs {expected}");
+    }
+
+    #[test]
+    fn svg_prints_the_modal_readout_heatmap_with_the_revision() {
+        let system = System::default();
+        let bench = template("modal_hybrid").unwrap();
+        bench.validate().unwrap();
+        let drawing = export_blueprint_report(&bench, &system, "svg", Some(BlueprintRevision { revision: 17, saved: false }))
+            .unwrap()
+            .content;
+        let (_, modal) = drawing.split_once(r#"<g id="modal-readout""#).unwrap();
+        let (block, _) = modal.split_once(r#"<g data-detector="CAM""#).unwrap().1.split_once("</g>").unwrap();
+        assert!(block.contains("Modal readout CAM · 4 ports × 4 modes · power normalization · revision 17"), "{block}");
+        assert_eq!(block.matches("data-port=").count(), 16);
+        let reading = field::readout::readout(&bench, &system, "CAM", None).unwrap();
+        let cell = |port: &str, mode: &str| {
+            let opening = format!(r#"data-port="{port}" data-mode="{mode}"/>"#);
+            let (_, rest) = block.split_once(&opening).unwrap();
+            rest.split_once('>').unwrap().1.split_once("</text>").unwrap().0.to_string()
+        };
+        assert_eq!(cell("Q+", "HG0,0"), format!("{:.3}", reading.ports[2].modes[0].intensity));
+        let signal = &reading.signals[0];
+        // At zero signal phase the quadrature reading vanishes.
+        assert!(signal.imag.abs() < 1e-9 && signal.real > 0.2);
+        assert!(block.contains(&format!("iq: real {:.3} · imag 0</text>", signal.real)), "{block}");
+        assert!(block.contains(r##"data-port="Q+" data-mode="HG1,0"/><text x="61" y="36" text-anchor="middle" fill="#102a43">0</text>"##));
     }
 
     #[test]

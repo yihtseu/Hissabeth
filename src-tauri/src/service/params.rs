@@ -87,6 +87,20 @@ pub(super) struct BenchField {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct BenchReadout {
+    #[schemars(default, with = "bench::Bench")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<bench::Bench>,
+    /// Detector element carrying the readout.
+    pub detector: String,
+    /// Ground-glass realizations averaged, 1..256 (default 1).
+    #[schemars(default, with = "u32", range(min = 1, max = 256))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realizations: Option<usize>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct BenchCatalog {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]

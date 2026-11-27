@@ -296,6 +296,12 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Read the transverse complex field at the end of one named branch, or the superposed field of every named branch ending at one input port. Sources need field sampling (grid, pitch_um, profile, waist_um) and a polarization. Each arm launches that field, propagates it by the band-limited angular spectrum through its traced flights, applies clear apertures, region outlines, thin lens and curved mirror quadratic phases and element actions (mask, SLM, tip_tilt, rotating ground glass), and scales by the traced power and Jones vector, so ND filters, splitters and coatings act through the trace. Arms of one source, or of sources sharing a coherence group, interfere with a Gaussian coherence-length factor. Returns power, near-field centroid, far-field centroid in mrad, mean phase, speckle contrast averaged over ground-glass realizations, per-arm readings, pair coherence and correlation, sampling warnings (window edge power and band limit), and optional block-averaged intensity and phase arrays. Lens groups are not supported; boundaries are periodic."
             ),
             tool!(
+                bench_readout,
+                Read,
+                None,
+                "Read a detector's modal camera readout. The detector's readout lists ROI ports ([y, z, width, height] mm on the detector face), a mode basis (hermite_gauss [m, n], laguerre_gauss [p, l] or custom Hermite-Gauss superpositions, waist_um, power or amplitude normalization) and balanced pairs (plus, minus, real or imag quadrature, grouped by signal). Every named branch ending at the detector feeds each port whose ROI it lights; each port maps its arms, with their spatial carriers, onto the detector face, superposes them coherently as in bench_field and projects the field inside the ROI on the modes centred on the ROI along the detector-local y and z axes. Errors ask for a finer pitch_um when a carrier or the mode basis is under-sampled. Returns per-port ROI power and mode intensities and fractions, and per-signal balanced real and imaginary differences of the ROI powers and of each mode, with the revision."
+            ),
+            tool!(
                 bench_alignment_guide,
                 Read,
                 None,
