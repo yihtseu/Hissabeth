@@ -32,11 +32,12 @@ pub(super) fn measure(
     input: &Port,
 ) -> Result<Overlap, PathBreak> {
     let missing = || PathBreak::new(&input.element, &input.port, "no_common_output");
-    let [first, second] = arrivals.map(|i| &trace.segments[i]);
     let [a, b] = arrivals.map(|i| trace.splitter_outputs.get(&i).copied().unwrap_or_default());
     // A thin splitter's other output reflects both of these output directions.
     // The angle is invariant under that reflection, so one available pairing suffices.
-    let (a, b) = a[0]
+    // Positions are the outputs' exit points: the hit for a thin coating, the glass
+    // exit for a substrate, where both paired outputs leave through the same face.
+    let ((pa, a), (pb, b)) = a[0]
         .zip(b[1])
         .or_else(|| a[1].zip(b[0]))
         .ok_or_else(missing)?;
@@ -44,7 +45,7 @@ pub(super) fn measure(
         unit(a).map_err(|_| missing())?,
         unit(b).map_err(|_| missing())?,
     );
-    let spot_delta = sub(second.to, first.to);
+    let spot_delta = sub(pb, pa);
     Ok(Overlap {
         separation: Separation {
             position_mm: norm(spot_delta),

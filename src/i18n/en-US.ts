@@ -2181,7 +2181,7 @@ export default {
             partialOpl: 'Partial OPL {value} mm',
             unavailable: 'OPL unavailable',
             assertions: 'Optical assertions',
-            kind: { equal_opl: 'ΔOPL', colinear: 'Colinearity' },
+            kind: { equal_opl: 'ΔOPL', colinear: 'Colinearity', dispersion: 'Dispersion' },
             status: { pass: 'Pass', fail: 'Fail', unreachable: 'Unreachable' },
             residual: 'Residual {value} {unit}',
             limit: 'Target {target} {unit} · tolerance ±{tolerance} {unit}',

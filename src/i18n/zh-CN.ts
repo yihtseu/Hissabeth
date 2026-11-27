@@ -2103,7 +2103,7 @@ export default {
             partialOpl: '已传播光程 {value} mm',
             unavailable: '光程无法计算',
             assertions: '光学断言',
-            kind: { equal_opl: 'ΔOPL', colinear: '共线度' },
+            kind: { equal_opl: 'ΔOPL', colinear: '共线度', dispersion: '色散' },
             status: { pass: '通过', fail: '失败', unreachable: '无法计算' },
             residual: '残差 {value} {unit}',
             limit: '目标 {target} {unit} · 容差 ±{tolerance} {unit}',

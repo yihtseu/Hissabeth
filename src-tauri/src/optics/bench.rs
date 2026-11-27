@@ -11,7 +11,9 @@ use std::{
 
 #[path = "bench_paths.rs"]
 mod paths;
-pub use paths::{Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, Port};
+pub use paths::{
+    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, DispersionQuantity, GlassPass, Port,
+};
 pub(super) use paths::BranchPath;
 pub(crate) use paths::PathBreak;
 pub(super) use paths::NominalPaths;
@@ -166,6 +168,13 @@ pub struct Element {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 16))]
     pub regions: Vec<Region>,
+    /// Glass slab behind the element plane, refracting every transmitted (and
+    /// internally reflected) output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate: Option<Substrate>,
+    /// Scalar phase added to the element's transmitted outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<PhasePlate>,
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -230,6 +239,13 @@ struct ElementInput {
     #[serde(default)]
     #[schemars(length(max = 16))]
     regions: Vec<Region>,
+    /// Glass slab behind the element plane, refracting every transmitted (and
+    /// internally reflected) output.
+    #[serde(default)]
+    substrate: Option<Substrate>,
+    /// Scalar phase added to the element's transmitted outputs.
+    #[serde(default)]
+    phase: Option<PhasePlate>,
 }
 
 impl From<ElementInput> for Element {
@@ -267,6 +283,8 @@ impl From<ElementInput> for Element {
             screw_tpi: input.screw_tpi,
             lever_arm_mm: input.lever_arm_mm,
             regions: input.regions,
+            substrate: input.substrate,
+            phase: input.phase,
         }
     }
 }
@@ -342,6 +360,120 @@ pub struct Region {
 }
 fn unit_fraction() -> f64 {
     1.
+}
+
+/// Plane-parallel or wedged glass slab. The front face is the element plane
+/// (local `x = 0`, outward normal `+x`); the back face passes through local
+/// `[-thickness_mm, 0, 0]` and is tilted by `wedge_deg` about the local `z` axis.
+/// Light enters on whichever face it reaches first.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Substrate {
+    /// Material library name, for example `N-BK7` or a `nd:vd` model glass.
+    pub material: String,
+    #[schemars(range(min = 1e-6, max = 1e4))]
+    pub thickness_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -45.0, max = 45.0))]
+    pub wedge_deg: Option<f64>,
+    /// Required on splitters and PBS, rejected elsewhere: the face carrying the
+    /// reflective coating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coated_face: Option<Face>,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Face {
+    Front,
+    Back,
+}
+/// Scalar phase response, exactly one of `radians` or `waves`, given at
+/// `at_wavelength_nm` and scaled as 1/λ at other wavelengths.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhasePlate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -1e6, max = 1e6))]
+    pub radians: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = -1e5, max = 1e5))]
+    pub waves: Option<f64>,
+    #[schemars(range(min = 100.0, max = 20000.0))]
+    pub at_wavelength_nm: f64,
+}
+impl PhasePlate {
+    pub(crate) fn radians_at(&self, wavelength_nm: f64) -> f64 {
+        let design = self
+            .radians
+            .unwrap_or_else(|| std::f64::consts::TAU * self.waves.unwrap_or(0.));
+        design * self.at_wavelength_nm / wavelength_nm
+    }
+}
+struct SlabFace {
+    point: V3,
+    normal: V3,
+}
+fn slab_faces(e: &Element, substrate: &Substrate) -> [SlabFace; 2] {
+    let wedge = substrate.wedge_deg.unwrap_or(0.).to_radians();
+    [
+        SlabFace {
+            point: e.position,
+            normal: rotate([1., 0., 0.], e.rotation()),
+        },
+        SlabFace {
+            point: add(e.position, rotate([-substrate.thickness_mm, 0., 0.], e.rotation())),
+            normal: rotate([wedge.cos(), wedge.sin(), 0.], e.rotation()),
+        },
+    ]
+}
+/// Distance along `d` from `p` to a face plane, if it lies ahead.
+fn face_distance(p: V3, d: V3, face: &SlabFace) -> Option<f64> {
+    let c = dot(d, face.normal);
+    (c.abs() > 1e-12)
+        .then(|| dot(sub(face.point, p), face.normal) / c)
+        .filter(|s| *s > -1e-9)
+}
+/// Vector Snell refraction with relative index `eta = n_incident / n_transmitted`;
+/// `None` on total internal reflection.
+fn refract(d: V3, normal: V3, eta: f64) -> Option<V3> {
+    let m = if dot(d, normal) > 0. { scale(normal, -1.) } else { normal };
+    let cos_i = -dot(d, m);
+    let k = 1. - eta * eta * (1. - cos_i * cos_i);
+    (k >= 0.).then(|| add(scale(d, eta), scale(m, eta * cos_i - k.sqrt())))
+}
+/// Glass vertices (entry first, exit last) and exit direction of one output.
+struct SlabPath {
+    points: Vec<V3>,
+    direction: V3,
+}
+/// Follows one output through a substrate entered at `entry` through face
+/// `first`. Transmitted light crosses to the other face. Reflected light is
+/// reflected in air when the coated face is the entry face, otherwise it is
+/// reflected inside the glass and leaves through the entry face.
+fn slab_path(
+    faces: &[SlabFace; 2],
+    first: usize,
+    entry: V3,
+    d: V3,
+    reflected: Option<usize>,
+    eta: f64,
+) -> Result<SlabPath, &'static str> {
+    let (enter, other) = (&faces[first], &faces[1 - first]);
+    if reflected == Some(first) {
+        return Ok(SlabPath { points: vec![], direction: reflect(d, enter.normal) });
+    }
+    let inside = refract(d, enter.normal, eta).ok_or("tir")?;
+    let s = face_distance(entry, inside, other).ok_or("substrate_geometry")?;
+    let at = add(entry, scale(inside, s));
+    let (points, direction) = if reflected.is_some() {
+        let back = reflect(inside, other.normal);
+        let s = face_distance(at, back, enter).ok_or("substrate_geometry")?;
+        let exit = add(at, scale(back, s));
+        (vec![entry, at, exit], refract(back, enter.normal, 1. / eta).ok_or("tir")?)
+    } else {
+        (vec![entry, at], refract(inside, other.normal, 1. / eta).ok_or("tir")?)
+    };
+    Ok(SlabPath { points, direction })
 }
 
 impl Element {
@@ -812,6 +944,37 @@ impl Bench {
                     ));
                 }
             }
+            if let Some(s) = &e.substrate
+                && (!matches!(
+                    e.kind,
+                    Kind::Aperture | Kind::Splitter | Kind::Pbs | Kind::Waveplate | Kind::Polarizer
+                ) || !e.regions.is_empty()
+                    || s.material.is_empty()
+                    || s.material.len() > 128
+                    || !(s.thickness_mm.is_finite() && s.thickness_mm > 0. && s.thickness_mm <= 1e4)
+                    || s.wedge_deg.is_some_and(|w| !(-45. ..=45.).contains(&w))
+                    || (s.coated_face.is_some() != matches!(e.kind, Kind::Splitter | Kind::Pbs)))
+            {
+                return Err(format!(
+                    "Invalid substrate on {}: substrates need an aperture without regions, splitter, PBS, waveplate or polarizer, a material name, thickness in 0..1e4 mm, wedge within ±45°, and a coated face (front or back) on splitters and PBS only",
+                    e.id
+                ));
+            }
+            if let Some(p) = &e.phase
+                && (!matches!(
+                    e.kind,
+                    Kind::Aperture | Kind::Lens | Kind::Splitter | Kind::Pbs | Kind::Waveplate | Kind::Polarizer
+                ) || !e.regions.is_empty()
+                    || p.radians.is_some() == p.waves.is_some()
+                    || p.radians.is_some_and(|r| !(-1e6..=1e6).contains(&r))
+                    || p.waves.is_some_and(|w| !(-1e5..=1e5).contains(&w))
+                    || !(100. ..=20000.).contains(&p.at_wavelength_nm))
+            {
+                return Err(format!(
+                    "Invalid phase on {}: give exactly one finite radians or waves value at 100–20000 nm on a transmissive element without regions",
+                    e.id
+                ));
+            }
             if let Some(n) = e.index
                 && (e.kind != Kind::Splitter || !(1. ..=4.).contains(&n))
             {
@@ -980,7 +1143,7 @@ pub struct Trace {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub port_power: Vec<PortPower>,
     #[serde(skip)]
-    pub(super) splitter_outputs: HashMap<usize, [Option<V3>; 2]>,
+    pub(super) splitter_outputs: HashMap<usize, [Option<(V3, V3)>; 2]>,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct PortPower {
@@ -1363,6 +1526,31 @@ impl Bench {
                 vertex += surface.thickness;
             }
             nearest
+        } else if let Some(substrate) = &element.substrate {
+            // A slab is entered on the nearest face met from outside, at a point
+            // that lies on the glass side of the other face and inside the body.
+            // The returned index names that entry face (0 front, 1 back).
+            let faces = slab_faces(element, substrate);
+            // The glass lies behind the front face and in front of the back face.
+            let side = [-1., 1.];
+            let mut nearest: Option<(f64, Option<usize>)> = None;
+            for (i, face) in faces.iter().enumerate() {
+                if side[i] * dot(direction, face.normal) <= 0. {
+                    continue;
+                }
+                let Some(distance) = face_distance(position, direction, face) else { continue };
+                let point = add(position, scale(direction, distance));
+                let other = &faces[1 - i];
+                let hit = local(sub(point, element.position), element.rotation());
+                if distance > 1e-7
+                    && side[1 - i] * dot(sub(point, other.point), other.normal) >= -1e-9
+                    && (!bounded || hit[1].hypot(hit[2]) <= element.body_radius)
+                    && nearest.is_none_or(|(d, _)| distance < d)
+                {
+                    nearest = Some((distance, Some(i)));
+                }
+            }
+            nearest
         } else if d[0].abs() > 1e-12 {
             let distance = -p[0] / d[0];
             let hit = add(p, scale(d, distance));
@@ -1472,6 +1660,7 @@ impl Bench {
                 previous: Some(arrival),
                 arrival: Some(arrival),
                 nominal: ray.departure.nominal && main,
+                phase: 0.,
             };
             for point in path.points.iter().skip(1) {
                 let end = world(point.point);
@@ -1675,6 +1864,7 @@ impl Bench {
                         previous: None,
                         arrival: None,
                         nominal: i == 0 && (mode != TraceMode::Physical || !self.branches.is_empty()),
+                        phase: 0.,
                     },
                     air,
                     wavelength: s.wavelength,
@@ -1759,8 +1949,13 @@ impl Bench {
             } else {
                 "in"
             };
+            // A substrate is entered on the face the hit test stopped at.
+            let slab = e.substrate.as_ref().filter(|_| !mount && reason.is_none()).map(|substrate| {
+                (substrate, slab_faces(e, substrate), face.unwrap_or(0))
+            });
+            let entry = hit;
             let flight = ray.departure.flight(Port::new(&e.id, input), distance, "AIR", ray.air, ray.wavelength);
-            out.segments.push(ray.segment(ray.p, hit, Some(&e.id), reason.unwrap_or("hit"), Some(flight)));
+            out.segments.push(ray.segment(ray.p, entry, Some(&e.id), reason.unwrap_or("hit"), Some(flight)));
             // A region element still anchors its arms when the chief sample lands on the
             // plate between regions: the arms start from region probes, and their
             // illumination is judged from the sampled port power afterwards.
@@ -1818,6 +2013,7 @@ impl Bench {
                             previous: Some(arrival),
                             arrival: Some(arrival),
                             nominal: true,
+                            phase: 0.,
                         },
                         air: ray.air,
                         wavelength: ray.wavelength,
@@ -1876,6 +2072,7 @@ impl Bench {
                     previous: Some(arrival),
                     arrival: Some(arrival),
                     nominal: ray.departure.nominal,
+                    phase: 0.,
                 };
                 if let Some(path) = &traced {
                     let internal = path.segments.iter().skip(1).map(|segment| (segment.point, segment.n_before));
@@ -2079,10 +2276,98 @@ impl Bench {
             }
             let transmitted: f64 = children.iter().map(|c| c.2).sum();
             out.power.absorbed += ray.power * (1. - transmitted).max(0.);
+            let glass = match &slab {
+                Some((substrate, ..)) => Some(
+                    system
+                        .material_index(&substrate.material, ray.wavelength)
+                        .map_err(|err| format!("Substrate of {}: {err}", e.id))?,
+                ),
+                None => None,
+            };
             for (port, d, fraction, jones) in children {
                 if fraction <= 0. {
                     continue;
                 }
+                let child_beam = next_beam(&ray.beam, &e.id, port);
+                let child_branch = format!("{}/{}:{}", ray.branch, e.id, port);
+                let mut start = (hit, d, arrival);
+                if let (Some((substrate, faces, first)), Some(n_glass)) = (&slab, glass) {
+                    let reflected = (port == "reflected")
+                        .then(|| usize::from(substrate.coated_face == Some(Face::Back)));
+                    // Every glass vertex after the entry must stay inside the clear aperture.
+                    let inside = |point: &V3| {
+                        let l = local(sub(*point, e.position), e.rotation());
+                        l[1].hypot(l[2]) <= e.aperture
+                    };
+                    let path = slab_path(faces, *first, entry, ray.d, reflected, ray.air / n_glass)
+                        .and_then(|path| if path.points.iter().all(inside) { Ok(path) } else { Err("clipped") });
+                    match path {
+                        Ok(path) => {
+                            let mut previous = arrival;
+                            for pair in path.points.windows(2) {
+                                let departure = Departure {
+                                    port: Port::new(&e.id, "substrate"),
+                                    previous: Some(previous),
+                                    arrival: Some(arrival),
+                                    nominal: ray.departure.nominal,
+                                    phase: 0.,
+                                };
+                                let length = norm(sub(pair[1], pair[0]));
+                                let flight = departure.flight(
+                                    Port::new(&e.id, "substrate"),
+                                    length,
+                                    &substrate.material,
+                                    n_glass,
+                                    ray.wavelength,
+                                );
+                                previous = out.segments.len();
+                                out.segments.push(Segment {
+                                    source: ray.source.clone(),
+                                    branch: child_branch.clone(),
+                                    from: pair[0],
+                                    to: pair[1],
+                                    power: ray.power * fraction,
+                                    element: Some(e.id.clone()),
+                                    status: "substrate".into(),
+                                    flight: Some(flight),
+                                    jones,
+                                    axial: ray.departure.nominal,
+                                    beam: child_beam.clone(),
+                                });
+                            }
+                            start = (path.points.last().copied().unwrap_or(entry), path.direction, previous);
+                        }
+                        Err(reason) => {
+                            let departure = Departure {
+                                port: Port::new(&e.id, port),
+                                previous: Some(arrival),
+                                arrival: Some(arrival),
+                                nominal: ray.departure.nominal,
+                                phase: 0.,
+                            };
+                            paths.stop(&departure, PathBreak::new(&e.id, port, reason));
+                            if !ray.probe {
+                                out.power.blocked += ray.power * fraction;
+                                out.terminations.push(Termination {
+                                    source: ray.source.clone(),
+                                    branch: child_branch,
+                                    element: Some(e.id.clone()),
+                                    position: entry,
+                                    power: ray.power * fraction,
+                                    reason: reason.into(),
+                                    last_segment: Some(arrival),
+                                });
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let (hit, d, previous) = start;
+                let phase = e
+                    .phase
+                    .as_ref()
+                    .filter(|_| port != "reflected")
+                    .map_or(0., |plate| plate.radians_at(ray.wavelength));
                 let mut kept = fraction;
                 if !directed
                     && !ray.probe
@@ -2109,6 +2394,7 @@ impl Bench {
                                     previous: Some(arrival),
                                     arrival: Some(arrival),
                                     nominal: false,
+                                    phase: 0.,
                                 },
                                 air: ray.air,
                                 wavelength: ray.wavelength,
@@ -2127,14 +2413,15 @@ impl Bench {
                             .or_default() += ray.power * kept;
                     }
                     if ray.departure.nominal && matches!(e.kind, Kind::Splitter | Kind::Pbs) {
-                        // Slots store transmitted then reflected chief-ray directions.
+                        // Slots store transmitted then reflected chief-ray exit points
+                        // (the glass exit for a substrate) and directions.
                         let outputs = out.splitter_outputs.entry(arrival).or_default();
-                        outputs[usize::from(port == "reflected")] = Some(d);
+                        outputs[usize::from(port == "reflected")] = Some((hit, d));
                     }
                     queue.push_back(Packet {
                         source: ray.source.clone(),
-                        branch: format!("{}/{}:{}", ray.branch, e.id, port),
-                        beam: next_beam(&ray.beam, &e.id, port),
+                        branch: child_branch,
+                        beam: child_beam,
                         p: hit,
                         d,
                         power: ray.power * kept,
@@ -2142,9 +2429,10 @@ impl Bench {
                         expected: next(&e.id, port),
                         departure: Departure {
                             port: Port::new(&e.id, port),
-                            previous: Some(arrival),
+                            previous: Some(previous),
                             arrival: Some(arrival),
                             nominal: ray.departure.nominal,
+                            phase,
                         },
                         air: ray.air,
                         wavelength: ray.wavelength,
@@ -2394,6 +2682,8 @@ pub fn example() -> Bench {
         screw_tpi: None,
         lever_arm_mm: None,
         regions: vec![],
+        substrate: None,
+        phase: None,
     };
     Bench {
         name: "Split laser experiment".into(),

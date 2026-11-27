@@ -3,9 +3,10 @@ use super::{
     System,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
-        Connection, Element, Kind, Mount, PathBreak, Polarization, Port, Region, RegionShape, Stage,
+        Connection, DispersionQuantity, Element, GlassPass, Kind, Mount, PathBreak, Polarization, Port, Region, RegionShape, Stage,
         StagePose, StagePzt, Trace, next_beam,
     },
+    interval::{Dual, Iv, Real},
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
 };
 use serde::Serialize;
@@ -403,6 +404,8 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         screw_tpi: hardware.screw_tpi,
         lever_arm_mm: hardware.lever_arm_mm,
         regions: vec![],
+        substrate: None,
+        phase: None,
     }
 }
 
@@ -602,6 +605,8 @@ pub fn template(name: &str) -> Result<Bench, String> {
             target: 0.,
             unit: AssertionUnit::Mm,
             tolerance: 1e-6,
+            band_nm: None,
+            quantity: None,
         }];
     }
     if name == "three_arm" {
@@ -650,6 +655,8 @@ pub fn template(name: &str) -> Result<Bench, String> {
             target,
             unit,
             tolerance,
+            band_nm: None,
+            quantity: None,
         }).collect();
     }
     scene.validate()?;
@@ -998,6 +1005,16 @@ fn envelope<'a>(
                 group.radius = to;
                 (from, to)
             }
+            "substrate" => {
+                // Inside glass the beam propagates over the reduced distance L·n_air/n.
+                let state = states
+                    .get_mut(&segment.beam)
+                    .ok_or("Missing Gaussian substrate branch")?;
+                let index = segment.flight.as_ref().map_or(n, |flight| flight.index);
+                let from = state.q.radius(wavelength, n)?;
+                state.q = state.q.transfer(norm(sub(segment.to, segment.from)) * n / index);
+                (from, state.q.radius(wavelength, n)?)
+            }
             _ => {
                 let state = states
                     .remove(&segment.beam)
@@ -1302,7 +1319,7 @@ pub(crate) fn check(bench: &Bench, system: &System) -> Result<LabCheck, String> 
     let trace = bench.trace_resolved(system)?;
     let center = center_trace(bench, system)?;
     let gaussian = envelope(bench, system, &center)?;
-    lab_report(bench, &trace, &gaussian)
+    lab_report(bench, system, &trace, &gaussian)
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -1413,17 +1430,31 @@ struct AssertionResult {
     interruption: Option<PathBreak>,
 }
 
-#[derive(Clone, Copy, schemars::JsonSchema, Serialize)]
+#[derive(Clone, schemars::JsonSchema, Serialize)]
 #[serde(untagged)]
 enum AssertionValue {
     Opl(f64),
     Colinear(Separation),
+    Dispersion(DispersionValue),
+}
+
+#[derive(Clone, schemars::JsonSchema, Serialize)]
+struct DispersionValue {
+    /// First branch minus second, in the assertion unit, at `wavelength_nm`.
+    difference: f64,
+    /// Band wavelength where the difference deviates most from the target.
+    wavelength_nm: f64,
+    /// Upper estimate of max |Δ − target| over the band, in the assertion unit.
+    deviation_bound: f64,
+    /// Substrate glass on the first and second branch.
+    glass: [Vec<GlassPass>; 2],
 }
 
 impl AssertionValue {
-    fn in_unit(self, unit: AssertionUnit) -> f64 {
+    fn in_unit(&self, unit: AssertionUnit) -> f64 {
         match self {
-            Self::Opl(value) => unit.convert_mm(value),
+            Self::Opl(value) => unit.convert_mm(*value),
+            Self::Dispersion(value) => value.difference,
             Self::Colinear(separation) => match unit {
                 AssertionUnit::Mrad => separation.angle_mrad,
                 _ => unit.convert_mm(separation.position_mm),
@@ -1470,7 +1501,175 @@ fn colinear(
     measure(trace, [first, second], b).map(|overlap| overlap.separation)
 }
 
-fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
+/// Speed of light in mm/fs.
+const C_MM_PER_FS: f64 = 2.997_924_58e-4;
+/// Initial cells of the dispersion search, and its evaluation budget.
+const DISPERSION_CELLS: usize = 64;
+const DISPERSION_MAX_EVALUATIONS: usize = 200_000;
+
+/// Net glass of one material over the two paths: path A counts +L, path B −L.
+struct NetGlass<'a> {
+    material: &'a str,
+    element: &'a str,
+    length_mm: f64,
+}
+
+/// Δ(w) and dΔ/dw for the scalar type `T`, from second-order duals of n(w).
+/// The error names the failing material, its element, and the message.
+fn dispersion_delta<T: Real>(
+    system: &System,
+    glass: &[NetGlass],
+    group: bool,
+    w: T,
+) -> Result<(T, T), (String, String, String)> {
+    let x = Dual { v: Dual::var(w), d: Dual { v: T::cst(1.), d: T::cst(0.) } };
+    let (mut value, mut slope) = (T::cst(0.), T::cst(0.));
+    for g in glass {
+        let n = |material: &str| {
+            system
+                .material_index_real(material, x)
+                .map_err(|err| (material.to_string(), g.element.to_string(), err))
+        };
+        let excess = n(g.material)? - n("AIR")?;
+        let (e0, e1, e2) = (excess.v.v, excess.v.d, excess.d.d);
+        if group {
+            let k = g.length_mm / C_MM_PER_FS;
+            value = value + (e0 - w * e1) * k;
+            slope = slope - w * e2 * k;
+        } else {
+            let k = TAU * g.length_mm * 1e6;
+            value = value + e0 / w * k;
+            slope = slope + (e1 * w - e0) / (w * w) * k;
+        }
+    }
+    Ok((value, slope))
+}
+
+/// Material dispersion of the substrate glass on two paths, Δ(λ) = Q₁(λ) − Q₂(λ)
+/// with Q = Σ (n − n_air)·L·2π/λ for phase (rad) or Σ (n_g − n_g,air)·L/c for group
+/// delay (fs), where n_g = n − λ·dn/dλ. Derivatives of n are exact (forward-mode
+/// duals through the dispersion formula), not finite differences.
+///
+/// The band maximum of |Δ − target| is found by branch and bound over rigorous
+/// enclosures. A cell [a, b] is enclosed by evaluating Δ in interval arithmetic
+/// (outward rounded), intersected with the mean-value form Δ(m) + Δ'([a, b])·([a, b] − m),
+/// so its upper bound holds for every wavelength in the cell, not only for samples.
+/// The band starts as 64 cells; the cell with the highest bound is halved until that
+/// bound is within 1e-10 (relative) of the best midpoint sample. Cells narrower than
+/// 1e-9 nm stop splitting, the search also stops once no cell's bound exceeds the
+/// largest bound of such an unsplittable cell, and evaluations are capped at 200 000. The reported Δ is the
+/// best sample and `deviation_bound` the largest bound left, so the assertion passes
+/// only if every wavelength in the band is within tolerance. If the model cannot be
+/// enclosed somewhere (a pole or domain edge inside a cell), or the search ends with
+/// the best sample within tolerance but the bound outside it, the assertion is
+/// unresolved instead of guessed.
+fn dispersion(
+    system: &System,
+    assertion: &Assertion,
+    paths: [&BranchPath; 2],
+    at: &Port,
+) -> Result<DispersionValue, PathBreak> {
+    let [lo, hi] = assertion.band_nm.expect("validated dispersion band");
+    let group = assertion.quantity == Some(DispersionQuantity::GroupDelay);
+    let mut glass: Vec<NetGlass> = vec![];
+    for (sign, path) in [(1., paths[0]), (-1., paths[1])] {
+        for pass in &path.glass {
+            match glass.iter_mut().find(|g| g.material == pass.material) {
+                Some(g) => g.length_mm += sign * pass.length_mm,
+                None => glass.push(NetGlass {
+                    material: &pass.material,
+                    element: &pass.element,
+                    length_mm: sign * pass.length_mm,
+                }),
+            }
+        }
+    }
+    let target = assertion.target;
+    // Samples and enclosures evaluate every material, including those whose net
+    // length cancels: the value drops out, but the model must still be defined
+    // over the whole band (0·∞ makes the enclosure unbounded).
+    let sample = |w: f64| {
+        dispersion_delta(system, &glass, group, Iv::cst(w))
+            .map(|(value, _)| (value.lo + value.hi) / 2.)
+            .map_err(|(material, element, err)| {
+                PathBreak::new(element.as_str(), "substrate", "material_error")
+                    .with_detail(format!("{material} at {w} nm: {err}"))
+            })
+    };
+    let upper = |a: f64, b: f64, m: f64| -> f64 {
+        let (Ok((naive, slope)), Ok((center, _))) = (
+            dispersion_delta(system, &glass, group, Iv::new(a, b)),
+            dispersion_delta(system, &glass, group, Iv::cst(m)),
+        ) else {
+            return f64::INFINITY;
+        };
+        let mean = center + slope * Iv::new((a - m).next_down(), (b - m).next_up());
+        let (l, h) = (naive.lo.max(mean.lo), naive.hi.min(mean.hi));
+        if !(l.is_finite() && h.is_finite()) {
+            return f64::INFINITY;
+        }
+        (target - l).max(h - target).next_up()
+    };
+    let deviation = |d: f64| (d - target).abs();
+    struct Cell { a: f64, b: f64, upper: f64 }
+    impl PartialEq for Cell { fn eq(&self, other: &Self) -> bool { self.upper == other.upper } }
+    impl Eq for Cell {}
+    impl PartialOrd for Cell { fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
+    impl Ord for Cell { fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.upper.total_cmp(&other.upper) } }
+    let mut worst = (sample(lo)?, lo);
+    let mut evaluations = 1;
+    let mut heap = std::collections::BinaryHeap::new();
+    let visit = |a: f64, b: f64, worst: &mut (f64, f64)| -> Result<Cell, PathBreak> {
+        let m = (a + b) / 2.;
+        let fm = sample(m)?;
+        for (value, w) in [(fm, m), (sample(b)?, b)] {
+            if deviation(value) > deviation(worst.0) {
+                *worst = (value, w);
+            }
+        }
+        Ok(Cell { a, b, upper: upper(a, b, m) })
+    };
+    let edge = |i: usize| lo + (hi - lo) * i as f64 / DISPERSION_CELLS as f64;
+    for i in 0..DISPERSION_CELLS {
+        heap.push(visit(edge(i), edge(i + 1), &mut worst)?);
+        evaluations += 4;
+    }
+    let mut settled = 0f64;
+    while let Some(top) = heap.peek() {
+        // Cells at the minimum width can no longer be refined, so the bound cannot
+        // drop below `settled`; refining further only matters above it.
+        let best = deviation(worst.0).max(settled);
+        if top.upper - best <= 1e-10 * best.max(1.) || evaluations + 8 > DISPERSION_MAX_EVALUATIONS {
+            break;
+        }
+        let Cell { a, b, upper } = heap.pop().unwrap();
+        if b - a < 1e-9 {
+            settled = settled.max(upper);
+            continue;
+        }
+        let m = (a + b) / 2.;
+        heap.push(visit(a, m, &mut worst)?);
+        heap.push(visit(m, b, &mut worst)?);
+        evaluations += 8;
+    }
+    let deviation_bound = heap.peek().map_or(0., |top| top.upper).max(settled).max(deviation(worst.0));
+    let (difference, wavelength_nm) = worst;
+    let tolerance = assertion.tolerance;
+    if !deviation_bound.is_finite() || (deviation(difference) <= tolerance && deviation_bound > tolerance) {
+        return Err(PathBreak::new(&at.element, &at.port, "dispersion_unresolved").with_detail(format!(
+            "largest sampled deviation {} at {wavelength_nm} nm, but the enclosure only bounds it by {deviation_bound}",
+            deviation(difference)
+        )));
+    }
+    Ok(DispersionValue {
+        difference,
+        wavelength_nm,
+        deviation_bound,
+        glass: paths.map(|path| path.glass.clone()),
+    })
+}
+
+fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<AssertionResult> {
     let reports: HashMap<_, _> = trace.branches.iter().map(|report| (report.id.as_str(), report)).collect();
     let branches: HashMap<_, _> = bench.branches.iter().map(|branch| (branch.id.as_str(), branch)).collect();
     bench.assertions.iter().map(|a| {
@@ -1481,16 +1680,21 @@ fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
                 AssertionKind::EqualOpl => equal_opl(pa, pb, &first.from).map(AssertionValue::Opl),
                 AssertionKind::Colinear => colinear(trace, bench, [first, second], [pa, pb])
                     .map(AssertionValue::Colinear),
+                AssertionKind::Dispersion => dispersion(system, a, [pa, pb], &second.to).map(AssertionValue::Dispersion),
             }
         });
-        let measured = compared.as_ref().ok().copied();
+        let measured = compared.as_ref().ok();
+        let residual = measured.map(|value| value.in_unit(a.unit) - a.target);
         let value = measured.map(|value| match value {
             AssertionValue::Opl(_) => AssertionValue::Opl(value.in_unit(a.unit)),
-            _ => value,
+            _ => value.clone(),
         });
-        let residual = measured.map(|value| value.in_unit(a.unit) - a.target);
+        let bound = match measured {
+            Some(AssertionValue::Dispersion(value)) => value.deviation_bound,
+            _ => 0.,
+        };
         let status = match residual {
-            Some(residual) if residual.abs() <= a.tolerance => AssertionStatus::Pass,
+            Some(residual) if residual.abs() <= a.tolerance && bound <= a.tolerance => AssertionStatus::Pass,
             Some(_) => AssertionStatus::Fail,
             None => AssertionStatus::Unreachable,
         };
@@ -1510,7 +1714,7 @@ fn check_assertions(bench: &Bench, trace: &Trace) -> Vec<AssertionResult> {
     }).collect()
 }
 
-fn lab_readings(bench: &Bench, trace: &Trace) -> LabReadings {
+fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
     const STAGE_ARM_COLORS: &[&str] = &["#a85c00", "#7554a3", "#26734d", "#b04375", "#2162a1"];
     let mut colors = STAGE_ARM_COLORS.iter().copied().cycle();
     LabReadings {
@@ -1531,7 +1735,7 @@ fn lab_readings(bench: &Bench, trace: &Trace) -> LabReadings {
             }).collect(),
             interruption: report.interruption.clone(),
         }).collect(),
-        assertions: check_assertions(bench, trace),
+        assertions: check_assertions(bench, system, trace),
     }
 }
 
@@ -1545,7 +1749,12 @@ impl LabCheck {
     }
 }
 
-fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<LabCheck, String> {
+fn lab_report(
+    bench: &Bench,
+    system: &System,
+    trace: &Trace,
+    gaussian: &Envelope<'_>,
+) -> Result<LabCheck, String> {
     let grid = Grid::new(bench)?;
     let mut issues = Vec::new();
     let mut dumps = Vec::new();
@@ -1700,7 +1909,7 @@ fn lab_report(bench: &Bench, trace: &Trace, gaussian: &Envelope<'_>) -> Result<L
             clamping_offset_mm: free.map(|(_, d)| d),
         });
     }
-    let readings = lab_readings(bench, trace);
+    let readings = lab_readings(bench, system, trace);
     for result in &readings.assertions {
         let (code, target, message) = match result.status {
             AssertionStatus::Pass => continue,
@@ -2016,17 +2225,21 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
         let title = match result.kind {
             AssertionKind::EqualOpl => "ΔOPL",
             AssertionKind::Colinear => "Colinearity",
+            AssertionKind::Dispersion => "Dispersion",
         };
         let mut lines = vec![
             format!("{title} · {} · {}", result.assertion, result.status.as_str()),
             result.branches.join(" / "),
         ];
-        match result.value {
+        match &result.value {
             Some(AssertionValue::Opl(value)) => {
-                lines.push(format!("ΔOPL {} {unit}", reading_number(value)));
+                lines.push(format!("ΔOPL {} {unit}", reading_number(*value)));
             }
             Some(AssertionValue::Colinear(value)) => lines.push(format!(
                 "Δr {} mm · Δθ {} mrad", reading_number(value.position_mm), reading_number(value.angle_mrad),
+            )),
+            Some(AssertionValue::Dispersion(value)) => lines.push(format!(
+                "Δ {} {unit} @ {} nm", reading_number(value.difference), reading_number(value.wavelength_nm),
             )),
             None => {}
         }
@@ -2056,13 +2269,14 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
 
 fn svg(
     bench: &Bench,
+    system: &System,
     grid: &Grid,
     gaussian: &Envelope<'_>,
     trace: &Trace,
     version: Option<BlueprintRevision>,
 ) -> Result<String, String> {
     let [w, h] = bench.table_size;
-    let readings = lab_readings(bench, trace);
+    let readings = lab_readings(bench, system, trace);
     let cards = reading_cards(&readings);
     let card_width = cards.iter().flat_map(|card| &card.lines)
         .map(|line| line.chars().count()).max().map_or(0., |chars| chars as f64 * 4. + 12.);
@@ -2458,7 +2672,7 @@ fn markdown_cell(text: &str) -> String {
 
 fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Result<String, String> {
     let guide = guide(bench, gaussian)?;
-    let check = lab_report(bench, &bench.trace_resolved(system)?, gaussian)?;
+    let check = lab_report(bench, system, &bench.trace_resolved(system)?, gaussian)?;
     let mut out = format!("# {} — alignment SOP\n\n", markdown_cell(&bench.name));
     for note in guide.safety_notes {
         writeln!(out, "- {note}").unwrap();
@@ -2601,7 +2815,7 @@ pub(crate) fn export_blueprint_report(
             "svg" => {
                 let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
                 let content = svg(
-                    bench, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), version,
+                    bench, system, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), version,
                 )?;
                 ("svg", "image/svg+xml", content)
             }
@@ -2861,6 +3075,704 @@ mod tests {
         assert_eq!(check["passed"], false);
     }
 
+    /// Independent N-BK7 Sellmeier index and dn/dλ (λ in µm, Schott datasheet).
+    fn bk7(um: f64) -> (f64, f64) {
+        const B: [f64; 3] = [1.039_612_12, 0.231_792_344, 1.010_469_45];
+        const C: [f64; 3] = [0.006_000_698_67, 0.020_017_914_4, 103.560_653];
+        let l2 = um * um;
+        let n2 = 1. + (0..3).map(|i| B[i] * l2 / (l2 - C[i])).sum::<f64>();
+        let dn2 = (0..3).map(|i| -2. * B[i] * C[i] * um / (l2 - C[i]).powi(2)).sum::<f64>();
+        let n = n2.sqrt();
+        (n, dn2 / (2. * n))
+    }
+
+    fn plate(id: &str, at: V3, normal: V3, thickness_mm: f64) -> Element {
+        let mut plate = mount_element(id, MASK, at, normal);
+        plate.substrate = Some(bench::Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        plate
+    }
+
+    /// Mach–Zehnder with element `a` inserted in arm A (BS1→M1, along +Y) and,
+    /// optionally, `b` in arm B (BS1→M2, along +X).
+    fn mach_zehnder_with(a: Element, b: Option<Element>) -> Bench {
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        for (output, element) in [("reflected", Some(a)), ("transmitted", b)] {
+            let Some(element) = element else { continue };
+            let connection = bench.connections.iter_mut()
+                .find(|c| c.from == "BS1" && c.port == output).unwrap();
+            let target = std::mem::replace(&mut connection.to, element.id.clone());
+            bench.connections.push(Connection { from: element.id.clone(), port: "out".into(), to: target });
+            bench.elements.push(element);
+        }
+        bench
+    }
+
+    #[test]
+    fn tilted_plate_shifts_the_beam_and_adds_glass_opl() {
+        let system = System::default();
+        let theta = 30_f64.to_radians();
+        let t = 6.;
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.branches.clear();
+        bench.elements = vec![
+            plate("P", [250., 200., 75.], [theta.cos(), theta.sin(), 0.], t),
+            mount_element("D", DETECTOR, [450., 200., 75.], [1., 0., 0.]),
+        ];
+        bench.connections = vec![
+            Connection { from: "S1".into(), port: "out".into(), to: "P".into() },
+            Connection { from: "P".into(), port: "out".into(), to: "D".into() },
+        ];
+        bench.branches = vec![Branch {
+            id: "line".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+        }];
+        let wavelength = bench.sources[0].wavelength;
+        let n = system.material_index("N-BK7_SCHOTT", wavelength).unwrap();
+        assert!((n - bk7(wavelength * 1e-3).0).abs() < 1e-9);
+        let cos_t = (1. - (theta.sin() / n).powi(2)).sqrt();
+        let inside = t / cos_t;
+        let shift = t * theta.sin() * (1. - theta.cos() / (n * n - theta.sin().powi(2)).sqrt());
+        let trace = bench.trace(&system).unwrap();
+        let glass: Vec<_> = trace.segments.iter().filter(|s| s.status == "substrate").collect();
+        assert_eq!(glass.len(), 1);
+        let flight = glass[0].flight.as_ref().unwrap();
+        assert_eq!(flight.medium, "N-BK7_SCHOTT");
+        assert!((flight.length_mm - inside).abs() < 1e-9, "{} vs {inside}", flight.length_mm);
+        assert!((flight.opl_mm - n * t / cos_t).abs() < 1e-9);
+        let exit = trace.segments.iter()
+            .find(|s| s.flight.as_ref().is_some_and(|f| f.from_element == "P" && f.from_port == "out"))
+            .unwrap();
+        // Leaves parallel to the incident beam, displaced sideways by the slab shift.
+        assert!((exit.to[1] - exit.from[1]).abs() < 1e-9);
+        assert!(((exit.from[1] - 200.).abs() - shift).abs() < 1e-9, "{} vs {shift}", exit.from[1] - 200.);
+        let path = &trace.branches[0].paths[0];
+        assert!(path.interruption.is_none(), "{:?}", path.interruption);
+        assert_eq!(path.glass.len(), 1);
+        assert_eq!(path.glass[0].element, "P");
+        assert_eq!(path.glass[0].thickness_mm, t);
+        assert!((path.glass[0].length_mm - inside).abs() < 1e-9);
+        // Air from the source to the entry face, glass, then air to the detector plane.
+        let air: f64 = path.segment_indices.iter()
+            .filter_map(|&i| trace.segments[i].flight.as_ref())
+            .filter(|f| f.medium == "AIR").map(|f| f.length_mm).sum();
+        assert!((path.opl_mm - (air + n * inside)).abs() < 1e-9);
+        assert!((path.length_mm - (air + inside)).abs() < 1e-9);
+        let check = lab_check(&bench, &system).unwrap();
+        assert_eq!(check["issues"], json!([]));
+        gaussian_envelope(&bench, &system).unwrap();
+        export_blueprint(&bench, &system, "svg").unwrap();
+    }
+
+    #[test]
+    fn compensator_plate_balances_group_delay_dispersion() {
+        let system = System::default();
+        let t = 5.;
+        let band = [600., 900.];
+        let assertion = |quantity, unit, tolerance| Assertion {
+            id: "gd".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit,
+            tolerance,
+            band_nm: Some(band),
+            quantity: Some(quantity),
+        };
+        let mut balanced = mach_zehnder_with(
+            plate("P", [250., 300., 75.], [0., 1., 0.], t),
+            Some(plate("C", [350., 200., 75.], [1., 0., 0.], t)),
+        );
+        balanced.assertions = vec![assertion(DispersionQuantity::GroupDelay, AssertionUnit::Fs, 1e-6)];
+        let trace = balanced.trace(&system).unwrap();
+        let [result] = check_assertions(&balanced, &system, &trace).try_into().ok().unwrap();
+        assert!(matches!(result.status, AssertionStatus::Pass), "{:?}", result.interruption);
+        let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!() };
+        assert_eq!(value.glass[0][0].element, "P");
+        assert_eq!(value.glass[1][0].element, "C");
+        assert_eq!(value.glass[0][0].material, "N-BK7_SCHOTT");
+
+        let mut bare = mach_zehnder_with(plate("P", [250., 300., 75.], [0., 1., 0.], t), None);
+        bare.assertions = vec![
+            assertion(DispersionQuantity::GroupDelay, AssertionUnit::Fs, 1.),
+            Assertion { id: "phase".into(), ..assertion(DispersionQuantity::Phase, AssertionUnit::Rad, 1.) },
+        ];
+        let trace = bare.trace(&system).unwrap();
+        let results = check_assertions(&bare, &system, &trace);
+        // Group delay excess t·(n − λ dn/dλ − 1)/c falls with λ, so it peaks at λmin.
+        let (n, slope) = bk7(band[0] * 1e-3);
+        let expected = t * (n - band[0] * 1e-3 * slope - 1.) / C_MM_PER_FS;
+        let Some(AssertionValue::Dispersion(gd)) = &results[0].value else { panic!() };
+        assert!(matches!(results[0].status, AssertionStatus::Fail));
+        assert_eq!(gd.wavelength_nm, band[0]);
+        assert!((gd.difference - expected).abs() < 1e-4, "{} vs {expected}", gd.difference);
+        assert!((results[0].residual.unwrap() - expected).abs() < 1e-4);
+        assert!(gd.glass[1].is_empty());
+        // Relative phase 2π·t·(n − 1)/λ also peaks at λmin.
+        let phase = std::f64::consts::TAU * t * (n - 1.) / (band[0] * 1e-6);
+        let Some(AssertionValue::Dispersion(ph)) = &results[1].value else { panic!() };
+        assert!(matches!(results[1].status, AssertionStatus::Fail));
+        assert!((ph.difference - phase).abs() < 1e-6 * phase, "{} vs {phase}", ph.difference);
+    }
+
+    #[test]
+    fn splitter_substrate_follows_the_declared_coated_face() {
+        // BS1 is hit at 45° on its front face. A front coating reflects in air;
+        // a back coating reflects inside, so arm A crosses the glass twice.
+        let system = System::default();
+        let t = 4.;
+        let wavelength = template("mach_zehnder").unwrap().sources[0].wavelength;
+        let n = system.material_index("N-BK7_SCHOTT", wavelength).unwrap();
+        let sin = std::f64::consts::FRAC_1_SQRT_2;
+        let inside = t / (1. - (sin / n).powi(2)).sqrt();
+        for (face, reflected_glass) in [(bench::Face::Front, 0.), (bench::Face::Back, 2. * inside)] {
+            let mut bench = template("mach_zehnder").unwrap();
+            bench.assertions.clear();
+            let splitter = bench.elements.iter_mut().find(|e| e.id == "BS1").unwrap();
+            splitter.substrate = Some(bench::Substrate {
+                material: "N-BK7_SCHOTT".into(),
+                thickness_mm: t,
+                wedge_deg: None,
+                coated_face: Some(face),
+            });
+            let trace = bench.trace(&system).unwrap();
+            let [a, b] = [0, 1].map(|i| &trace.branches[i].paths[0]);
+            let glass = |path: &BranchPath| path.glass.iter().map(|g| g.length_mm).sum::<f64>();
+            assert!((glass(a) - reflected_glass).abs() < 1e-9, "{face:?}: {:?}", a.glass);
+            assert!(a.glass.len() <= 1);
+            assert!((glass(b) - inside).abs() < 1e-9, "{face:?}: {:?}", b.glass);
+            assert_eq!(a.start_segment, b.start_segment);
+            // The transmitted arm leaves parallel, so it is laterally shifted.
+            let exit = trace.segments.iter()
+                .find(|s| s.flight.as_ref().is_some_and(|f| f.from_element == "BS1" && f.from_port == "transmitted"))
+                .unwrap();
+            assert!((exit.to[1] - exit.from[1]).abs() < 1e-9);
+        }
+    }
+
+    /// Single plate P (centred on its back face at [250, 200, 75]) between S1 and D.
+    fn back_entry_bench(t: f64, aperture: f64) -> Bench {
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        let normal = [std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2, 0.];
+        let mut p = plate("P", add([250., 200., 75.], scale(normal, t)), normal, t);
+        p.aperture = aperture;
+        p.body_radius = 6.;
+        bench.elements = vec![p, mount_element("D", DETECTOR, [450., 200., 75.], [1., 0., 0.])];
+        bench.connections = vec![
+            Connection { from: "S1".into(), port: "out".into(), to: "P".into() },
+            Connection { from: "P".into(), port: "out".into(), to: "D".into() },
+        ];
+        bench.branches = vec![Branch {
+            id: "line".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+        }];
+        bench
+    }
+
+    #[test]
+    fn substrate_is_hit_on_its_entry_face_not_the_element_plane() {
+        // Light along +x meets the 45° plate's back face at its centre. The
+        // unrefracted ray would cross the element plane 10 mm off axis, outside
+        // the 6 mm body, yet the refracted ray leaves 10·tanθt ≈ 5.3 mm off axis.
+        let system = System::default();
+        let t = 10.;
+        let bench = back_entry_bench(t, 6.);
+        let n = system.material_index("N-BK7_SCHOTT", bench.sources[0].wavelength).unwrap();
+        let sin_t = std::f64::consts::FRAC_1_SQRT_2 / n;
+        let inside = t / (1. - sin_t * sin_t).sqrt();
+        assert!(t * sin_t / (1. - sin_t * sin_t).sqrt() < 6.);
+        let trace = bench.trace(&system).unwrap();
+        let glass: Vec<_> = trace.segments.iter().filter(|s| s.status == "substrate").collect();
+        assert_eq!(glass.len(), 1);
+        assert!(norm(sub(glass[0].from, [250., 200., 75.])) < 1e-9, "{:?}", glass[0].from);
+        assert!((glass[0].flight.as_ref().unwrap().length_mm - inside).abs() < 1e-9);
+        let path = &trace.branches[0].paths[0];
+        assert!(path.interruption.is_none(), "{:?}", path.interruption);
+        assert!((path.glass[0].length_mm - inside).abs() < 1e-9);
+
+        // A 5 mm clear aperture clips the exit point although the entry is central.
+        let trace = back_entry_bench(t, 5.).trace(&system).unwrap();
+        assert!(trace.segments.iter().all(|s| s.status != "substrate"));
+        assert!(trace.terminations.iter().any(|t| t.element.as_deref() == Some("P") && t.reason == "clipped"));
+        let path = &trace.branches[0].paths[0];
+        assert_eq!(path.interruption.as_ref().map(|b| b.reason.as_str()), Some("clipped"));
+    }
+
+    fn glass_plate(id: &str, at: V3, normal: V3, material: &str, thickness_mm: f64) -> Element {
+        let mut element = plate(id, at, normal, thickness_mm);
+        element.substrate.as_mut().unwrap().material = material.into();
+        element
+    }
+
+    #[test]
+    fn dispersion_reports_the_band_maximum_between_samples() {
+        // N-BK7 against a thicker fused silica plate: the phase difference has an
+        // interior maximum near 655 nm that a coarse fixed grid misses.
+        let system = System::default();
+        let band = [400., 900.];
+        let silica = 1.128_785_627_349_848_7;
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "N-BK7_SCHOTT", 1.),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], "FUSED_SILICA", silica)),
+        );
+        bench.assertions = vec![Assertion {
+            id: "phase".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Rad,
+            tolerance: 7.8285,
+            band_nm: Some(band),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        // Independent dense scan at 0.01 nm from the material library.
+        let phase = |material: &str, t: f64, w: f64| {
+            std::f64::consts::TAU * (system.material_index(material, w).unwrap() - 1.) * t / (w * 1e-6)
+        };
+        let (peak, at) = (0..=50_000)
+            .map(|i| band[0] + i as f64 * 0.01)
+            .map(|w| ((phase("N-BK7_SCHOTT", 1., w) - phase("FUSED_SILICA", silica, w)).abs(), w))
+            .fold((0., 0.), |a, b| if b.0 > a.0 { b } else { a });
+        assert!(peak > 7.8285 && (at - 655.).abs() < 5., "{peak} at {at}");
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!("{:?}", result.interruption) };
+        assert!(matches!(result.status, AssertionStatus::Fail));
+        assert!(value.difference.abs() >= peak - 1e-9, "{} vs {peak}", value.difference);
+        assert!(value.difference.abs() <= peak + 1e-6);
+        assert!((value.wavelength_nm - at).abs() < 0.1, "{} vs {at}", value.wavelength_nm);
+    }
+
+    #[test]
+    fn dispersion_separates_close_stationary_points() {
+        // Formula-3 glasses whose phase difference has stationary points near 401,
+        // 402.2 and 403 nm, with the two maxima within 1e-6 rad of each other. The
+        // target and tolerance put the band maximum (≈401 nm) just out of tolerance.
+        let mut system = System::default();
+        for (name, coefficients) in [
+            ("WIGGLE_A", vec![1.495_775_425_531_285, 0., 0., -0.078_399_543_545_400_02, 0.161_658_280_000_000_02, -0.2]),
+            ("WIGGLE_B", vec![1.5, 0., 0., 0., 0., 0.]),
+        ] {
+            system.custom_glasses.push(crate::optics::material::Glass {
+                name: name.into(),
+                catalog: "TEST".into(),
+                formula: 3,
+                coefficients,
+                nd: 1.5,
+                vd: 50.,
+                wavelength_range: None,
+                thermal: None,
+                transmission: vec![],
+                comment: String::new(),
+            });
+        }
+        // Phase scales with thickness, so 10 mm plates take a tenth of the 100 mm
+        // target and tolerance.
+        let (t, target, tolerance) = (10., -34_282.880_646_204_69 / 10., 13_156.848_988_582_788 / 10.);
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "WIGGLE_A", t),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], "WIGGLE_B", t)),
+        );
+        bench.assertions = vec![Assertion {
+            id: "phase".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target,
+            unit: AssertionUnit::Rad,
+            tolerance,
+            band_nm: Some([400., 900.]),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        let phase = |material: &str, w: f64| {
+            std::f64::consts::TAU * (system.material_index(material, w).unwrap() - 1.) * t / (w * 1e-6)
+        };
+        let deviation = |w: f64| (phase("WIGGLE_A", w) - phase("WIGGLE_B", w) - target).abs();
+        let (peak, at) = (0..=5_000)
+            .map(|i| 400. + i as f64 * 1e-3)
+            .map(|w| (deviation(w), w))
+            .fold((0., 0.), |a, b| if b.0 > a.0 { b } else { a });
+        assert!(peak > tolerance && (at - 401.).abs() < 0.5, "{peak} at {at}");
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!("{:?}", result.interruption) };
+        assert!(matches!(result.status, AssertionStatus::Fail), "{:?}", result.residual);
+        assert!(result.residual.unwrap().abs() >= peak - 1e-9);
+        assert!((value.wavelength_nm - at).abs() < 0.01, "{} vs {at}", value.wavelength_nm);
+    }
+
+    #[test]
+    fn wedged_substrate_is_entered_through_the_wedge_face() {
+        // A 45° wedge with a back coating, met first on the wedge face: the front
+        // plane lies behind the ray, so only the wedge face can be the entry.
+        let system = System::default();
+        let rotation = normal_rotation([1., 0., 0.]);
+        let origin = [250., 200., 75.];
+        let world = |l: V3| add(origin, bench::rotate(l, rotation));
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        let mut splitter = bench.elements.iter().find(|e| e.id == "BS1").unwrap().clone();
+        splitter.id = "W".into();
+        splitter.position = origin;
+        splitter.rotation = Some(rotation);
+        (splitter.aperture, splitter.body_radius) = (6., 6.);
+        (splitter.reflectance, splitter.transmittance) = (1., 0.);
+        (splitter.index, splitter.coating) = (None, None);
+        splitter.substrate = Some(bench::Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: Some(45.),
+            coated_face: Some(bench::Face::Back),
+        });
+        let d = [-0.1, 0.99_f64.sqrt(), 0.];
+        let start = [-4., -10., 0.];
+        // Wedge face x + y = −10.
+        let s = (-10. - start[0] - start[1]) / (d[0] + d[1]);
+        let entry = add(start, scale(d, s));
+        let reflected = [-(0.99_f64.sqrt()), 0.1, 0.];
+        bench.sources[0].position = world(start);
+        bench.sources[0].direction = bench::rotate(d, rotation);
+        bench.sources[0].beam_radius = 0.1;
+        let out = bench::rotate(reflected, rotation);
+        bench.elements = vec![
+            splitter,
+            mount_element("D", DETECTOR, world(add(entry, scale(reflected, 100.))), out),
+        ];
+        bench.connections = vec![
+            Connection { from: "S1".into(), port: "out".into(), to: "W".into() },
+            Connection { from: "W".into(), port: "reflected".into(), to: "D".into() },
+        ];
+        bench.branches = vec![Branch {
+            id: "line".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+        }];
+        let trace = bench.trace(&system).unwrap();
+        let path = &trace.branches[0].paths[0];
+        assert!(path.interruption.is_none(), "{:?}", path.interruption);
+        assert!(path.glass.is_empty(), "{:?}", path.glass);
+        let arrival = &trace.segments[path.segment_indices[0]];
+        assert!(norm(sub(arrival.to, world(entry))) < 1e-9, "{:?} vs {:?}", arrival.to, world(entry));
+        let leaving = &trace.segments[path.segment_indices[1]];
+        assert!(norm(sub(unit(sub(leaving.to, leaving.from)).unwrap(), out)) < 1e-9);
+    }
+
+    #[test]
+    fn colinearity_is_measured_from_the_glass_exit() {
+        // A back-coated substrate fed from both sides on one axis: A crosses the
+        // glass, B reflects in air at the coated back face. Both leave from the
+        // back face centre along −x, so the outputs coincide.
+        let system = System::default();
+        let rotation = normal_rotation([1., 0., 0.]);
+        let origin = [250., 200., 75.];
+        let world = |l: V3| add(origin, bench::rotate(l, rotation));
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        let mut splitter = bench.elements.iter().find(|e| e.id == "BS1").unwrap().clone();
+        splitter.id = "W".into();
+        splitter.position = origin;
+        splitter.rotation = Some(rotation);
+        (splitter.reflectance, splitter.transmittance) = (0.5, 0.5);
+        (splitter.index, splitter.coating) = (None, None);
+        splitter.substrate = Some(bench::Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: None,
+            coated_face: Some(bench::Face::Back),
+        });
+        let mut b = bench.sources[0].clone();
+        bench.sources[0].position = world([60., 0., 0.]);
+        bench.sources[0].direction = bench::rotate([-1., 0., 0.], rotation);
+        b.id = "S2".into();
+        b.position = world([-30., 0., 0.]);
+        b.direction = bench::rotate([1., 0., 0.], rotation);
+        bench.sources.push(b);
+        let out = bench::rotate([-1., 0., 0.], rotation);
+        bench.elements = vec![splitter, mount_element("D", DETECTOR, world([-120., 0., 0.]), out)];
+        bench.connections = vec![
+            Connection { from: "S1".into(), port: "out".into(), to: "W".into() },
+            Connection { from: "S2".into(), port: "out".into(), to: "W".into() },
+            Connection { from: "W".into(), port: "transmitted".into(), to: "D".into() },
+            Connection { from: "W".into(), port: "reflected".into(), to: "D".into() },
+        ];
+        let arm = |id: &str, from: &str, input: &str| Branch {
+            id: id.into(),
+            from: Port::new(from, "out"),
+            to: Port::new("W", input),
+            via: vec![],
+        };
+        bench.branches = vec![arm("a", "S1", "in_a"), arm("b", "S2", "in_b")];
+        bench.assertions = vec![Assertion {
+            id: "overlap".into(),
+            kind: AssertionKind::Colinear,
+            branches: ["a".into(), "b".into()],
+            target: 0.,
+            unit: AssertionUnit::Mm,
+            tolerance: 1e-6,
+            band_nm: None,
+            quantity: None,
+        }];
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        assert!(matches!(result.status, AssertionStatus::Pass), "{:?} {:?}", result.residual, result.interruption);
+    }
+
+    #[test]
+    fn dispersion_finds_a_peak_narrower_than_the_initial_cells() {
+        // A pole-like term puts a ~37 700 rad spike within 1 pm of the band start,
+        // well inside the first 0.05 nm cell; the bend of the cell's midpoint
+        // forces it to be refined.
+        let mut system = System::default();
+        for (name, coefficients) in [
+            ("SPIKE_A", vec![-40.320_755_060_657_13, 1.338_660_042_482_509e-7, -4.480_026_773_348_182_7e-14, 1_493.580_543_268_169_8, 0., 0.]),
+            ("SPIKE_B", vec![1.5, 0., 0., 0., 0., 0.]),
+        ] {
+            system.custom_glasses.push(crate::optics::material::Glass {
+                name: name.into(),
+                catalog: "TEST".into(),
+                formula: 3,
+                coefficients,
+                nd: 1.5,
+                vd: 50.,
+                wavelength_range: None,
+                thermal: None,
+                transmission: vec![],
+                comment: String::new(),
+            });
+        }
+        let t = 10.;
+        let band = [167.333_005_306_815_12, 167.433_005_306_815_12];
+        let phase = |w: f64| {
+            let n = |m: &str| system.material_index(m, w).unwrap() - system.material_index("AIR", w).unwrap();
+            TAU * (n("SPIKE_A") - n("SPIKE_B")) * t / (w * 1e-6)
+        };
+        let (at, peak) = (0..=100_000)
+            .map(|i| band[0] + (band[1] - band[0]) * f64::from(i) / 100_000.)
+            .map(|w| (w, phase(w).abs()))
+            .fold((0., 0.), |best, x| if x.1 > best.1 { x } else { best });
+        assert!(peak > 37_000. && (at - 167.334).abs() < 1e-3, "{peak} at {at}");
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "SPIKE_A", t),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], "SPIKE_B", t)),
+        );
+        bench.assertions = vec![Assertion {
+            id: "spike".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Rad,
+            tolerance: 25_000.,
+            band_nm: Some(band),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        assert!(matches!(result.status, AssertionStatus::Fail), "{:?}", result.residual);
+        let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!() };
+        assert!(value.difference.abs() >= peak - 1e-6 * peak, "{} vs {peak}", value.difference);
+        assert!(value.deviation_bound >= value.difference.abs());
+        assert!((value.wavelength_nm - at).abs() < 1e-4, "{} vs {at}", value.wavelength_nm);
+    }
+
+    #[test]
+    fn dispersion_bound_encloses_a_peak_the_samples_miss() {
+        // Review counterexample: with x = (λ/µm)² − 0.028 and ε = x(λmin),
+        // nA − nB = 0.4ε/x − 0.4ε²/x² + K·(x − ε), whose rational part peaks at
+        // x = 2ε, between the samples of the first cell. Sampling alone reported
+        // ~22 500 rad as the maximum; the true peak is ~37 500 rad.
+        let mut system = System::default();
+        let k = 1_792.307_349_035_117_8;
+        for (name, coefficients) in [
+            ("KINK_A", vec![-48.684_606_372_804_06, 1.338_656_033_245_122_6e-10, -4.479_999_938_358_917e-20, k, 0., 0.]),
+            ("KINK_B", vec![1.5, 0., 0., 0., 0., 0.]),
+        ] {
+            system.custom_glasses.push(crate::optics::material::Glass {
+                name: name.into(),
+                catalog: "TEST".into(),
+                formula: 3,
+                coefficients,
+                nd: 1.5,
+                vd: 50.,
+                wavelength_range: None,
+                thermal: None,
+                transmission: vec![],
+                comment: String::new(),
+            });
+        }
+        let t = 10.;
+        let band = [167.332_006_306_815_12, 167.432_006_306_815_1];
+        let epsilon = (band[0] / 1000.).powi(2) - 0.028;
+        let at = 1000. * (0.028 + 2. * epsilon).sqrt();
+        let analytic = TAU * (0.1 + k * epsilon) * t / (at * 1e-6);
+        let n = |m: &str| system.material_index(m, at).unwrap() - system.material_index("AIR", at).unwrap();
+        let peak = TAU * (n("KINK_A") - n("KINK_B")) * t / (at * 1e-6);
+        assert!(peak > 37_000. && ((peak - analytic) / analytic).abs() < 1e-3, "{peak} vs {analytic}");
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "KINK_A", t),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], "KINK_B", t)),
+        );
+        bench.assertions = vec![Assertion {
+            id: "kink".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Rad,
+            tolerance: 25_000.,
+            band_nm: Some(band),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        assert!(matches!(result.status, AssertionStatus::Fail), "{} {:?}", result.status.as_str(), result.residual);
+        let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!() };
+        assert!(value.deviation_bound >= peak, "{} vs {peak}", value.deviation_bound);
+        assert!(value.difference.abs() >= peak * (1. - 1e-6), "{} vs {peak}", value.difference);
+        assert!((value.wavelength_nm - at).abs() < 1e-4, "{} vs {at}", value.wavelength_nm);
+    }
+
+    #[test]
+    fn dispersion_is_unresolved_when_the_enclosure_diverges() {
+        // Both arms carry differently named glasses with the same formula-3 pole at
+        // √0.028 µm ≈ 167.33 nm. Δ cancels the pole, so every sample is ~0, but each
+        // material is enclosed separately and the enclosure of the cell around the
+        // pole is unbounded: the assertion must be unresolved, not pass on samples.
+        let mut system = System::default();
+        for name in ["POLE_A", "POLE_B"] {
+            system.custom_glasses.push(crate::optics::material::Glass {
+                name: name.into(),
+                catalog: "TEST".into(),
+                formula: 3,
+                coefficients: vec![1.5, 0., 1e-30, 0., 0., 0.],
+                nd: 1.5,
+                vd: 50.,
+                wavelength_range: None,
+                thermal: None,
+                transmission: vec![],
+                comment: String::new(),
+            });
+        }
+        // Differently named glasses, and the same glass whose net length cancels.
+        for compensator in ["POLE_B", "POLE_A"] {
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "POLE_A", 1.),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], compensator, 1.)),
+        );
+        bench.assertions = vec![Assertion {
+            id: "pole".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Rad,
+            tolerance: 1.,
+            band_nm: Some([160., 175.]),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        let trace = bench.trace(&system).unwrap();
+        let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
+        assert!(matches!(result.status, AssertionStatus::Unreachable), "{compensator}: {} {:?}", result.status.as_str(), result.residual);
+        let interruption = result.interruption.unwrap();
+        assert_eq!(interruption.reason, "dispersion_unresolved", "{:?}", interruption.detail);
+        }
+    }
+
+    #[test]
+    fn group_delay_is_evaluated_up_to_the_band_limits() {
+        // Equal silica plates balance exactly, including at the 20 µm validation limit
+        // where the derivative cannot look past the band edge.
+        let system = System::default();
+        let mut bench = mach_zehnder_with(
+            glass_plate("P", [250., 300., 75.], [0., 1., 0.], "FUSED_SILICA", 3.),
+            Some(glass_plate("C", [350., 200., 75.], [1., 0., 0.], "FUSED_SILICA", 3.)),
+        );
+        let gd = |band: [f64; 2]| Assertion {
+            id: format!("gd{}", band[0]),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Fs,
+            tolerance: 1e-9,
+            band_nm: Some(band),
+            quantity: Some(DispersionQuantity::GroupDelay),
+        };
+        bench.assertions = vec![gd([19000., 20000.]), gd([200., 300.]), gd([100., 300.])];
+        let trace = bench.trace(&system).unwrap();
+        let results = check_assertions(&bench, &system, &trace);
+        for result in &results[..2] {
+            assert!(matches!(result.status, AssertionStatus::Pass), "{}: {:?}", result.assertion, result.interruption);
+        }
+        // The silica model has no real index far in the UV; the break names the
+        // material, the wavelength and the library's reason.
+        assert!(matches!(results[2].status, AssertionStatus::Unreachable));
+        let interruption = results[2].interruption.as_ref().unwrap();
+        assert_eq!((interruption.element.as_str(), interruption.reason.as_str()), ("P", "material_error"));
+        let detail = interruption.detail.as_deref().unwrap();
+        assert!(detail.starts_with("FUSED_SILICA at ") && detail.contains(" nm: "), "{detail}");
+        // An unbalanced pair at the upper limit reports the one-sided n_g, which
+        // agrees with the central difference just inside the edge.
+        bench.elements.retain(|e| e.id != "C");
+        bench.connections.retain(|c| c.from != "C");
+        bench.connections.iter_mut().filter(|c| c.to == "C").for_each(|c| c.to = "M2".into());
+        let trace = bench.trace(&system).unwrap();
+        let results = check_assertions(&bench, &system, &trace);
+        let Some(AssertionValue::Dispersion(edge)) = &results[0].value else { panic!("{:?}", results[0].interruption) };
+        let ng = |w: f64| {
+            let n = |w: f64| system.material_index("FUSED_SILICA", w).unwrap();
+            n(w) - w * (n(w + 0.01) - n(w - 0.01)) / 0.02
+        };
+        let w = edge.wavelength_nm.min(19999.98);
+        assert!(((edge.difference - 3. * (ng(w) - 1.) / C_MM_PER_FS) / edge.difference).abs() < 1e-4);
+    }
+
+    #[test]
+    fn splitter_substrate_requires_a_coated_face() {
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.elements.iter_mut().find(|e| e.id == "BS1").unwrap().substrate = Some(bench::Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 4.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        let error = bench.validate().unwrap_err();
+        assert!(error.contains("coated face"), "{error}");
+    }
+
+    #[test]
+    fn phase_plate_adds_its_phase_to_the_branch() {
+        let system = System::default();
+        let base = mach_zehnder_with(mount_element("Q", MASK, [250., 300., 75.], [0., 1., 0.]), None);
+        let wavelength = base.sources[0].wavelength;
+        let mut plated = base.clone();
+        plated.elements.iter_mut().find(|e| e.id == "Q").unwrap().phase = Some(bench::PhasePlate {
+            radians: None,
+            waves: Some(0.25),
+            at_wavelength_nm: wavelength / 2.,
+        });
+        let phase = |bench: &Bench| {
+            let trace = bench.trace(&system).unwrap();
+            let path = &trace.branches[0].paths[0];
+            assert!(path.interruption.is_none());
+            (path.phase_rad, path.opl_mm, trace.branches[1].paths[0].phase_rad)
+        };
+        let (before, opl, other) = phase(&base);
+        let (after, opl_after, other_after) = phase(&plated);
+        // Quarter wave at λ/2 is π/4 at λ; geometry and the other arm are unchanged.
+        assert!((after - before - std::f64::consts::FRAC_PI_4).abs() < 1e-9, "{}", after - before);
+        assert_eq!(opl, opl_after);
+        assert_eq!(other, other_after);
+        assert!((before - std::f64::consts::TAU * opl / (wavelength * 1e-6)).abs() < 1e-6);
+    }
+
     #[test]
     fn interrupted_arms_identify_the_physical_obstacle_or_missed_input() {
         let system = System::default();
@@ -2872,6 +3784,8 @@ mod tests {
             target: 0.,
             unit: AssertionUnit::Mrad,
             tolerance: 1e-6,
+            band_nm: None,
+            quantity: None,
         });
         let mut blocked = bench.clone();
         blocked.elements.push(mount_element("STOP", DUMP, [250., 300., 75.], [0., 1., 0.]));
@@ -2911,6 +3825,8 @@ mod tests {
             target: 0.,
             unit: AssertionUnit::Um,
             tolerance: 1e-3,
+            band_nm: None,
+            quantity: None,
         });
 
         let initial = lab_check(&bench, &system).unwrap();

@@ -340,6 +340,10 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                                 ΔOPL {{ reading(result.value) }}
                                 {{ result.unit === 'um' ? 'µm' : result.unit }}
                             </span>
+                            <span v-else-if="result.value && 'difference' in result.value">
+                                Δ {{ reading(result.value.difference) }} {{ result.unit }} @
+                                {{ reading(result.value.wavelength_nm) }} nm
+                            </span>
                             <span v-else-if="result.value">
                                 Δr {{ reading(result.value.position_mm) }} mm · Δθ
                                 {{ reading(result.value.angle_mrad) }} mrad

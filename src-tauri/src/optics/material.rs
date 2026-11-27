@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Dispersion, air, and Buchdahl equations translated from Geopter (Hiiragi, 2021).
+use super::interval::Real;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -33,7 +34,13 @@ pub struct Glass {
 }
 
 pub fn dispersion(formula: u8, c: &[f64], l: f64) -> Result<f64, String> {
-    if !l.is_finite() || l <= 0. || c.iter().any(|x| !x.is_finite()) {
+    dispersion_real(formula, c, l)
+}
+
+/// [`dispersion`] for any [`Real`] wavelength (µm): a point, an interval enclosure,
+/// or a dual carrying derivatives. Operations keep the f64 evaluation order.
+pub fn dispersion_real<T: Real>(formula: u8, c: &[f64], l: T) -> Result<T, String> {
+    if !l.finite() || l.lo() <= 0. || c.iter().any(|x| !x.is_finite()) {
         return Err("Finite positive wavelength and finite coefficients required".into());
     }
     let needed = match formula {
@@ -50,45 +57,33 @@ pub fn dispersion(formula: u8, c: &[f64], l: f64) -> Result<f64, String> {
         return Err(format!("Formula {formula} needs {needed} coefficients"));
     }
     let l2 = l * l;
-    let sellmeier = |terms: usize| {
-        1. + (0..terms)
-            .map(|i| c[2 * i] * l2 / (l2 - c[2 * i + 1]))
-            .sum::<f64>()
+    let sum = |range: std::ops::Range<usize>, term: &dyn Fn(usize) -> T| {
+        range.fold(T::cst(0.), |total, i| total + term(i))
     };
-    let schott = || {
-        c[0] + c[1] * l2
-            + (2..6)
-                .map(|i| c[i] * l.powi(-2 * (i as i32 - 1)))
-                .sum::<f64>()
-    };
+    let sellmeier = |terms: usize| sum(0..terms, &|i| l2 * c[2 * i] / (l2 - c[2 * i + 1])) + 1.;
+    let schott = || l2 * c[1] + c[0] + sum(2..6, &|i| l.powi(-2 * (i as i32 - 1)) * c[i]);
     let n = match formula {
         1 => schott().sqrt(),
         2 => sellmeier(3).sqrt(),
         3 => {
-            let h = 1. / (l2 - 0.028);
-            c[0] + c[1] * h + c[2] * h * h + c[3] * l2 + c[4] * l.powi(4) + c[5] * l.powi(6)
+            let h = T::cst(1.) / (l2 - 0.028);
+            h * c[1] + c[0] + h * c[2] * h + l2 * c[3] + l.powi(4) * c[4] + l.powi(6) * c[5]
         }
-        4 => (1. + c[0] + c[1] * l2 / (l2 - c[2]) + c[3] * l2 / (l2 - c[4])).sqrt(),
-        5 => c[0] + c[1] / l + c[2] / l.powf(3.5),
+        4 => (l2 * c[1] / (l2 - c[2]) + (1. + c[0]) + l2 * c[3] / (l2 - c[4])).sqrt(),
+        5 => T::cst(c[1]) / l + c[0] + T::cst(c[2]) / l.powf(3.5),
         6 => sellmeier(4).sqrt(),
-        7 => (c[0] + c[1] / (l2 - c[2]) - c[3] * l2).sqrt(),
-        8 => (c[0] + c[1] * l2 / (l2 - c[2]) - c[3] * l2).sqrt(),
-        9 => (c[0] + c[1] * l2 / (l2 - c[2]) + c[3] * l2 / (l2 - c[4])).sqrt(),
-        10 => (schott() + c[6] * l.powi(-10) + c[7] * l.powi(-12)).sqrt(),
+        7 => (T::cst(c[1]) / (l2 - c[2]) + c[0] - l2 * c[3]).sqrt(),
+        8 => (l2 * c[1] / (l2 - c[2]) + c[0] - l2 * c[3]).sqrt(),
+        9 => (l2 * c[1] / (l2 - c[2]) + c[0] + l2 * c[3] / (l2 - c[4])).sqrt(),
+        10 => (schott() + l.powi(-10) * c[6] + l.powi(-12) * c[7]).sqrt(),
         11 => sellmeier(5).sqrt(),
-        12 => (schott() + c[6] * l.powi(4) + c[7] * l.powi(6)).sqrt(),
+        12 => (schott() + l.powi(4) * c[6] + l.powi(6) * c[7]).sqrt(),
         // Hikari's nine-term polynomial: A0 + A1*l² + A2*l⁴ + A3/l² ... A8/l¹².
         // The source implementation repeats l^-8; the manufacturer equation is used here.
-        13 => (c[0]
-            + c[1] * l2
-            + c[2] * l.powi(4)
-            + (3..9)
-                .map(|i| c[i] * l.powi(-2 * (i as i32 - 2)))
-                .sum::<f64>())
-        .sqrt(),
+        13 => (l2 * c[1] + c[0] + l.powi(4) * c[2] + sum(3..9, &|i| l.powi(-2 * (i as i32 - 2)) * c[i])).sqrt(),
         _ => unreachable!(),
     };
-    if n.is_finite() && n > 0. {
+    if n.positive() {
         Ok(n)
     } else {
         Err("Dispersion outside its real domain".into())
@@ -96,8 +91,13 @@ pub fn dispersion(formula: u8, c: &[f64], l: f64) -> Result<f64, String> {
 }
 
 pub fn air_index(l: f64, temperature: f64, pressure: f64) -> Result<f64, String> {
-    if !l.is_finite()
-        || l <= 0.
+    air_index_real(l, temperature, pressure)
+}
+
+/// [`air_index`] for any [`Real`] wavelength (µm).
+pub fn air_index_real<T: Real>(l: T, temperature: f64, pressure: f64) -> Result<T, String> {
+    if !l.finite()
+        || l.lo() <= 0.
         || !temperature.is_finite()
         || temperature <= -273.15
         || !pressure.is_finite()
@@ -107,9 +107,9 @@ pub fn air_index(l: f64, temperature: f64, pressure: f64) -> Result<f64, String>
     }
     let l2 = l * l;
     let refractivity =
-        (6432.8 + 2949810. * l2 / (146. * l2 - 1.) + 25540. * l2 / (41. * l2 - 1.)) * 1e-8;
-    let n = 1. + refractivity / (1. + (temperature - 15.) * 3.4785e-3) * pressure / 101325.;
-    if n.is_finite() && n > 0. {
+        (l2 * 2949810. / (l2 * 146. - 1.) + 6432.8 + l2 * 25540. / (l2 * 41. - 1.)) * 1e-8;
+    let n = refractivity / (1. + (temperature - 15.) * 3.4785e-3) * pressure / 101325. + 1.;
+    if n.positive() {
         Ok(n)
     } else {
         Err("Air formula outside its real domain".into())
@@ -170,9 +170,14 @@ impl Glass {
         format!("{}_{}", self.name, self.catalog)
     }
     pub fn index(&self, nm: f64, environment: Option<(f64, f64)>) -> Result<f64, String> {
+        self.index_real(nm, environment)
+    }
+    /// [`Glass::index`] for any [`Real`] wavelength (nm); the whole wavelength
+    /// enclosure must lie in the glass's range.
+    pub fn index_real<T: Real>(&self, nm: T, environment: Option<(f64, f64)>) -> Result<T, String> {
         let l = nm / 1000.;
         if let Some([lo, hi]) = self.wavelength_range
-            && (l < lo || l > hi)
+            && (nm.lo() / 1000. < lo || nm.hi() / 1000. > hi)
         {
             return Err(format!(
                 "{} wavelength range is {}–{} nm",
@@ -182,28 +187,26 @@ impl Glass {
             ));
         }
         let Some((temperature, pressure)) = environment else {
-            return dispersion(self.formula, &self.coefficients, l);
+            return dispersion_real(self.formula, &self.coefficients, l);
         };
         let tref = self.thermal.map(|t| t[6]).unwrap_or(20.);
-        let air = air_index(l, temperature, pressure)?;
-        let relative_l = l * air / air_index(l, tref, 101325.)?;
-        let n = dispersion(self.formula, &self.coefficients, relative_l)?;
+        let air = air_index_real(l, temperature, pressure)?;
+        let relative_l = l * air / air_index_real(l, tref, 101325.)?;
+        let n = dispersion_real(self.formula, &self.coefficients, relative_l)?;
         let delta = if let Some([d0, d1, d2, e0, e1, ltk, _]) = self.thermal {
             let dt = temperature - tref;
-            (n * n - 1.) / (2. * n)
-                * (d0 * dt
-                    + d1 * dt * dt
-                    + d2 * dt.powi(3)
-                    + (e0 * dt + e1 * dt * dt)
-                        / (relative_l * relative_l - ltk.signum() * ltk * ltk))
+            (n * n - 1.) / (n * 2.)
+                * (T::cst(e0 * dt + e1 * dt * dt)
+                    / (relative_l * relative_l - ltk.signum() * ltk * ltk)
+                    + (d0 * dt + d1 * dt * dt + d2 * dt.powi(3)))
         } else if (temperature - tref).abs() > 1e-12 {
             return Err(format!("No thermal coefficients for {}", self.key()));
         } else {
-            0.
+            T::cst(0.)
         };
-        let result = (n * air_index(relative_l, tref, 101325.)? + delta)
-            / air_index(relative_l, temperature, pressure)?;
-        if result.is_finite() && result > 0. {
+        let result = (n * air_index_real(relative_l, tref, 101325.)? + delta)
+            / air_index_real(relative_l, temperature, pressure)?;
+        if result.positive() {
             Ok(result)
         } else {
             Err("Invalid thermal refractive index".into())
@@ -399,18 +402,24 @@ pub fn find(name: &str) -> Result<&'static Glass, String> {
     }
 }
 pub fn buchdahl(nd: f64, vd: f64, nm: f64) -> Result<f64, String> {
-    if !nd.is_finite() || nd <= 1. || !vd.is_finite() || vd <= 0. || !nm.is_finite() || nm <= 0. {
+    buchdahl_real(nd, vd, nm)
+}
+/// [`buchdahl`] for any [`Real`] wavelength (nm).
+pub fn buchdahl_real<T: Real>(nd: f64, vd: f64, nm: T) -> Result<T, String> {
+    if !nd.is_finite() || nd <= 1. || !vd.is_finite() || vd <= 0. || !nm.finite() || nm.lo() <= 0. {
         return Err("Invalid Buchdahl model glass".into());
     }
-    let omega = |delta: f64| delta / (1. + 2.5 * delta);
+    fn omega<T: Real>(delta: T) -> T {
+        delta / (delta * 2.5 + 1.)
+    }
     let of = omega((486.133 - 587.562) / 1000.);
     let oc = omega((656.273 - 587.562) / 1000.);
     let (b, m) = (-0.064667, -1.604048);
     let v2 = ((nd - 1.) / vd - b * (of - oc)) / (m * (of - oc) + (of * of - oc * oc));
     let v1 = b + m * v2;
     let o = omega((nm - 587.562) / 1000.);
-    let n = nd + v1 * o + v2 * o * o;
-    if n.is_finite() && n > 0. {
+    let n = o * v1 + nd + o * v2 * o;
+    if n.positive() {
         Ok(n)
     } else {
         Err("Buchdahl dispersion outside its real domain".into())
@@ -421,24 +430,32 @@ pub fn refractive_index(
     nm: f64,
     environment: Option<(f64, f64)>,
 ) -> Result<f64, String> {
-    if !nm.is_finite() || !(100.0..=20000.0).contains(&nm) {
+    refractive_index_real(name, nm, environment)
+}
+/// [`refractive_index`] for any [`Real`] wavelength (nm).
+pub fn refractive_index_real<T: Real>(
+    name: &str,
+    nm: T,
+    environment: Option<(f64, f64)>,
+) -> Result<T, String> {
+    if !nm.finite() || nm.lo() < 100. || nm.hi() > 20000. {
         return Err("Wavelength must be 100–20000 nm".into());
     }
     if name == "AIR" {
         if let Some((t, p)) = environment {
-            air_index(nm / 1000., t, p)?;
+            air_index_real(nm / 1000., t, p)?;
         }
-        return Ok(1.);
+        return Ok(T::cst(1.));
     }
     if let Some((n, v)) = name.split_once(':') {
-        return buchdahl(
+        return buchdahl_real(
             n.parse().map_err(|_| "Invalid model index")?,
             v.parse().map_err(|_| "Invalid model Abbe number")?,
             nm,
         );
     }
     if name == "FUSED_SILICA" {
-        return dispersion(
+        return dispersion_real(
             2,
             &[
                 0.6961663,
@@ -451,7 +468,7 @@ pub fn refractive_index(
             nm / 1000.,
         );
     }
-    find(name)?.index(nm, environment)
+    find(name)?.index_real(nm, environment)
 }
 #[cfg(test)]
 mod tests {

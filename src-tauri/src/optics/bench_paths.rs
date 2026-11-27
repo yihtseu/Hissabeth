@@ -38,6 +38,14 @@ pub struct Branch {
 pub enum AssertionKind {
     EqualOpl,
     Colinear,
+    Dispersion,
+}
+
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispersionQuantity {
+    Phase,
+    GroupDelay,
 }
 
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -46,6 +54,8 @@ pub enum AssertionUnit {
     Mm,
     Um,
     Mrad,
+    Fs,
+    Rad,
 }
 impl AssertionUnit {
     pub(crate) fn convert_mm(self, value: f64) -> f64 {
@@ -60,6 +70,8 @@ impl AssertionUnit {
             Self::Mm => "mm",
             Self::Um => "µm",
             Self::Mrad => "mrad",
+            Self::Fs => "fs",
+            Self::Rad => "rad",
         }
     }
 }
@@ -75,6 +87,13 @@ pub struct Assertion {
     pub unit: AssertionUnit,
     #[schemars(range(min = 0.0))]
     pub tolerance: f64,
+    /// Dispersion only: working band `[λmin, λmax]` in nm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(inner(range(min = 100.0, max = 20000.0)))]
+    pub band_nm: Option<[f64; 2]>,
+    /// Dispersion only: compared quantity (`phase` in rad, `group_delay` in fs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<DispersionQuantity>,
 }
 
 type Edge<'a> = (&'a str, &'a str);
@@ -184,7 +203,25 @@ impl Bench {
             {
                 return Err(format!("Invalid assertion {}", assertion.id));
             }
+            let dispersion = assertion.kind == AssertionKind::Dispersion;
+            if dispersion != assertion.band_nm.is_some() || dispersion != assertion.quantity.is_some() {
+                return Err(format!(
+                    "Assertion {} needs band_nm and quantity exactly when it is a dispersion assertion",
+                    assertion.id
+                ));
+            }
             let valid = match assertion.kind {
+                AssertionKind::Dispersion => {
+                    let band_ok = assertion
+                        .band_nm
+                        .is_some_and(|[lo, hi]| (100. ..=20000.).contains(&lo) && (100. ..=20000.).contains(&hi) && lo < hi);
+                    band_ok
+                        && matches!(
+                            (assertion.quantity, assertion.unit),
+                            (Some(DispersionQuantity::Phase), AssertionUnit::Rad)
+                                | (Some(DispersionQuantity::GroupDelay), AssertionUnit::Fs)
+                        )
+                }
                 AssertionKind::EqualOpl => {
                     matches!(assertion.unit, AssertionUnit::Mm | AssertionUnit::Um)
                         && a.from.element == b.from.element
@@ -243,6 +280,13 @@ pub struct Flight {
     pub opl_mm: f64,
     pub wavelength_nm: f64,
     pub previous_segment: Option<usize>,
+    /// Scalar phase picked up when leaving `from_port` (phase plates), radians.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub phase_rad: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.
 }
 
 #[derive(Clone)]
@@ -252,6 +296,8 @@ pub(super) struct Departure {
     pub previous: Option<usize>,
     pub arrival: Option<usize>,
     pub nominal: bool,
+    /// Phase-plate phase added on leaving `port` (radians).
+    pub phase: f64,
 }
 
 impl Departure {
@@ -274,6 +320,7 @@ impl Departure {
             opl_mm: length_mm * index,
             wavelength_nm,
             previous_segment: self.previous,
+            phase_rad: self.phase,
         }
     }
 }
@@ -283,6 +330,9 @@ pub(crate) struct PathBreak {
     pub element: String,
     pub port: String,
     pub reason: String,
+    /// Human-readable cause, for example the failing material and wavelength.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl PathBreak {
@@ -291,7 +341,12 @@ impl PathBreak {
             element: element.into(),
             port: port.into(),
             reason: reason.into(),
+            detail: None,
         }
+    }
+    pub(crate) fn with_detail(mut self, detail: String) -> Self {
+        self.detail = Some(detail);
+        self
     }
 }
 
@@ -314,6 +369,10 @@ pub struct BranchPath {
     pub start_segment: Option<usize>,
     pub length_mm: f64,
     pub opl_mm: f64,
+    /// 2π·OPL/λ plus phase-plate phases along the path (radians).
+    pub phase_rad: f64,
+    /// Substrate glass crossed along the path, in order.
+    pub glass: Vec<GlassPass>,
     pub ports: Vec<Port>,
     pub nominal_match: bool,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
@@ -322,6 +381,16 @@ pub struct BranchPath {
     pub(crate) end_segment: Option<usize>,
     #[serde(skip)]
     pub(in crate::optics) segment_indices: Vec<usize>,
+}
+
+/// One crossing of an element substrate (an internal reflection is one pass).
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
+pub struct GlassPass {
+    pub element: String,
+    pub material: String,
+    pub thickness_mm: f64,
+    /// Geometric length inside the glass (mm).
+    pub length_mm: f64,
 }
 
 enum Step {
@@ -422,6 +491,15 @@ impl PathIndex {
                         })
                         .collect()
                 };
+                let mut paths = paths;
+                for pass in paths.iter_mut().flat_map(|path| path.glass.iter_mut()) {
+                    pass.thickness_mm = bench
+                        .elements
+                        .iter()
+                        .find(|e| e.id == pass.element)
+                        .and_then(|e| e.substrate.as_ref())
+                        .map_or(0., |s| s.thickness_mm);
+                }
                 let interruption = paths.is_empty().then(|| {
                     PathBreak::new(&branch.from.element, &branch.from.port, "start_not_reached")
                 });
@@ -457,6 +535,8 @@ impl PathIndex {
             start_segment,
             length_mm: 0.,
             opl_mm: 0.,
+            phase_rad: 0.,
+            glass: Vec::new(),
             ports: Vec::new(),
             nominal_match: false,
             interruption: None,
@@ -471,7 +551,15 @@ impl PathIndex {
                 let hit = &segments[*at];
                 let flight = hit.flight.as_ref().unwrap();
                 let start = if i == 0 {
-                    flight.previous_segment
+                    // The starting element's own substrate belongs to this arm.
+                    let mut start = flight.previous_segment;
+                    while let Some(at) = start.filter(|&at| {
+                        segments[at].status == "substrate"
+                            && segments[at].element.as_deref() == Some(element)
+                    }) {
+                        start = segments[at].flight.as_ref().unwrap().previous_segment;
+                    }
+                    start
                 } else {
                     arrival
                 };
@@ -538,6 +626,23 @@ impl BranchPath {
             self.segment_indices.push(at);
             self.length_mm += flight.length_mm;
             self.opl_mm += flight.opl_mm;
+            self.phase_rad += std::f64::consts::TAU * flight.opl_mm / (flight.wavelength_nm * 1e-6)
+                + flight.phase_rad;
+            if segments[at].status == "substrate" {
+                match self.glass.last_mut() {
+                    Some(pass) if pass.element == flight.to_element && self.ports.last()
+                        == Some(&Port::new(&flight.from_element, &flight.from_port)) =>
+                    {
+                        pass.length_mm += flight.length_mm;
+                    }
+                    _ => self.glass.push(GlassPass {
+                        element: flight.to_element.clone(),
+                        material: flight.medium.clone(),
+                        thickness_mm: 0.,
+                        length_mm: flight.length_mm,
+                    }),
+                }
+            }
             self.push_port(Port::new(&flight.from_element, &flight.from_port));
             self.push_port(Port::new(&flight.to_element, &flight.to_port));
         }

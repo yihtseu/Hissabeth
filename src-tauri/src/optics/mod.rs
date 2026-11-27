@@ -10,6 +10,7 @@ pub mod editing;
 pub mod focus;
 pub mod gaussian;
 pub mod inspection;
+pub mod interval;
 pub mod material;
 pub mod math;
 pub mod optimize;
@@ -476,6 +477,10 @@ impl System {
         (frames, frame)
     }
     pub fn material_index(&self, name: &str, w: f64) -> Result<f64, String> {
+        self.material_index_real(name, w)
+    }
+    /// [`System::material_index`] for any [`interval::Real`] wavelength (nm).
+    pub fn material_index_real<T: interval::Real>(&self, name: &str, w: T) -> Result<T, String> {
         let matches: Vec<_> = self
             .custom_glasses
             .iter()
@@ -485,9 +490,9 @@ impl System {
             return Err(format!("Ambiguous custom glass {name}"));
         }
         if let Some(g) = matches.first() {
-            g.index(w, Some((self.temperature, self.pressure)))
+            g.index_real(w, Some((self.temperature, self.pressure)))
         } else {
-            material::refractive_index(name, w, Some((self.temperature, self.pressure)))
+            material::refractive_index_real(name, w, Some((self.temperature, self.pressure)))
         }
     }
     pub fn object_index(&self, w: f64) -> Result<f64, String> {

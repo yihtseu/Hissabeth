@@ -84,6 +84,23 @@ export interface BenchElement {
     lever_arm_mm?: number | null;
     /** Sub-apertures on apertures and mirrors; each region is an output port. First match wins. */
     regions?: BenchRegion[];
+    /** Glass slab behind the element plane (apertures, splitters, PBS, waveplates, polarizers). */
+    substrate?: BenchSubstrate | null;
+    /** Scalar phase on transmitted outputs: exactly one of radians or waves. */
+    phase?: BenchPhasePlate | null;
+}
+export interface BenchSubstrate {
+    material: string;
+    thickness_mm: number;
+    /** Back-face tilt about the local z axis (deg). */
+    wedge_deg?: number | null;
+    /** Required on splitters and PBS, forbidden elsewhere: face carrying the reflective coating. */
+    coated_face?: 'front' | 'back' | null;
+}
+export interface BenchPhasePlate {
+    radians?: number | null;
+    waves?: number | null;
+    at_wavelength_nm: number;
 }
 type DefaultedElementFields =
     | 'label'
@@ -146,15 +163,19 @@ export interface BenchBranch {
     /** Ordered output selections at intermediate elements with multiple nominal continuations. */
     via?: BenchPort[];
 }
-export type BenchAssertionUnit = 'mm' | 'um' | 'mrad';
+export type BenchAssertionUnit = 'mm' | 'um' | 'mrad' | 'fs' | 'rad';
 export interface BenchAssertion {
     id: string;
-    kind: 'equal_opl' | 'colinear';
+    kind: 'equal_opl' | 'colinear' | 'dispersion';
     /** Two distinct branch IDs. Equal OPL takes the first branch minus the second. */
     branches: [string, string];
     target: number;
     unit: BenchAssertionUnit;
     tolerance: number;
+    /** Dispersion only: working band [λmin, λmax] in nm. */
+    band_nm?: [number, number] | null;
+    /** Dispersion only: phase (rad) or group_delay (fs). */
+    quantity?: 'phase' | 'group_delay' | null;
 }
 export interface Bench {
     name: string;
@@ -208,6 +229,7 @@ export interface BenchDetectorMap {
 }
 export interface BenchPathBreak extends BenchPort {
     reason: string;
+    detail?: string;
 }
 export interface BenchBranchReport {
     id: string;
@@ -328,13 +350,27 @@ export interface BenchAssertionResult {
     branches: [string, string];
     /** Input endpoint of the second arm, at the comparison element. */
     at: BenchPort;
-    value: number | BenchSeparation | null;
+    value: number | BenchSeparation | BenchDispersion | null;
     unit: BenchAssertionUnit;
     target: number;
     tolerance: number;
     residual: number | null;
     status: 'pass' | 'fail' | 'unreachable';
     break?: BenchPathBreak;
+}
+export interface BenchGlassPass {
+    element: string;
+    material: string;
+    thickness_mm: number;
+    length_mm: number;
+}
+export interface BenchDispersion {
+    /** First branch minus second, in the assertion unit, at wavelength_nm. */
+    difference: number;
+    wavelength_nm: number;
+    /** Upper estimate of max |Δ − target| over the band; the assertion passes only if it is within tolerance. */
+    deviation_bound: number;
+    glass: [BenchGlassPass[], BenchGlassPass[]];
 }
 export interface BenchSeparation {
     position_mm: number;
@@ -538,7 +574,23 @@ export function benchProblems(value: unknown): string[] {
                         (e.scatter.model !== 'lambertian' && e.scatter.model !== 'abg') ||
                         !Number.isInteger(e.scatter.rays) ||
                         e.scatter.rays < 1 ||
-                        e.scatter.rays > 64))
+                        e.scatter.rays > 64)) ||
+                (e.substrate != null &&
+                    (typeof e.substrate.material !== 'string' ||
+                        !e.substrate.material ||
+                        !Number.isFinite(e.substrate.thickness_mm) ||
+                        e.substrate.thickness_mm <= 0 ||
+                        (e.substrate.wedge_deg != null &&
+                            !(Math.abs(e.substrate.wedge_deg) <= 45)) ||
+                        (e.kind === 'splitter' || e.kind === 'pbs'
+                            ? !['front', 'back'].includes(e.substrate.coated_face ?? '')
+                            : e.substrate.coated_face != null))) ||
+                (e.phase != null &&
+                    ((e.phase.radians == null) === (e.phase.waves == null) ||
+                        (e.phase.radians != null && !Number.isFinite(e.phase.radians)) ||
+                        (e.phase.waves != null && !Number.isFinite(e.phase.waves)) ||
+                        !Number.isFinite(e.phase.at_wavelength_nm) ||
+                        e.phase.at_wavelength_nm <= 0))
             )
                 throw Error();
         }
@@ -611,8 +663,13 @@ export function benchProblems(value: unknown): string[] {
                 b.assertions.some(
                     (a) =>
                         typeof a.id !== 'string' ||
-                        !['equal_opl', 'colinear'].includes(a.kind) ||
-                        !['mm', 'um', 'mrad'].includes(a.unit) ||
+                        !['equal_opl', 'colinear', 'dispersion'].includes(a.kind) ||
+                        !['mm', 'um', 'mrad', 'fs', 'rad'].includes(a.unit) ||
+                        (a.band_nm != null &&
+                            (!Array.isArray(a.band_nm) ||
+                                a.band_nm.length !== 2 ||
+                                !a.band_nm.every(Number.isFinite))) ||
+                        (a.quantity != null && !['phase', 'group_delay'].includes(a.quantity)) ||
                         !Number.isFinite(a.target) ||
                         !Number.isFinite(a.tolerance) ||
                         a.tolerance < 0 ||
