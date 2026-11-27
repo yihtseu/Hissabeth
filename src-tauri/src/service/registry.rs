@@ -251,7 +251,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_set,
                 Mutate,
                 None,
-                "Atomically save a free-space bench with fixed rotations and unique downstream connections per output. Omitted element parameters use kind-specific defaults; an omitted or null rotation requires bench_auto_aim before saving. Branches use output from, input to, and optional intermediate output selections via. Requires the current shared project revision."
+                "Atomically save a free-space bench at the current shared project revision. Stage members use fixed reference poses and translate along a unit table-frame axis by position_mm + pzt.value_um/1000. Set travel in mm and the optional PZT range in um. Staged benches return a fresh trace. Other elements with omitted or null rotation require bench_auto_aim before saving. Branches use output from, input to, and optional intermediate output selections via."
             ),
             tool!(
                 bench_trace,
@@ -281,7 +281,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_auto_aim,
                 Mutate,
                 None,
-                "Solve omitted or null element rotations from nominal connections. Explicit rotations remain fixed; source directions are adjustable only with aim_direction=true. Optional hole snapping and uniform Z move elements. Set apply=true with the current revision to save a fully resolved result."
+                "Solve omitted or null element rotations from nominal connections. Explicit rotations remain fixed; source directions are adjustable only with aim_direction=true. Optional hole snapping and uniform Z move elements outside stages. Set apply=true with the current revision to save a fully resolved result."
             ),
             tool!(
                 bench_lab_check,

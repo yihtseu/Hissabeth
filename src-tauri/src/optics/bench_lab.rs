@@ -3,7 +3,7 @@ use super::{
     System,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchReport, Connection,
-        Element, Kind, Mount, PathBreak, Polarization, Port, Trace,
+        Element, Kind, Mount, PathBreak, Polarization, Port, Stage, StagePose, StagePzt, Trace,
     },
     math::{Matrix, V3, add, dot, norm, scale, sub, unit},
 };
@@ -336,6 +336,7 @@ pub(crate) fn catalog_report(query: Option<&str>, kind: Option<&str>) -> Catalog
 
 pub(crate) const TEMPLATES: &[&str] = &[
     "mach_zehnder",
+    "delay_line",
     "michelson",
     "polarized_beam_combiner",
     "beam_expander_focus",
@@ -406,6 +407,24 @@ pub fn template(name: &str) -> Result<Bench, String> {
                     ("BS1", "transmitted", "M2"),
                     ("M1", "reflected", "BS2"),
                     ("M2", "reflected", "BS2"),
+                ],
+            )
+        }
+        "delay_line" => {
+            place("BS1", SPLITTER, at(250., 200.), FOLD);
+            place("M3", MIRROR, at(550., 200.), FOLD);
+            place("M4", MIRROR, at(550., 325.), [1., 1., 0.]);
+            place("BS2", SPLITTER, at(250., 325.), [1., 1., 0.]);
+            place("D1", DETECTOR, at(100., 325.), X);
+            place("D2", DETECTOR, at(250., 500.), Y);
+            (
+                "Two-arm retroreflecting delay line",
+                &[
+                    ("S1", "out", "BS1"),
+                    ("BS1", "reflected", "BS2"),
+                    ("BS1", "transmitted", "M3"),
+                    ("M3", "reflected", "M4"),
+                    ("M4", "reflected", "BS2"),
                 ],
             )
         }
@@ -515,6 +534,31 @@ pub fn template(name: &str) -> Result<Bench, String> {
             tolerance: 1e-6,
         }];
     }
+    if name == "delay_line" {
+        let members = ["M3".into(), "M4".into()];
+        let reference_pose = scene.elements.iter()
+            .filter(|e| members.contains(&e.id))
+            .map(|e| (e.id.clone(), StagePose { position: e.position, rotation: e.rotation() }))
+            .collect();
+        scene.stages.push(Stage {
+            id: "delay".into(),
+            members: members.into(),
+            reference_pose,
+            axis: X,
+            travel: [-12.5, 12.5],
+            position_mm: 0.,
+            pzt: Some(StagePzt { range_um: [-5., 5.], value_um: 0. }),
+        });
+        scene.branches = [
+            ("arm_reference", "reflected", "in_a"),
+            ("arm_delay", "transmitted", "in_b"),
+        ].into_iter().map(|(id, output, input)| Branch {
+            id: id.into(),
+            from: Port::new("BS1", output),
+            to: Port::new("BS2", input),
+            via: vec![],
+        }).collect();
+    }
     scene.validate()?;
     Ok(scene)
 }
@@ -539,12 +583,17 @@ pub(crate) fn aim(
     snap_holes: bool,
     uniform_z: Option<f64>,
 ) -> Result<AimResult, String> {
+    let bench = bench.resolved_stages()?;
     bench.validate_draft()?;
     if uniform_z.is_some_and(|z| !z.is_finite() || z <= 0.) {
         return Err("Uniform Z must be finite and positive".into());
     }
-    let mut scene = bench.clone();
+    let mut scene = bench.as_ref().clone();
+    let stage_members: HashSet<_> = bench.stages.iter().flat_map(|s| &s.members).collect();
     for element in &mut scene.elements {
+        if stage_members.contains(&element.id) {
+            continue;
+        }
         if snap_holes {
             for i in 0..2 {
                 let origin = scene.origin[i];
@@ -758,7 +807,7 @@ fn center_trace(bench: &Bench, system: &System) -> Result<Trace, String> {
         element.scatter = None;
         element.ghosts = 0;
     }
-    center.trace(system)
+    center.trace_resolved(system)
 }
 
 fn envelope<'a>(
@@ -921,6 +970,8 @@ fn envelope<'a>(
 }
 
 pub fn gaussian_envelope(bench: &Bench, system: &System) -> Result<Value, String> {
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
     let trace = center_trace(bench, system)?;
     Ok(json!(envelope(bench, system, &trace)?.report()))
 }
@@ -1098,7 +1149,9 @@ pub fn lab_check(bench: &Bench, system: &System) -> Result<Value, String> {
     serde_json::to_value(check(bench, system)?).map_err(|e| e.to_string())
 }
 pub(crate) fn check(bench: &Bench, system: &System) -> Result<LabCheck, String> {
-    let trace = bench.trace(system)?;
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
+    let trace = bench.trace_resolved(system)?;
     let center = center_trace(bench, system)?;
     let gaussian = envelope(bench, system, &center)?;
     lab_report(bench, &trace, &gaussian)
@@ -1605,6 +1658,8 @@ pub fn alignment_guide(bench: &Bench, system: &System) -> Result<Value, String> 
     serde_json::to_value(alignment(bench, system)?).map_err(|e| e.to_string())
 }
 pub(crate) fn alignment(bench: &Bench, system: &System) -> Result<Guide, String> {
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
     let trace = center_trace(bench, system)?;
     let gaussian = envelope(bench, system, &trace)?;
     guide(bench, &gaussian)
@@ -1981,7 +2036,7 @@ fn markdown_cell(text: &str) -> String {
 
 fn alignment_md(bench: &Bench, system: &System, gaussian: &Envelope<'_>) -> Result<String, String> {
     let guide = guide(bench, gaussian)?;
-    let check = lab_report(bench, &bench.trace(system)?, gaussian)?;
+    let check = lab_report(bench, &bench.trace_resolved(system)?, gaussian)?;
     let mut out = format!("# {} — alignment SOP\n\n", markdown_cell(&bench.name));
     for note in guide.safety_notes {
         writeln!(out, "- {note}").unwrap();
@@ -2105,6 +2160,8 @@ pub(crate) fn export_blueprint_report(
             FORMATS.join(", ")
         ));
     }
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
     let (extension, mime, content) = if format == "stl" {
         bench.validate()?;
         ("stl", "model/stl", stl(bench)?)
@@ -2143,6 +2200,46 @@ mod tests {
 
     fn close(got: f64, expected: f64) {
         assert!((got - expected).abs() < 1e-8, "{got} vs {expected}");
+    }
+
+    #[test]
+    fn delay_stage_opl_follows_parallel_tilted_and_pzt_motion() {
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        let trace = bench.trace(&system).unwrap();
+        let baseline = &trace.branches[1].paths[0];
+        assert_eq!(trace.branches[1].id, "arm_delay");
+        assert!((baseline.opl_mm - 725.).abs() <= 1e-9);
+        assert!((trace.branches[0].paths[0].opl_mm - 125.).abs() <= 1e-9);
+        let theta = std::f64::consts::FRAC_PI_6;
+        for (angle, position, pzt, expected_delay) in [
+            (0., 2.5, 0., 5.),
+            (theta, 2.5, 0., 5. * theta.cos()),
+            (0., 0., 1., 0.002),
+            (0., -2.5, 1., -4.998),
+        ] {
+            let stage = &mut bench.stages[0];
+            // XZ tilt leaves the XY fold planes unchanged except for their X shift.
+            stage.axis = [angle.cos(), 0., angle.sin()];
+            stage.position_mm = position;
+            stage.pzt.as_mut().unwrap().value_um = pzt;
+            let trace = bench.trace(&system).unwrap();
+            let delayed = &trace.branches[1].paths[0];
+            let reference = &trace.branches[0].paths[0];
+            assert!(delayed.nominal_match && reference.nominal_match);
+            let delta = delayed.opl_mm - baseline.opl_mm;
+            assert!((delta - expected_delay).abs() <= 1e-9, "{delta} vs {expected_delay}");
+            assert!((reference.opl_mm - 125.).abs() <= 1e-9);
+            let a = trace.stage_poses["M3"];
+            let b = trace.stage_poses["M4"];
+            assert!(norm(sub(sub(b.position, a.position), [0., 125., 0.])) <= 1e-9);
+            assert_eq!(a.rotation, bench.stages[0].reference_pose["M3"].rotation);
+            assert_eq!(b.rotation, bench.stages[0].reference_pose["M4"].rotation);
+        }
+        let aimed = aim(&bench, true, Some(85.)).unwrap();
+        assert_eq!(aimed.bench.elements[1].position[2], 75.);
+        assert_eq!(aimed.bench.elements[1].position[0], 547.501);
+        assert_eq!(aimed.bench.elements[0].position[2], 85.);
     }
 
     #[test]

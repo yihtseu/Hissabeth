@@ -2161,8 +2161,13 @@ export default {
         exported: 'Exported lab deliverable: {file}',
         toggleTree: 'Elements',
         addConn: 'Add connection',
+        stageTitle: 'Delay stage {stage}',
+        stageMember: 'Pose controlled by delay stage {stage}.',
+        stageControls: { position: 'Position (mm)', pzt: 'PZT (µm)' },
+        stageRangeError: '{stage} · {control} · {value} is outside [{min}, {max}].',
         templates: {
             mach_zehnder: 'Mach-Zehnder',
+            delay_line: 'Two-arm delay line',
             michelson: 'Michelson',
             polarized_beam_combiner: 'PBS + HWP Two-Arm',
             beam_expander_focus: 'Beam Expander + Focus',

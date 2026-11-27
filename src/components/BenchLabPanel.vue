@@ -10,11 +10,25 @@ import {
 } from 'lucide-vue-next';
 import { callTool, errorMessage } from '../api';
 import { tr } from '../i18n';
-import type { Bench, BenchAlignmentGuide, BenchCatalogItem, BenchLabCheck, Vec3 } from '../bench';
+import type {
+    Bench,
+    BenchAlignmentGuide,
+    BenchCatalogItem,
+    BenchLabCheck,
+    BenchStage,
+    Vec3,
+} from '../bench';
+
+interface StageControl {
+    dof: 'position' | 'pzt';
+    value: number;
+    allowed: [number, number];
+}
 
 const props = defineProps<{
     bench: Bench;
     online: boolean;
+    saving: boolean;
     labCheck: BenchLabCheck | null;
     labPending: boolean;
 }>();
@@ -24,7 +38,47 @@ const emit = defineEmits<{
     addFromCatalog: [item: BenchCatalogItem];
     addBeamDump: [position: Vec3, direction: Vec3, branch: string];
     refreshLab: [];
+    setStage: [id: string, dof: StageControl['dof'], value: number];
 }>();
+
+const stageError = ref<{ id: string; dof: StageControl['dof']; message: string }>();
+watch(
+    () => props.bench,
+    () => (stageError.value = undefined),
+);
+
+function stageControls(stage: BenchStage): StageControl[] {
+    const controls: StageControl[] = [
+        { dof: 'position', value: stage.position_mm, allowed: stage.travel },
+    ];
+    if (stage.pzt) {
+        controls.push({ dof: 'pzt', value: stage.pzt.value_um, allowed: stage.pzt.range_um });
+    }
+    return controls;
+}
+
+function editStage(stage: BenchStage, control: StageControl, event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const value = input.valueAsNumber;
+    const [min, max] = control.allowed;
+    if (!Number.isFinite(value) || value < min || value > max) {
+        stageError.value = {
+            id: stage.id,
+            dof: control.dof,
+            message: tr('benchLab.stageRangeError', {
+                stage: stage.id,
+                control: tr(`benchLab.stageControls.${control.dof}`),
+                value: input.value || '—',
+                min,
+                max,
+            }),
+        };
+        input.value = String(control.value);
+        return;
+    }
+    stageError.value = undefined;
+    emit('setStage', stage.id, control.dof, value);
+}
 
 const subtab = ref<'audit' | 'alignment' | 'catalog'>('audit');
 const guide = ref<BenchAlignmentGuide | null>(null);
@@ -93,6 +147,45 @@ const fmt = (n: number | null | undefined, digits = 2) =>
 
 <template>
     <section class="panel lab-panel" aria-label="Lab engineering assistant">
+        <fieldset
+            v-for="stage in bench.stages"
+            :key="stage.id"
+            class="stage-controls"
+            :disabled="!online || saving"
+        >
+            <legend>{{ tr('benchLab.stageTitle', { stage: stage.id }) }}</legend>
+            <small class="note">{{ stage.members.join(', ') }}</small>
+            <div v-for="control in stageControls(stage)" :key="control.dof" class="stage-control">
+                <label>
+                    {{ tr(`benchLab.stageControls.${control.dof}`) }}
+                    <input
+                        type="number"
+                        step="any"
+                        :min="control.allowed[0]"
+                        :max="control.allowed[1]"
+                        :value="control.value"
+                        @change="editStage(stage, control, $event)"
+                    />
+                </label>
+                <input
+                    type="range"
+                    step="any"
+                    :aria-label="tr(`benchLab.stageControls.${control.dof}`)"
+                    :min="control.allowed[0]"
+                    :max="control.allowed[1]"
+                    :value="control.value"
+                    @input="editStage(stage, control, $event)"
+                />
+                <small class="note">{{ control.allowed.join(' … ') }}</small>
+                <p
+                    v-if="stageError?.id === stage.id && stageError.dof === control.dof"
+                    class="json-error"
+                    role="alert"
+                >
+                    {{ stageError.message }}
+                </p>
+            </div>
+        </fieldset>
         <div class="lab-tabs" role="tablist">
             <button
                 type="button"
@@ -506,6 +599,26 @@ const fmt = (n: number | null | undefined, digits = 2) =>
 </template>
 
 <style scoped>
+.stage-controls {
+    margin: 6px 10px 10px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    min-width: 0;
+}
+.stage-control {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 4px 0;
+}
+.stage-control input[type='number'] {
+    width: 7em;
+}
+.stage-control .json-error {
+    flex-basis: 100%;
+    margin: 0;
+}
 .lab-panel {
     margin-top: 10px;
 }

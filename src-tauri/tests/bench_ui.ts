@@ -74,7 +74,47 @@ try {
         window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
     });
     await page.goto(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
-    if(process.argv.includes('--lifecycle')) {
+    if (process.argv.includes('--delay-stage')) {
+        await page.getByLabel('Lab template').selectOption('delay_line');
+        await page.getByRole('button', { name: 'Load template', exact: true }).click();
+        const stage = page.getByRole('group', { name: 'Delay stage delay' });
+        await expect(stage).toBeVisible();
+        const initialStage = await optical('bench_get');
+        await page.locator('.bench-element-list').getByRole('button', { name: /^M3\b/ }).click();
+        const mirrorX = page.locator('.bench-inspector').getByRole('spinbutton', { name: 'X (mm)' });
+        const position = stage.getByRole('spinbutton', { name: 'Position (mm)' });
+        const slider = stage.getByRole('slider', { name: 'Position (mm)' });
+
+        await slider.hover();
+        const box = (await slider.boundingBox())!;
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 6 });
+        await expect(mirrorX).toHaveValue('562.5');
+        await page.mouse.up();
+
+        await position.fill('13');
+        await position.press('Tab');
+        await expect(stage.getByRole('alert')).toHaveText(
+            'delay · Position (mm) · 13 is outside [-12.5, 12.5].',
+        );
+        await expect(mirrorX).toHaveValue('562.5');
+
+        await position.fill('2.5');
+        await position.press('Tab');
+        const pzt = stage.getByRole('spinbutton', { name: 'PZT (µm)' });
+        await pzt.fill('1');
+        await pzt.press('Tab');
+        await expect(mirrorX).toHaveValue('552.501');
+        assert.deepEqual(await optical('bench_get'), initialStage, 'Preview must preserve the saved stage');
+        const save = page.getByRole('button', { name: 'Save bench', exact: true });
+        await save.click();
+        await expect(save).toHaveCount(0);
+        const saved = await optical('bench_trace');
+        const opl = saved.branches.find((branch: { id: string }) => branch.id === 'arm_delay').paths[0].opl_mm;
+        assert(Math.abs(opl - 730.002) <= 1e-9, `Saved delay arm OPL: ${opl}`);
+        assert.deepEqual(errors, []);
+        console.log('PASS: delay stage previews while dragging, rejects overtravel, and saves the traced PZT pose');
+    } else if(process.argv.includes('--lifecycle')) {
         await expect(page.locator('.bench-ledger')).toBeVisible();
         await page.locator('[data-element="G"] .bench-center').click();
         await page.getByRole('button',{name:'Inspect lens group section',exact:true}).click();

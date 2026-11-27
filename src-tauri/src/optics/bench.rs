@@ -4,7 +4,10 @@ use super::math::*;
 use super::{Field, Interaction, System, coating, trace::Launch};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+};
 
 #[path = "bench_paths.rs"]
 mod paths;
@@ -28,6 +31,10 @@ pub struct Bench {
     pub sources: Vec<Source>,
     #[schemars(length(min = 0, max = 384))]
     pub connections: Vec<Connection>,
+    /// Rigid translation stages, evaluated before optical or mechanical analysis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 128))]
+    pub stages: Vec<Stage>,
     /// Named nominal routes through the connection graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 128))]
@@ -40,6 +47,34 @@ pub struct Bench {
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub min_power: f64,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage {
+    pub id: String,
+    #[schemars(length(min = 1, max = 128))]
+    pub members: Vec<String>,
+    /// Zero-displacement positions (mm) and fixed rotations [roll, pitch, yaw] (degrees).
+    pub reference_pose: BTreeMap<String, StagePose>,
+    /// Unit translation vector along the table's X, Y and height axes.
+    pub axis: V3,
+    /// Inclusive coarse limits in mm.
+    pub travel: [f64; 2],
+    pub position_mm: f64,
+    pub pzt: Option<StagePzt>,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagePose {
+    pub position: V3,
+    pub rotation: V3,
+}
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagePzt {
+    /// Inclusive fine adjustment limits in µm.
+    pub range_um: [f64; 2],
+    pub value_um: f64,
 }
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -437,9 +472,110 @@ pub(crate) fn ports(kind: Kind) -> &'static [&'static str] {
 fn valid_vec(v: V3) -> bool {
     v.iter().all(|x| x.is_finite() && x.abs() <= 1e6)
 }
+
+fn check_stage_travel(stage: &str, dof: &str, value: f64, allowed: [f64; 2]) -> Result<(), String> {
+    let [min, max] = allowed;
+    if !min.is_finite() || !max.is_finite() || min > max {
+        return Err(format!("Stage {stage:?}: invalid {dof} travel range {allowed:?}"));
+    }
+    if !(min..=max).contains(&value) {
+        return Err(format!(
+            "Stage travel exceeded: {}",
+            json!({ "stage": stage, "dof": dof, "value": value, "allowed": allowed })
+        ));
+    }
+    Ok(())
+}
+
 impl Bench {
+    fn stage_poses(&self) -> Result<BTreeMap<String, StagePose>, String> {
+        if self.stages.len() > 128 {
+            return Err("Bench stage budget exceeded".into());
+        }
+        let mut ids = HashSet::new();
+        let mut poses = BTreeMap::new();
+        for stage in &self.stages {
+            let id = &stage.id;
+            if id.is_empty() || id.len() > 64 || !ids.insert(id) {
+                return Err(format!("Invalid or repeated stage ID: {id:?}"));
+            }
+            if !valid_vec(stage.axis) || (norm(stage.axis) - 1.).abs() > 1e-9 {
+                return Err(format!("Stage {id:?}: axis must be a unit vector"));
+            }
+            if stage.members.is_empty() || stage.members.len() > 128
+                || stage.reference_pose.len() != stage.members.len()
+            {
+                return Err(format!("Stage {id:?}: reference_pose must match the member list"));
+            }
+            check_stage_travel(id, "position", stage.position_mm, stage.travel)?;
+            let mut displacement = stage.position_mm;
+            if let Some(pzt) = &stage.pzt {
+                check_stage_travel(id, "pzt", pzt.value_um, pzt.range_um)?;
+                displacement += pzt.value_um / 1000.;
+            }
+            let offset = scale(stage.axis, displacement);
+            let mut members = HashSet::new();
+            for member in &stage.members {
+                if !members.insert(member) {
+                    return Err(format!("Stage {id:?}: repeated member {member:?}"));
+                }
+                if !self.elements.iter().any(|e| &e.id == member) {
+                    return Err(format!("Stage {id:?}: unknown element {member:?}"));
+                }
+                let reference = stage.reference_pose.get(member).ok_or_else(|| {
+                    format!("Stage {id:?}: missing reference pose for {member:?}")
+                })?;
+                let position = add(reference.position, offset);
+                if !valid_vec(reference.position)
+                    || !valid_vec(reference.rotation)
+                    || !valid_vec(position)
+                {
+                    return Err(format!("Stage {id:?}: invalid pose for {member:?}"));
+                }
+                let pose = StagePose { position, rotation: reference.rotation };
+                if poses.insert(member.clone(), pose).is_some() {
+                    return Err(format!("Stage {id:?}: {member:?} belongs to more than one stage"));
+                }
+            }
+        }
+        Ok(poses)
+    }
+
+    fn apply_stage_poses(&mut self, poses: &BTreeMap<String, StagePose>) {
+        for element in &mut self.elements {
+            if let Some(pose) = poses.get(&element.id) {
+                element.position = pose.position;
+                element.rotation = Some(pose.rotation);
+            }
+        }
+    }
+
+    fn with_stage_poses(&self, poses: &BTreeMap<String, StagePose>) -> Cow<'_, Self> {
+        if !poses.is_empty() && self.elements.iter().any(|e| {
+            poses.get(&e.id).is_some_and(|p| e.position != p.position || e.rotation != Some(p.rotation))
+        }) {
+            let mut resolved = self.clone();
+            resolved.apply_stage_poses(poses);
+            Cow::Owned(resolved)
+        } else {
+            Cow::Borrowed(self)
+        }
+    }
+
+    pub(crate) fn resolved_stages(&self) -> Result<Cow<'_, Self>, String> {
+        Ok(self.with_stage_poses(&self.stage_poses()?))
+    }
+
+    pub(crate) fn resolve_stages(&mut self) -> Result<(), String> {
+        let poses = self.stage_poses()?;
+        if !poses.is_empty() {
+            self.apply_stage_poses(&poses);
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        self.validated_paths().map(|_| ())
+        self.resolved_stages()?.validated_paths().map(|_| ())
     }
 
     fn validated_paths(&self) -> Result<NominalPaths<'_>, String> {
@@ -679,6 +815,9 @@ pub struct DetectorMap {
 pub struct Trace {
     pub segments: Vec<Segment>,
     pub branches: Vec<BranchReport>,
+    /// Table-frame poses used by this trace, keyed by stage member ID.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub stage_poses: BTreeMap<String, StagePose>,
     pub terminations: Vec<Termination>,
     pub power: Ledger,
     pub detectors: Vec<DetectorMap>,
@@ -1208,6 +1347,13 @@ impl Bench {
     }
 
     pub fn trace(&self, system: &System) -> Result<Trace, String> {
+        let poses = self.stage_poses()?;
+        let mut trace = self.with_stage_poses(&poses).trace_resolved(system)?;
+        trace.stage_poses = poses;
+        Ok(trace)
+    }
+
+    pub(super) fn trace_resolved(&self, system: &System) -> Result<Trace, String> {
         let nominal = self.validated_paths()?;
         self.validate_groups(system)?;
         let mut paths = PathIndex::default();
@@ -1215,6 +1361,7 @@ impl Bench {
         let mut out = Trace {
             segments: vec![],
             branches: vec![],
+            stage_poses: BTreeMap::new(),
             terminations: vec![],
             power: Ledger::default(),
             detectors: vec![],
@@ -1655,7 +1802,10 @@ impl Bench {
         Ok(out)
     }
     pub fn assembly(&self) -> Value {
-        json!(self.assembly_report())
+        match self.resolved_stages() {
+            Ok(bench) => json!(bench.assembly_report()),
+            Err(error) => json!({ "error": error }),
+        }
     }
     pub(crate) fn assembly_report(&self) -> Assembly {
         let mut warnings = vec![];
@@ -1899,6 +2049,7 @@ pub fn example() -> Bench {
                 to: "D1".into(),
             },
         ],
+        stages: vec![],
         branches: vec![],
         assertions: vec![],
         max_interactions: 32,

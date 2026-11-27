@@ -296,12 +296,27 @@ pub(super) fn bench_example(
     })
 }
 
-pub(super) fn bench_set(target: Target<'_>, args: p::BenchSet) -> Result<Revision, String> {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(super) struct BenchSetResult {
+    revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace: Option<bench::Trace>,
+}
+
+pub(super) fn bench_set(target: Target<'_>, args: p::BenchSet) -> Result<BenchSetResult, String> {
     target.edit(args.revision, |e| {
-        args.bench.validate()?;
+        let mut bench = args.bench;
+        bench.resolve_stages()?;
+        let trace = if bench.stages.is_empty() {
+            bench.validate()?;
+            None
+        } else {
+            Some(bench.trace(&e.system)?)
+        };
         let mut next = e.system.clone();
-        next.bench = Some(args.bench);
-        e.commit_with_action(next, args.revision, "bench_set")
+        next.bench = Some(bench);
+        let revision = e.commit_with_action(next, args.revision, "bench_set")?.revision;
+        Ok(BenchSetResult { revision, trace })
     })
 }
 
@@ -317,6 +332,7 @@ pub(super) fn bench_assembly(
     args: p::BenchDraft,
 ) -> Result<BenchReport<bench::Assembly>, String> {
     bench_report(target, args.bench, |b, _| {
+        let b = b.resolved_stages()?;
         b.validate()?;
         Ok(b.assembly_report())
     })

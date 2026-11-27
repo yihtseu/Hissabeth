@@ -752,6 +752,60 @@ mod tests {
     }
 
     #[test]
+    fn bench_stage_drafts_and_saves_use_reference_poses_and_reject_invalid_travel() {
+        let mut e = engine("bench-stage");
+        let mut scene = e.call("bench_template", json!({"name":"delay_line"})).unwrap()["bench"].clone();
+        let revision = e.revision;
+        scene["stages"][0]["position_mm"] = json!(2.5);
+        scene["stages"][0]["pzt"]["value_um"] = json!(1.);
+        scene["elements"][1]["position"] = json!([1., 2., 3.]);
+        scene["elements"][1]["rotation"] = Value::Null;
+        let preview = e.call("bench_trace", json!({"bench":scene})).unwrap();
+        let positions = &preview["stage_poses"];
+        let delayed = &preview["branches"][1]["paths"][0];
+        assert_eq!(preview["saved"], false);
+        assert!((delayed["opl_mm"].as_f64().unwrap() - 730.002).abs() <= 1e-9);
+        assert_eq!(positions["M3"]["position"], json!([552.501, 200., 75.]));
+        assert_eq!(positions["M4"]["position"], json!([552.501, 325., 75.]));
+        assert!(e.system.bench.is_none());
+
+        let assembly = e.call("bench_assembly", json!({"bench":scene})).unwrap();
+        assert_eq!(assembly["items"][1]["position"], positions["M3"]["position"]);
+        let saved = e.call("bench_set", json!({"bench":scene,"revision":revision})).unwrap();
+        assert_eq!(saved["trace"]["stage_poses"], *positions);
+        assert_eq!(&saved["trace"]["branches"][1]["paths"][0], delayed);
+        let persisted = e.call("bench_get", json!({})).unwrap();
+        assert_eq!(persisted["bench"]["elements"][1]["position"], positions["M3"]["position"]);
+        assert_eq!(persisted["bench"]["elements"][1]["rotation"], positions["M3"]["rotation"]);
+        assert_eq!(persisted["bench"]["stages"], scene["stages"]);
+        let mut project = serde_json::to_value(&e.system).unwrap();
+        project["bench"] = scene.clone();
+        let validated = e.call("system_validate", json!({"system":project})).unwrap();
+        assert_eq!(validated["system"]["bench"], persisted["bench"]);
+
+        for (dof, value, allowed) in [
+            ("position", 12.51, [-12.5, 12.5]),
+            ("pzt", -5.01, [-5., 5.]),
+        ] {
+            let mut invalid = scene.clone();
+            if dof == "position" {
+                invalid["stages"][0]["position_mm"] = json!(value);
+            } else {
+                invalid["stages"][0]["pzt"]["value_um"] = json!(value);
+            }
+            let error = e.call("bench_set", json!({"bench":invalid,"revision":e.revision})).unwrap_err();
+            let detail: Value = serde_json::from_str(error.strip_prefix("Stage travel exceeded: ").unwrap()).unwrap();
+            assert_eq!(detail, json!({"stage":"delay","dof":dof,"value":value,"allowed":allowed}));
+        }
+        let mut second = scene["stages"][0].clone();
+        second["id"] = json!("second");
+        scene["stages"].as_array_mut().unwrap().push(second);
+        let error = e.call("bench_set", json!({"bench":scene,"revision":e.revision})).unwrap_err();
+        assert_eq!(error, "Stage \"second\": \"M3\" belongs to more than one stage");
+        assert_eq!(e.call("bench_get", json!({})).unwrap(), persisted);
+    }
+
+    #[test]
     fn bench_transaction_preview_roundtrip_and_restart() {
         let mut e = engine("bench-transaction");
         let revision = e.revision;

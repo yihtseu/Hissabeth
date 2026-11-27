@@ -85,6 +85,9 @@ const allEntities = computed(() => [
     ...(scene.value?.sources ?? []),
 ]);
 const entity = computed(() => allEntities.value.find((e) => e.id === selected.value));
+const selectedStage = computed(() =>
+    scene.value?.stages?.find((stage) => stage.members.includes(selected.value)),
+);
 /** Referenced sequential prescription summary for the selected lens group. */
 const groupSummary = computed(() => {
     const e = entity.value;
@@ -123,6 +126,7 @@ let alive = true;
 
 const TEMPLATES = [
     'mach_zehnder',
+    'delay_line',
     'michelson',
     'polarized_beam_combiner',
     'beam_expander_focus',
@@ -132,6 +136,18 @@ const TEMPLATES = [
 const canCommit = computed(
     () => props.online && !props.busy && !props.stale && !props.refreshPending && !saving.value,
 );
+
+function applyStagePoses(bench: Bench, poses: BenchTrace['stage_poses']): void {
+    if (!poses) return;
+    const elements = new Map(bench.elements.map((element) => [element.id, element]));
+    for (const [id, pose] of Object.entries(poses)) {
+        const element = elements.get(id);
+        if (element) {
+            element.position = pose.position;
+            element.rotation = pose.rotation;
+        }
+    }
+}
 
 async function run(): Promise<void> {
     const request = ++token;
@@ -150,9 +166,11 @@ async function run(): Promise<void> {
             alive &&
             request === token &&
             props.online &&
+            active === scene.value &&
             revision === props.revision &&
             result.revision === revision
         ) {
+            if (active === draft.value) applyStagePoses(active, result.stage_poses);
             trace.value = result;
         }
     } catch (e) {
@@ -185,10 +203,17 @@ async function runLabCheck(): Promise<void> {
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-function schedulePreview(): void {
+let stagePreviewTimer: ReturnType<typeof setTimeout> | undefined;
+function schedulePreview(stageMotion = false): void {
+    if (stageMotion && stagePreviewTimer === undefined) {
+        stagePreviewTimer = setTimeout(() => {
+            stagePreviewTimer = undefined;
+            void run();
+        }, 40);
+    }
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-        void run();
+        if (!stageMotion) void run();
         void runLabCheck();
     }, 120);
 }
@@ -209,11 +234,21 @@ onBeforeUnmount(() => {
     token++;
     labToken++;
     clearTimeout(debounceTimer);
+    clearTimeout(stagePreviewTimer);
 });
 
 function ensureDraft(): Bench | null {
     if (!draft.value && props.system.bench) draft.value = clone(props.system.bench);
     return draft.value;
+}
+
+function setStagePosition(id: string, dof: 'position' | 'pzt', value: number): void {
+    if (saving.value) return;
+    const stage = ensureDraft()?.stages?.find((candidate) => candidate.id === id);
+    if (!stage) return;
+    if (dof === 'position') stage.position_mm = value;
+    else if (stage.pzt) stage.pzt.value_um = value;
+    schedulePreview(true);
 }
 
 async function loadTemplate(name: string): Promise<void> {
@@ -262,10 +297,16 @@ async function saveBench(): Promise<void> {
     error.value = '';
     statusMsg.value = '';
     try {
+        const active = draft.value;
         const next = clone(draft.value);
-        const ok = await props.mutate((rev) =>
-            callTool('bench_set', { bench: next, revision: rev }),
-        );
+        const ok = await props.mutate(async (rev) => {
+            const saved = await callTool('bench_set', { bench: next, revision: rev });
+            if (saved.trace && active === draft.value) {
+                token++;
+                pending.value = false;
+                applyStagePoses(active, saved.trace.stage_poses);
+            }
+        });
         if (ok) statusMsg.value = tr('benchLab.saved');
     } catch (e) {
         error.value = errorMessage(e);
@@ -364,7 +405,7 @@ function addBeamDumpAt(position: Vec3, direction: Vec3, branchName: string): voi
 
 function deleteSelectedElement(): void {
     const b = ensureDraft();
-    if (!b || !selected.value) return;
+    if (!b || !selected.value || selectedStage.value) return;
     const idx = b.elements.findIndex((e) => e.id === selected.value);
     if (idx < 0) return;
     const removedId = b.elements[idx]!.id;
@@ -376,7 +417,7 @@ function deleteSelectedElement(): void {
 
 function snapSelectedToHole(): void {
     const b = ensureDraft();
-    if (!b || !selected.value) return;
+    if (!b || !selected.value || selectedStage.value) return;
     const target =
         b.elements.find((e) => e.id === selected.value) ??
         b.sources.find((s) => s.id === selected.value);
@@ -631,7 +672,7 @@ let dragging: {
 
 function beginDragEntity(event: PointerEvent, id: string, pos: Vec3): void {
     selected.value = id;
-    if (props.mode !== '2d' || event.button !== 0) return;
+    if (props.mode !== '2d' || event.button !== 0 || selectedStage.value) return;
     dragging = {
         id,
         startClientX: event.clientX,
@@ -1138,7 +1179,7 @@ defineExpose({ saveBench, discardBench });
                     <div class="panel-head flush">
                         <strong>{{ entity ? selected : tr('bench.selection') }}</strong>
                         <button
-                            v-if="entity && 'kind' in entity"
+                            v-if="entity && 'kind' in entity && !selectedStage"
                             type="button"
                             class="small"
                             :aria-label="tr('bench.remove')"
@@ -1148,11 +1189,15 @@ defineExpose({ saveBench, discardBench });
                         </button>
                     </div>
                     <template v-if="entity">
+                        <p v-if="selectedStage" class="note">
+                            {{ tr('benchLab.stageMember', { stage: selectedStage.id }) }}
+                        </p>
                         <label>
                             X (mm)
                             <input
                                 type="number"
                                 step="1"
+                                :readonly="!!selectedStage"
                                 :value="entity.position[0]"
                                 @change="
                                     entity.position[0] = Number(
@@ -1167,6 +1212,7 @@ defineExpose({ saveBench, discardBench });
                             <input
                                 type="number"
                                 step="1"
+                                :readonly="!!selectedStage"
                                 :value="entity.position[1]"
                                 @change="
                                     entity.position[1] = Number(
@@ -1181,6 +1227,7 @@ defineExpose({ saveBench, discardBench });
                             <input
                                 type="number"
                                 step="1"
+                                :readonly="!!selectedStage"
                                 :value="entity.position[2]"
                                 @change="
                                     entity.position[2] = Number(
@@ -1190,7 +1237,12 @@ defineExpose({ saveBench, discardBench });
                                 "
                             />
                         </label>
-                        <button type="button" class="small" @click="snapSelectedToHole">
+                        <button
+                            v-if="!selectedStage"
+                            type="button"
+                            class="small"
+                            @click="snapSelectedToHole"
+                        >
                             <Grid3x3 :size="12" /> {{ tr('benchLab.snapSelected') }}
                         </button>
 
@@ -1203,6 +1255,7 @@ defineExpose({ saveBench, discardBench });
                                 {{ tr('bench.autoRotation') }}
                                 <input
                                     type="checkbox"
+                                    :disabled="!!selectedStage"
                                     :checked="entity.rotation == null"
                                     @change="
                                         entity.rotation = ($event.target as HTMLInputElement)
@@ -1219,6 +1272,7 @@ defineExpose({ saveBench, discardBench });
                                     <input
                                         type="number"
                                         step="1"
+                                        :readonly="!!selectedStage"
                                         :value="entity.rotation[0]"
                                         @change="setRotation(entity, 0, $event)"
                                     />
@@ -1228,6 +1282,7 @@ defineExpose({ saveBench, discardBench });
                                     <input
                                         type="number"
                                         step="1"
+                                        :readonly="!!selectedStage"
                                         :value="entity.rotation[1]"
                                         @change="setRotation(entity, 1, $event)"
                                     />
@@ -1237,6 +1292,7 @@ defineExpose({ saveBench, discardBench });
                                     <input
                                         type="number"
                                         step="1"
+                                        :readonly="!!selectedStage"
                                         :value="entity.rotation[2]"
                                         @change="setRotation(entity, 2, $event)"
                                     />
@@ -1469,12 +1525,14 @@ defineExpose({ saveBench, discardBench });
             <BenchLabPanel
                 :bench="scene"
                 :online="online"
+                :saving="saving"
                 :lab-check="labCheck"
                 :lab-pending="labPending"
                 @select="selected = $event"
                 @add-from-catalog="addFromCatalog"
                 @add-beam-dump="addBeamDumpAt"
                 @refresh-lab="runLabCheck"
+                @set-stage="setStagePosition"
             />
 
             <details v-if="failures.length" style="margin-top: 8px">

@@ -100,6 +100,20 @@ export interface BenchConnection {
     port: string;
     to: string;
 }
+export interface BenchStagePose {
+    position: Vec3;
+    rotation: Vec3;
+}
+export interface BenchStage {
+    id: string;
+    members: string[];
+    reference_pose: Record<string, BenchStagePose>;
+    /** Unit direction in table X, Y and height coordinates. */
+    axis: Vec3;
+    travel: [number, number];
+    position_mm: number;
+    pzt?: { range_um: [number, number]; value_um: number } | null;
+}
 export interface BenchPort {
     element: string;
     port: string;
@@ -131,6 +145,7 @@ export interface Bench {
     elements: BenchElement[];
     sources: BenchSource[];
     connections: BenchConnection[];
+    stages?: BenchStage[];
     branches?: BenchBranch[];
     assertions?: BenchAssertion[];
     max_interactions: number;
@@ -194,6 +209,7 @@ export interface BenchTrace {
     saved: boolean;
     segments: BenchSegment[];
     branches: BenchBranchReport[];
+    stage_poses?: Record<string, BenchStagePose>;
     terminations: {
         source: string;
         branch: string;
@@ -484,6 +500,32 @@ export function benchProblems(value: unknown): string[] {
                 typeof c.port !== 'string'
             )
                 throw Error();
+        if (
+            b.stages !== undefined &&
+            (!Array.isArray(b.stages) ||
+                b.stages.length > 128 ||
+                b.stages.some(
+                    (stage) =>
+                        typeof stage.id !== 'string' ||
+                        !vector(stage.axis) ||
+                        !vector(stage.travel, 2) ||
+                        !Number.isFinite(stage.position_mm) ||
+                        !Array.isArray(stage.members) ||
+                        stage.members.length < 1 ||
+                        stage.members.length > 128 ||
+                        stage.members.some((member) => typeof member !== 'string') ||
+                        !stage.reference_pose ||
+                        typeof stage.reference_pose !== 'object' ||
+                        Array.isArray(stage.reference_pose) ||
+                        Object.values(stage.reference_pose).some(
+                            (pose) => !vector(pose.position) || !vector(pose.rotation),
+                        ) ||
+                        (stage.pzt != null &&
+                            (!vector(stage.pzt.range_um, 2) ||
+                                !Number.isFinite(stage.pzt.value_um))),
+                ))
+        )
+            throw Error();
         const isPort = (p: BenchPort): boolean =>
             typeof p.element === 'string' && typeof p.port === 'string';
         if (

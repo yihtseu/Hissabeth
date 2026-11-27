@@ -2087,8 +2087,13 @@ export default {
         exported: '已导出实验室交付物：{file}',
         toggleTree: '元件列表',
         addConn: '添加连接',
+        stageTitle: '延迟台 {stage}',
+        stageMember: '位姿由延迟台 {stage} 控制。',
+        stageControls: { position: '台位（mm）', pzt: 'PZT（µm）' },
+        stageRangeError: '{stage} · {control} · {value} 超出行程 [{min}, {max}]。',
         templates: {
             mach_zehnder: '马赫-曾德尔干涉仪',
+            delay_line: '双臂延迟线',
             michelson: '迈克尔逊干涉仪',
             polarized_beam_combiner: 'PBS + 半波片双臂分光',
             beam_expander_focus: '扩束准直 + 折转聚焦',

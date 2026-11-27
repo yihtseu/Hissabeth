@@ -99,7 +99,10 @@ interface ToolMap {
     };
     bench_set: {
         args: { bench: import('./bench').BenchInput; revision: number };
-        result: { revision: number };
+        result: {
+            revision: number;
+            trace?: Omit<import('./bench').BenchTrace, 'revision' | 'saved'>;
+        };
     };
     bench_trace: {
         args: { bench?: import('./bench').BenchInput };

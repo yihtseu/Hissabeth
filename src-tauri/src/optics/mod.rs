@@ -516,8 +516,11 @@ impl System {
         Ok(if reflections % 2 == 0 { index } else { -index })
     }
     pub fn update(&mut self) -> Result<(), String> {
-        self.validate_parameters()?;
         let mut resolved = self.clone();
+        if let Some(bench) = &mut resolved.bench {
+            bench.resolve_stages()?;
+        }
+        resolved.validate_parameters()?;
         solve::recalculate(&mut resolved)?;
         resolved.validate()?;
         resolved.update_semi_diameters()?;
