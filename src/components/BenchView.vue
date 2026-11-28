@@ -30,6 +30,7 @@ import {
     type BenchPolarization,
     type BenchTrace,
     type Vec3,
+    type BlueprintFormat,
 } from '../bench';
 import { profileCurve } from '../profile';
 import { canonicalJson, clone } from '../validation';
@@ -193,7 +194,9 @@ const hoverCoord = ref<{ x: number; y: number; col: number; row: number } | null
 const connPort = ref('reflected');
 const connTo = ref('');
 const templateChoice = ref('mach_zehnder');
-const exportFormat = ref<'svg' | 'dxf' | 'stl' | 'alignment_md' | 'csv'>('svg');
+const exportFormat = ref<BlueprintFormat | 'csv'>('svg');
+/** PNG resolution in pixels per drawing millimetre (4 px/mm ≈ 102 dpi). */
+const exportPxPerMm = ref(4);
 
 const svg = ref<SVGSVGElement>();
 const yaw = ref(-25);
@@ -1132,17 +1135,23 @@ async function exportDeliverable(): Promise<void> {
             return;
         }
         const format = exportFormat.value;
+        const params = {
+            ...(benchDirty.value ? { bench: input.bench } : {}),
+            ...(format === 'png' ? { px_per_mm: exportPxPerMm.value } : {}),
+        };
         const { id } = await callTool('artifact_start', {
             kind: 'blueprint',
             format,
-            ...(benchDirty.value ? { params: { bench: input.bench } } : {}),
+            ...(Object.keys(params).length ? { params } : {}),
         });
         const status = await settleArtifact(id);
         if (status.state !== 'done') {
             error.value = status.error ?? status.state;
             return;
         }
-        if (format === 'svg' && (input !== labInput.value || status.revision !== input.revision)) {
+        // Drawings carry their revision in the title block; refuse one that no longer matches.
+        const drawing = format === 'svg' || format === 'pdf' || format === 'png';
+        if (drawing && (input !== labInput.value || status.revision !== input.revision)) {
             error.value = tr('benchLab.revisionChanged');
             return;
         }
@@ -1238,11 +1247,24 @@ defineExpose({ saveBench, discardBench });
 
                 <select v-model="exportFormat" aria-label="Export format">
                     <option value="svg">Blueprint SVG (1:1)</option>
+                    <option value="pdf">Blueprint PDF (print at 100%)</option>
+                    <option value="png">Blueprint PNG</option>
                     <option value="dxf">AutoCAD DXF</option>
                     <option value="stl">3D CAD STL</option>
                     <option value="alignment_md">Lab SOP (Markdown)</option>
                     <option value="csv">Coordinates CSV</option>
                 </select>
+                <label v-if="exportFormat === 'png'" class="export-resolution">
+                    <input
+                        v-model.number="exportPxPerMm"
+                        type="number"
+                        min="0.5"
+                        max="40"
+                        step="0.5"
+                        aria-label="PNG resolution (px/mm)"
+                    />
+                    px/mm
+                </label>
                 <button type="button" :disabled="!online" @click="exportDeliverable">
                     <Download :size="13" /> {{ tr('benchLab.export') }}
                 </button>
@@ -2178,6 +2200,15 @@ defineExpose({ saveBench, discardBench });
     font-variant-numeric: tabular-nums;
     pointer-events: none;
     box-shadow: var(--shadow-sm);
+}
+.export-resolution {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+}
+.export-resolution input {
+    width: 4.5em;
 }
 .plan-holes,
 .bench-holes circle {

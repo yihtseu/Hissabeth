@@ -27,6 +27,10 @@ tauri = { version = "2", features = [], optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# Blueprint PNG and vector PDF from the millimetre SVG; svg2pdf 0.13 and resvg
+# 0.45 share usvg 0.45. Text is converted with the system fonts.
+svg2pdf = { version = "0.13", default-features = false, features = ["text"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 tauri-plugin-store = { version = "2.5", optional = true }
 tauri-plugin-dialog = { version = "2.8", optional = true }
 tauri-plugin-fs = { version = "2.7", optional = true }

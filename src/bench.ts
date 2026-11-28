@@ -653,13 +653,17 @@ export interface BenchAlignmentGuide {
     }[];
     safety_notes: string[];
 }
+/** Blueprint file formats of bench_export_blueprint and artifact_start. */
+export type BlueprintFormat = 'svg' | 'pdf' | 'png' | 'dxf' | 'stl' | 'alignment_md';
 export interface BenchBlueprintExport {
     revision: number;
     saved: boolean;
-    format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
+    format: BlueprintFormat;
     filename: string;
     mime: string;
+    /** Text, or standard base64 when `encoding` is base64 (pdf, png). */
     content: string;
+    encoding?: 'base64';
 }
 export type ArtifactState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 /** A background deliverable job; see artifact_start. */

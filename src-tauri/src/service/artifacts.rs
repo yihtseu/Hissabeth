@@ -343,19 +343,7 @@ fn spawn(
     Ok(())
 }
 
-/// Standard base64 with padding.
-pub(super) fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
-        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            out.push(if i <= chunk.len() { ALPHABET[(n >> shift & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
-}
+pub(super) use crate::optics::blueprint_render::base64;
 
 #[cfg(test)]
 pub(super) mod tests {
@@ -378,14 +366,6 @@ pub(super) mod tests {
         Output { filename: "a.bin".into(), mime: "application/octet-stream".into(), bytes: vec![7; bytes] }
     }
 
-    #[test]
-    fn base64_matches_the_rfc_4648_vectors() {
-        for (plain, encoded) in
-            [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")]
-        {
-            assert_eq!(base64(plain.as_bytes()), encoded);
-        }
-    }
 
     #[test]
     fn finished_artifacts_are_evicted_oldest_first_past_the_total_limit() {
@@ -636,6 +616,44 @@ pub(super) mod tests {
             // Artifacts belong to the session, not to batches.
             let batch = dispatch(&Caller::Gui, &w, "batch", json!({"steps":[{"command":"artifact_status","args":{"id":"artifact-1"}}]}), None).unwrap();
             assert!(batch["failed"]["error"].as_str().unwrap().contains("not allowed inside a batch"), "{batch}");
+        }
+
+        #[test]
+        fn blueprint_png_and_pdf_reach_the_app_and_mcp_with_filename_and_type() {
+            let (_dir, w) = workspace();
+            michelson(&w);
+            // PNG: MCP image content equal to the direct export of the same revision.
+            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":2}})))["id"].clone();
+            let status = wait(&w, id.as_str().unwrap());
+            assert_eq!((status["state"].as_str(), status["mime"].as_str(), status["filename"].as_str()), (Some("done"), Some("image/png"), Some("hissabeth-bench.png")), "{status}");
+            let fetched = mcp(&w, "artifact_fetch", json!({"id": id}));
+            let image = &fetched["content"][1];
+            assert_eq!((image["type"].as_str(), image["mimeType"].as_str()), (Some("image"), Some("image/png")));
+            let direct = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"png","px_per_mm":2}), None).unwrap();
+            assert_eq!((direct["encoding"].as_str(), direct["mime"].as_str(), direct["filename"].as_str()), (Some("base64"), Some("image/png"), Some("hissabeth-bench.png")));
+            assert_eq!(image["data"], direct["content"]);
+            assert!(direct["content"].as_str().unwrap().starts_with("iVBORw0KGgo"), "PNG signature");
+            // PDF: an embedded base64 blob resource for MCP, base64 data for the app.
+            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"pdf"})))["id"].clone();
+            let status = wait(&w, id.as_str().unwrap());
+            assert_eq!((status["mime"].as_str(), status["filename"].as_str()), (Some("application/pdf"), Some("hissabeth-bench.pdf")), "{status}");
+            let resource = &mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["resource"];
+            assert_eq!((resource["mimeType"].as_str(), resource.get("text")), (Some("application/pdf"), None));
+            assert!(resource["blob"].as_str().unwrap().starts_with("JVBERi0"), "%PDF- header");
+            let app = dispatch(&Caller::Gui, &w, "artifact_fetch", json!({"id": id}), None).unwrap();
+            assert_eq!((app["encoding"].as_str(), &app["data"]), (Some("base64"), &resource["blob"]));
+            // Text formats keep plain content; px_per_mm is only for png.
+            let svg = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"svg"}), None).unwrap();
+            assert!(svg.get("encoding").is_none());
+            let refused = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf","px_per_mm":2}), None).unwrap_err();
+            assert!(refused.contains("px_per_mm applies only to png"), "{refused}");
+            let outside = mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":400}}));
+            assert!(outside["content"][0]["text"].as_str().unwrap().contains("Value outside range at arguments.params.px_per_mm"), "{outside}");
+            // In range but too many pixels: the job fails and says why.
+            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":40}})))["id"].clone();
+            let status = wait(&w, id.as_str().unwrap());
+            assert_eq!(status["state"], "failed");
+            assert!(status["error"].as_str().unwrap().contains("MP limit; lower px_per_mm"), "{status}");
         }
 
         #[test]

@@ -331,13 +331,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_export_blueprint,
                 Read,
                 None,
-                "Return a lab blueprint or alignment SOP with its filename, MIME type and text content. SVG shows the project revision, stage readings, branch OPL, assertion results and highlighted stage-controlled arms."
+                "Return a lab blueprint or alignment SOP with its filename, MIME type and content: text, or base64 with encoding base64 for pdf and png. SVG and PDF share one millimetre drawing; the PDF page is its physical size, so printing at 100% keeps hole pitch and rulers 1:1. PNG is rasterised at px_per_mm (default 4). The drawing shows the project revision, stage readings, branch OPL, assertion results and highlighted stage-controlled arms. Prefer artifact_start for pdf and png."
             ),
             tool!(
                 Meta, artifact_start,
                 Read,
                 None,
-                "Start generating a deliverable on a background thread and return its id at once. kind blueprint takes the bench blueprint formats of bench_export_blueprint; params.bench optionally supplies an unsaved bench draft. Poll artifact_status, then artifact_fetch or artifact_export. Artifacts live for this session only: one may hold 16 MB, and the oldest finished ones are evicted once all exceed 64 MB."
+                "Start generating a deliverable on a background thread and return its id at once. kind blueprint takes the bench blueprint formats of bench_export_blueprint; params.bench optionally supplies an unsaved bench draft; params.px_per_mm sets the png resolution. Poll artifact_status, then artifact_fetch or artifact_export. Artifacts live for this session only: one may hold 16 MB, and the oldest finished ones are evicted once all exceed 64 MB."
             ),
             tool!(
                 Meta, artifact_status,

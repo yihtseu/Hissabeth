@@ -163,6 +163,11 @@ pub(super) struct BenchExportBlueprint {
     pub bench: Option<bench::Bench>,
     #[schemars(extend("enum" = bench_lab::FORMATS))]
     pub format: String,
+    /// PNG resolution in pixels per millimetre of drawing (default 4, at most
+    /// 40); each side is rounded to the nearest pixel. Only for png.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 40.0))]
+    pub px_per_mm: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -182,6 +187,11 @@ pub(super) struct ArtifactParams {
     #[schemars(default, with = "bench::Bench")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bench: Option<bench::Bench>,
+    /// PNG resolution in pixels per millimetre of drawing (default 4, at most
+    /// 40); each side is rounded to the nearest pixel. Only for png.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 40.0))]
+    pub px_per_mm: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]

@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod aperture;
 pub mod bench;
 pub mod bench_lab;
+pub(crate) mod blueprint_render;
 pub mod coating;
 pub mod coord;
 pub mod editing;

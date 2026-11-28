@@ -174,7 +174,9 @@ interface ToolMap {
     bench_export_blueprint: {
         args: {
             bench?: import('./bench').BenchInput;
-            format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
+            format: import('./bench').BlueprintFormat;
+            /** PNG pixels per drawing millimetre; png only. */
+            px_per_mm?: number;
         };
         result: import('./bench').BenchBlueprintExport;
     };
@@ -182,8 +184,8 @@ interface ToolMap {
     artifact_start: {
         args: {
             kind: 'blueprint';
-            format: 'svg' | 'dxf' | 'stl' | 'alignment_md';
-            params?: { bench?: import('./bench').BenchInput };
+            format: import('./bench').BlueprintFormat;
+            params?: { bench?: import('./bench').BenchInput; px_per_mm?: number };
         };
         result: { id: string };
     };

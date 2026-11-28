@@ -1,6 +1,7 @@
 //! Lab planning for the geometric bench. All lengths are in millimetres.
 use super::{
     System,
+    blueprint_render,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
         BalancedPair, Connection, LensForm, DispersionQuantity, Element, FieldProfile, FieldSampling, GlassPass, Kind, ModeBasis, ModeFamily,
@@ -2490,7 +2491,7 @@ pub(crate) fn alignment(bench: &Bench, system: &System) -> Result<Guide, String>
     guide(bench, &gaussian)
 }
 
-pub(crate) const FORMATS: &[&str] = &["svg", "dxf", "stl", "alignment_md"];
+pub(crate) const FORMATS: &[&str] = &["svg", "pdf", "png", "dxf", "stl", "alignment_md"];
 
 fn xml(text: &str) -> String {
     let mut safe = String::new();
@@ -3332,13 +3333,23 @@ pub(crate) struct Blueprint {
     format: String,
     filename: String,
     mime: &'static str,
+    /// The file: text for svg, dxf, stl and alignment_md; standard base64 of
+    /// the bytes for pdf and png.
     content: String,
+    /// "base64" when `content` encodes a binary file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoding: Option<&'static str>,
+    /// The bytes of a binary file, handed to artifacts without re-decoding.
+    #[serde(skip)]
+    #[schemars(skip)]
+    binary: Option<Vec<u8>>,
 }
 
 impl Blueprint {
-    /// The file name, MIME type and content of the drawing.
-    pub(crate) fn into_file(self) -> (String, &'static str, String) {
-        (self.filename, self.mime, self.content)
+    /// The file name, MIME type and bytes of the drawing.
+    pub(crate) fn into_file(self) -> (String, &'static str, Vec<u8>) {
+        let bytes = self.binary.unwrap_or_else(|| self.content.into_bytes());
+        (self.filename, self.mime, bytes)
     }
 }
 
@@ -3389,11 +3400,42 @@ pub(crate) fn export_blueprint_report(
     format: &str,
     version: Option<BlueprintRevision>,
 ) -> Result<Blueprint, String> {
+    export_blueprint_file(bench, system, format, None, version)
+}
+
+/// A blueprint file. `px_per_mm` sets the PNG resolution (default
+/// [`blueprint_render::DEFAULT_PX_PER_MM`]) and is refused for other formats.
+pub(crate) fn export_blueprint_file(
+    bench: &Bench,
+    system: &System,
+    format: &str,
+    px_per_mm: Option<f64>,
+    version: Option<BlueprintRevision>,
+) -> Result<Blueprint, String> {
     if !FORMATS.contains(&format) {
         return Err(format!(
             "Unknown blueprint format {format:?}. Choose {}",
             FORMATS.join(", ")
         ));
+    }
+    if px_per_mm.is_some() && format != "png" {
+        return Err(format!("px_per_mm applies only to png, not {format}"));
+    }
+    if matches!(format, "pdf" | "png") {
+        let svg = export_blueprint_file(bench, system, "svg", None, version)?.content;
+        let (bytes, mime) = if format == "pdf" {
+            (blueprint_render::pdf(&svg, true)?, "application/pdf")
+        } else {
+            (blueprint_render::png(&svg, px_per_mm.unwrap_or(blueprint_render::DEFAULT_PX_PER_MM))?, "image/png")
+        };
+        return Ok(Blueprint {
+            format: format.to_owned(),
+            filename: format!("hissabeth-bench.{format}"),
+            mime,
+            content: blueprint_render::base64(&bytes),
+            encoding: Some("base64"),
+            binary: Some(bytes),
+        });
     }
     let scene = bench.resolved_stages()?;
     let bench = scene.as_ref();
@@ -3428,6 +3470,8 @@ pub(crate) fn export_blueprint_report(
         filename: format!("hissabeth-bench.{extension}"),
         mime,
         content,
+        encoding: None,
+        binary: None,
     })
 }
 
