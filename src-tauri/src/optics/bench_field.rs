@@ -333,14 +333,19 @@ struct Event<'a> {
     clip_only: bool,
 }
 
-/// The slab face of a lens substrate nearest `at`: the face the light crossed there.
-fn lens_face(e: &Element, at: V3) -> Option<bench::SlabFace> {
+/// The index (0 front, 1 back) and slab face of an element's substrate nearest
+/// `at`: the face the light crossed there.
+fn slab_face(e: &Element, at: V3) -> Option<(usize, bench::SlabFace)> {
     let faces = slab_faces(e, e.substrate.as_ref()?);
-    faces.into_iter().min_by(|x, y| {
+    faces.into_iter().enumerate().min_by(|(_, x), (_, y)| {
         dot(sub(at, x.point), x.normal)
             .abs()
             .total_cmp(&dot(sub(at, y.point), y.normal).abs())
     })
+}
+
+fn lens_face(e: &Element, at: V3) -> Option<bench::SlabFace> {
+    slab_face(e, at).map(|(_, face)| face)
 }
 
 #[derive(Clone)]
@@ -733,6 +738,22 @@ fn arm<'a>(
                 index: flight(last).index,
                 // Sampled on the exit face, which a wedge tilts off the element plane.
                 surface: lens_face(e, trace.segments[chain[last - 1]].to).map(|face| face.normal),
+                clip_only: false,
+            }
+        } else if !e.regions.is_empty()
+            && last > step
+            && slab_face(e, trace.segments[chain[step - 1]].to).is_some_and(|(i, _)| i == 1)
+        {
+            // Regions sit on the element plane, the substrate's front face: light
+            // entering through the back face meets them where it leaves the glass.
+            Event {
+                step: last,
+                element: e,
+                port: flight(last).from_port.clone(),
+                hit: trace.segments[chain[last - 1]].to,
+                incoming: frames[last - 1],
+                index: flight(last).index,
+                surface: None,
                 clip_only: false,
             }
         } else {
@@ -1931,6 +1952,68 @@ mod tests {
         let mut bad = plain.clone();
         bad.elements[1].action = Some(Action::Nd { od: 1. });
         assert!(bad.validate().unwrap_err().contains("Invalid action on D"));
+    }
+
+    #[test]
+    fn a_region_behind_a_substrate_masks_the_field_where_it_leaves_the_glass() {
+        // S1 heads +x into a mask turned 30° whose 20 mm substrate faces the
+        // source. The beam enters the back face 20·tan 30° off the mask axis and
+        // the glass carries it back by the refracted run to a hole X on the front
+        // face, which must pass the field whole.
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.sources[0].field = Some(sampling(64, 20., FieldProfile::Gaussian, 200.));
+        let (s, c) = 30f64.to_radians().sin_cos();
+        let mut mask = mount_element("AP", MASK, [200., 200., 75.], [c, s, 0.]);
+        mask.action = None;
+        mask.aperture = 25.;
+        mask.substrate = Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 20.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        let n = system
+            .material_index("N-BK7_SCHOTT", bench.sources[0].wavelength)
+            .unwrap();
+        let run = 20. * (s / n) / (1. - (s / n).powi(2)).sqrt();
+        let y = 20. * s / c - run;
+        mask.regions = vec![bench::Region {
+            port: "X".into(),
+            shape: bench::RegionShape::Circle {
+                center: [y, 0.],
+                radius: 2.,
+            },
+            transmittance: 1.,
+            normal: None,
+        }];
+        bench.elements = vec![
+            mask,
+            mount_element("D", DETECTOR, [300., 200. + c * y, 75.], [1., 0., 0.]),
+        ];
+        bench.connections = [("S1", "out", "AP"), ("AP", "X", "D")]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = vec![Branch {
+            id: "X".into(),
+            from: Port::new("AP", "X"),
+            to: Port::new("D", "in"),
+            via: vec![],
+            style: None,
+        }];
+        bench.validate().unwrap();
+        let reading = super::field(&bench, &system, &request(Some("X"), None, 1)).unwrap();
+        let launched = bench.sources[0].power;
+        assert!(
+            (reading.power - launched).abs() < 1e-3 * launched,
+            "{} {launched}",
+            reading.power
+        );
     }
 
     #[test]

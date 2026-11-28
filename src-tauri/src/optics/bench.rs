@@ -1792,8 +1792,7 @@ impl Bench {
                         | Kind::Pbs
                         | Kind::Waveplate
                         | Kind::Polarizer
-                ) || !e.regions.is_empty()
-                    || s.material.is_empty()
+                ) || s.material.is_empty()
                     || s.material.len() > 128
                     || !(s.thickness_mm.is_finite()
                         && s.thickness_mm > 0.
@@ -1802,7 +1801,7 @@ impl Bench {
                     || (s.coated_face.is_some() != matches!(e.kind, Kind::Splitter | Kind::Pbs)))
             {
                 return Err(format!(
-                    "Invalid substrate on {}: substrates need an aperture without regions, lens, splitter, PBS, waveplate or polarizer, a material name, thickness in 0..1e4 mm, wedge within ±45°, and a coated face (front or back) on splitters and PBS only",
+                    "Invalid substrate on {}: substrates need an aperture, lens, splitter, PBS, waveplate or polarizer, a material name, thickness in 0..1e4 mm, wedge within ±45°, and a coated face (front or back) on splitters and PBS only",
                     e.id
                 ));
             }
@@ -1815,14 +1814,13 @@ impl Bench {
                         | Kind::Pbs
                         | Kind::Waveplate
                         | Kind::Polarizer
-                ) || !e.regions.is_empty()
-                    || p.radians.is_some() == p.waves.is_some()
+                ) || p.radians.is_some() == p.waves.is_some()
                     || p.radians.is_some_and(|r| !(-1e6..=1e6).contains(&r))
                     || p.waves.is_some_and(|w| !(-1e5..=1e5).contains(&w))
                     || !(100. ..=20000.).contains(&p.at_wavelength_nm))
             {
                 return Err(format!(
-                    "Invalid phase on {}: give exactly one finite radians or waves value at 100–20000 nm on a transmissive element without regions",
+                    "Invalid phase on {}: give exactly one finite radians or waves value at 100–20000 nm on a transmissive element",
                     e.id
                 ));
             }
@@ -2315,6 +2313,7 @@ fn focused(direction: V3, height: V3, e: &Element) -> Result<V3, String> {
     Ok(rotate(local_direction, e.rotation()))
 }
 
+#[derive(Clone)]
 struct Packet {
     source: String,
     branch: String,
@@ -2359,6 +2358,37 @@ impl Packet {
         }
     }
 
+    /// Pushes this output's segments through the glass `points`, each flight
+    /// leaving the element's "substrate" port, and returns the last one's index.
+    fn glass(&self, segments: &mut Vec<Segment>, points: &[V3], run: &GlassRun) -> usize {
+        let mut previous = run.arrival;
+        for pair in points.windows(2) {
+            let departure = Departure {
+                port: Port::new(run.element, "substrate"),
+                previous: Some(previous),
+                arrival: Some(run.arrival),
+                nominal: self.departure.nominal,
+                phase: 0.,
+            };
+            let flight = departure.flight(
+                Port::new(run.element, "substrate"),
+                norm(sub(pair[1], pair[0])),
+                run.material,
+                run.index,
+                self.wavelength,
+            );
+            previous = segments.len();
+            segments.push(self.segment(
+                pair[0],
+                pair[1],
+                Some(run.element),
+                "substrate",
+                Some(flight),
+            ));
+        }
+        previous
+    }
+
     fn finish(
         self,
         element: Option<String>,
@@ -2376,6 +2406,14 @@ impl Packet {
             last_segment,
         }
     }
+}
+
+/// An output crossing an element's substrate glass after arriving at `arrival`.
+struct GlassRun<'a> {
+    element: &'a str,
+    material: &'a str,
+    index: f64,
+    arrival: usize,
 }
 
 fn group_media(system: &System) -> Vec<&str> {
@@ -3123,13 +3161,41 @@ impl Bench {
             };
             let hit = add(ray.p, scale(ray.d, distance));
             let h = local(sub(hit, e.position), e.rotation());
+            // Regions sit on the element plane, the substrate's front face. Light
+            // entering through the back face meets them where it leaves the glass,
+            // and the straight crossing from the hit fixes that point.
+            let region_glass = match e
+                .substrate
+                .as_ref()
+                .filter(|_| !mount && !e.regions.is_empty())
+            {
+                Some(substrate) => Some((
+                    substrate,
+                    slab_faces(e, substrate),
+                    face.unwrap_or(0),
+                    system
+                        .material_index(&substrate.material, ray.wavelength)
+                        .map_err(|err| format!("Substrate of {}: {err}", e.id))?,
+                )),
+                None => None,
+            };
+            let crossing = region_glass.as_ref().map(|(_, faces, first, n_glass)| {
+                slab_path(faces, *first, hit, ray.d, None, ray.air / n_glass)
+            });
+            let m = match (&region_glass, &crossing) {
+                (Some((_, _, 1, _)), Some(Ok(path))) => path
+                    .points
+                    .last()
+                    .map_or(h, |exit| local(sub(*exit, e.position), e.rotation())),
+                _ => h,
+            };
             let reason = if mount {
                 Some("mount_obstruction")
             } else if ray.expected.as_ref().is_some_and(|id| id != &e.id) {
                 Some("unexpected_hit")
             } else if !directed && h[1].hypot(h[2]) > e.aperture {
                 Some("clipped")
-            } else if !directed && !e.regions.is_empty() && e.region_at(h[1], h[2]).is_none() {
+            } else if !directed && !e.regions.is_empty() && e.region_at(m[1], m[2]).is_none() {
                 // Inside the plate but between its sub-apertures or facets.
                 Some("masked")
             } else if e.kind == Kind::LensGroup
@@ -3206,14 +3272,14 @@ impl Bench {
             }
             if !directed && anchored {
                 // Unlit or not, every region arm keeps a geometric path from its centre.
-                let lit = reason.is_none().then(|| e.region_at(h[1], h[2])).flatten();
+                let lit = reason.is_none().then(|| e.region_at(m[1], m[2])).flatten();
                 for region in e
                     .regions
                     .iter()
                     .filter(|r| lit.is_none_or(|l| l.port != r.port))
                 {
                     let [y, z] = region.shape.center();
-                    queue.push_back(Packet {
+                    let mut probe = Packet {
                         source: ray.source.clone(),
                         branch: format!("{}/{}:{}~probe", ray.branch, e.id, region.port),
                         beam: next_beam(&ray.beam, &e.id, &region.port),
@@ -3227,13 +3293,60 @@ impl Bench {
                             previous: Some(arrival),
                             arrival: Some(arrival),
                             nominal: true,
-                            phase: 0.,
+                            phase: e
+                                .phase
+                                .as_ref()
+                                .filter(|_| e.kind != Kind::Mirror)
+                                .map_or(0., |plate| plate.radians_at(ray.wavelength)),
                         },
                         air: ray.air,
                         wavelength: ray.wavelength,
                         jones: ray.jones,
                         probe: true,
-                    });
+                    };
+                    // Through a substrate the probe crosses the glass as the lit arm
+                    // does, to or from the region centre on the front face: forwards
+                    // when the light enters the front face, else back to the back
+                    // face and reversed. A crossing the glass refuses (total internal
+                    // reflection, a face missed) stops the arm there.
+                    if let (Some((substrate, faces, first, n_glass)), Some(crossing)) =
+                        (&region_glass, &crossing)
+                    {
+                        let eta = ray.air / n_glass;
+                        let inner = crossing.as_ref().map_err(|r| *r).and_then(|path| {
+                            probe.d = path.direction;
+                            if *first == 0 {
+                                slab_path(faces, 0, probe.p, ray.d, None, eta).map(|p| p.points)
+                            } else {
+                                slab_path(faces, 0, probe.p, scale(path.direction, -1.), None, eta)
+                                    .map(|p| p.points.into_iter().rev().collect())
+                            }
+                        });
+                        match inner {
+                            Ok(points) => {
+                                let last = probe.glass(
+                                    &mut out.segments,
+                                    &points,
+                                    &GlassRun {
+                                        element: &e.id,
+                                        material: &substrate.material,
+                                        index: *n_glass,
+                                        arrival,
+                                    },
+                                );
+                                probe.p = points.last().copied().unwrap_or(probe.p);
+                                probe.departure.previous = Some(last);
+                            }
+                            Err(reason) => {
+                                paths.stop(
+                                    &probe.departure,
+                                    PathBreak::new(&e.id, &region.port, reason),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    queue.push_back(probe);
                 }
             }
             if let Some(reason) = reason {
@@ -3479,7 +3592,7 @@ impl Bench {
                     } else {
                         1.
                     };
-                    let lit = e.region_at(h[1], h[2]);
+                    let lit = e.region_at(m[1], m[2]);
                     // Directed tracing ignores clear apertures, so every arm is followed.
                     for region in e
                         .regions
@@ -3581,8 +3694,9 @@ impl Bench {
                 let child_branch = format!("{}/{}:{}", ray.branch, e.id, port);
                 let mut start = (hit, d, arrival);
                 if let (Some((substrate, faces, first)), Some(n_glass)) = (&slab, glass) {
-                    let reflected = (port == "reflected")
-                        .then(|| usize::from(substrate.coated_face == Some(Face::Back)));
+                    let reflected = (port == "reflected"
+                        && matches!(e.kind, Kind::Splitter | Kind::Pbs))
+                    .then(|| usize::from(substrate.coated_face == Some(Face::Back)));
                     // Every glass vertex after the entry must stay inside the clear aperture.
                     let inside = |point: &V3| {
                         let l = local(sub(*point, e.position), e.rotation());
@@ -3598,38 +3712,23 @@ impl Bench {
                         });
                     match path {
                         Ok(path) => {
-                            let mut previous = arrival;
-                            for pair in path.points.windows(2) {
-                                let departure = Departure {
-                                    port: Port::new(&e.id, "substrate"),
-                                    previous: Some(previous),
-                                    arrival: Some(arrival),
-                                    nominal: ray.departure.nominal,
-                                    phase: 0.,
-                                };
-                                let length = norm(sub(pair[1], pair[0]));
-                                let flight = departure.flight(
-                                    Port::new(&e.id, "substrate"),
-                                    length,
-                                    &substrate.material,
-                                    n_glass,
-                                    ray.wavelength,
-                                );
-                                previous = out.segments.len();
-                                out.segments.push(Segment {
-                                    source: ray.source.clone(),
-                                    branch: child_branch.clone(),
-                                    from: pair[0],
-                                    to: pair[1],
-                                    power: ray.power * fraction,
-                                    element: Some(e.id.clone()),
-                                    status: "substrate".into(),
-                                    flight: Some(flight),
-                                    jones,
-                                    axial: ray.departure.nominal,
-                                    beam: child_beam.clone(),
-                                });
-                            }
+                            let child = Packet {
+                                branch: child_branch.clone(),
+                                beam: child_beam.clone(),
+                                power: ray.power * fraction,
+                                jones,
+                                ..ray.clone()
+                            };
+                            let previous = child.glass(
+                                &mut out.segments,
+                                &path.points,
+                                &GlassRun {
+                                    element: &e.id,
+                                    material: &substrate.material,
+                                    index: n_glass,
+                                    arrival,
+                                },
+                            );
                             let exit = path.points.last().copied().unwrap_or(entry);
                             let direction = if e.kind == Kind::Lens {
                                 focused(
@@ -3671,7 +3770,9 @@ impl Bench {
                 let phase = e
                     .phase
                     .as_ref()
-                    .filter(|_| port != "reflected")
+                    .filter(|_| {
+                        !(port == "reflected" && matches!(e.kind, Kind::Splitter | Kind::Pbs))
+                    })
                     .map_or(0., |plate| plate.radians_at(ray.wavelength));
                 let mut kept = fraction;
                 if !directed
@@ -4707,6 +4808,200 @@ mod tests {
             .unwrap()
             .power
             / t.power.launched
+    }
+    fn plate_substrate(thickness_mm: f64) -> Option<Substrate> {
+        Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm,
+            wedge_deg: None,
+            coated_face: None,
+        })
+    }
+    #[test]
+    fn region_arms_cross_their_plate_substrate_and_phase() {
+        // The three-hole mask with R moved off the beam: L and C are lit, R is
+        // only probed. Glass behind the mask and a phase plate on it must lengthen
+        // every arm's optical path alike, the unlit probe's included. The glass lies
+        // ahead of the mask plane (the light enters its back face), so each arm
+        // gains n·t on top of the unchanged 200 mm of air.
+        let system = System::default();
+        let opl = |glass: bool| {
+            let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+            let wavelength = bench.sources[0].wavelength;
+            let mask = bench.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+            mask.aperture = 25.;
+            let r = mask.regions.iter_mut().find(|r| r.port == "R").unwrap();
+            r.shape = RegionShape::Circle {
+                center: [-17., 0.],
+                radius: 2.5,
+            };
+            if glass {
+                mask.substrate = plate_substrate(5.);
+                mask.phase = Some(PhasePlate {
+                    radians: Some(1.),
+                    waves: None,
+                    at_wavelength_nm: wavelength,
+                });
+            }
+            bench
+                .elements
+                .iter_mut()
+                .find(|e| e.id == "D_R")
+                .unwrap()
+                .position[1] = 183.;
+            bench.branches = ["L", "C", "R"]
+                .map(|arm| Branch {
+                    id: arm.into(),
+                    from: Port::new("AP", arm),
+                    to: Port::new(&format!("D_{arm}"), "in"),
+                    via: vec![],
+                    style: None,
+                })
+                .into();
+            let trace = bench.trace(&system).unwrap();
+            accounted(&trace);
+            ["L", "C", "R"].map(|arm| {
+                let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
+                let path = &report.paths[0];
+                let reason = path.interruption.as_ref().map(|b| b.reason.as_str());
+                assert_eq!(reason, (arm == "R").then_some("not_illuminated"), "{arm}");
+                assert_eq!(path.glass.len(), usize::from(glass), "{arm}");
+                (path.opl_mm, wavelength)
+            })
+        };
+        let (plain, coated) = (opl(false), opl(true));
+        for (arm, ((a, wavelength), (b, _))) in
+            ["L", "C", "R"].iter().zip(plain.into_iter().zip(coated))
+        {
+            let n = system.material_index("N-BK7_SCHOTT", wavelength).unwrap();
+            let extra = n * 5. + wavelength * 1e-6 / std::f64::consts::TAU;
+            assert!((b - a - extra).abs() < 1e-9, "{arm}: {a} {b} {extra}");
+        }
+    }
+    fn coated_three_arm(rename: Option<&str>) -> Bench {
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        let wavelength = bench.sources[0].wavelength;
+        let mask = bench.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+        mask.substrate = plate_substrate(5.);
+        mask.phase = Some(PhasePlate {
+            radians: Some(1.),
+            waves: None,
+            at_wavelength_nm: wavelength,
+        });
+        let port = rename.unwrap_or("C");
+        mask.regions
+            .iter_mut()
+            .find(|r| r.port == "C")
+            .unwrap()
+            .port = port.into();
+        bench
+            .connections
+            .iter_mut()
+            .find(|c| c.port == "C")
+            .unwrap()
+            .port = port.into();
+        bench.branches = vec![Branch {
+            id: "C".into(),
+            from: Port::new("AP", port),
+            to: Port::new("D_C", "in"),
+            via: vec![],
+            style: None,
+        }];
+        bench
+    }
+    #[test]
+    fn a_region_named_reflected_still_transmits_through_its_plate() {
+        // Region names are free: calling the centre hole "reflected" must not turn
+        // the aperture into a reflector or drop its phase plate.
+        let system = System::default();
+        let read = |rename| {
+            let trace = coated_three_arm(rename).trace(&system).unwrap();
+            accounted(&trace);
+            let path = trace.branches[0].paths[0].clone();
+            assert!(path.interruption.is_none(), "{:?}", path.interruption);
+            (path.opl_mm, path.glass.len(), path.length_mm)
+        };
+        assert_eq!(read(None), read(Some("reflected")));
+    }
+    #[test]
+    fn a_region_probe_stops_where_its_glass_totally_reflects() {
+        // The substrate faces the source (front entry) and its back face is
+        // wedged 45°: past the 41° critical angle of N-BK7 every crossing is
+        // totally reflected, the unlit arm's probe included.
+        let system = System::default();
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        let mask = bench.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+        mask.rotation = Some([0., 0., 180.]);
+        mask.aperture = 25.;
+        mask.substrate = Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 20.,
+            wedge_deg: Some(45.),
+            coated_face: None,
+        });
+        let r = mask.regions.iter_mut().find(|r| r.port == "R").unwrap();
+        r.shape = RegionShape::Circle {
+            center: [-17., 0.],
+            radius: 2.5,
+        };
+        bench.branches = vec![Branch {
+            id: "R".into(),
+            from: Port::new("AP", "R"),
+            to: Port::new("D_R", "in"),
+            via: vec![],
+            style: None,
+        }];
+        let trace = bench.trace(&system).unwrap();
+        accounted(&trace);
+        let path = &trace.branches[0].paths[0];
+        let reason = path
+            .interruption
+            .as_ref()
+            .map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
+        assert_eq!(reason, Some(("AP", "R", "tir")), "{:?}", path.glass);
+        assert!(path.glass.is_empty());
+    }
+    #[test]
+    fn regions_behind_a_substrate_mask_where_the_light_leaves_the_glass() {
+        // A narrow beam meets the mask's back face first (the substrate lies
+        // behind the element plane, towards the source). The mask is turned 30°,
+        // so the beam enters the back face 20·tan 30° off the axis and the glass
+        // carries it back by the refracted run before it reaches the regions on
+        // the front face: E, in line with the entry point, gets nothing; X, at
+        // the exit, takes the beam.
+        let system = System::default();
+        let mut bench = super::super::bench_lab::template("three_arm").unwrap();
+        bench.sources[0].beam_radius = 0.5;
+        bench.sources[0].waist = Some(0.5);
+        bench.elements.retain(|e| !e.id.starts_with("D_"));
+        bench.connections.retain(|c| c.from != "AP");
+        bench.branches.clear();
+        let mask = bench.elements.iter_mut().find(|e| e.id == "AP").unwrap();
+        let (s, c) = 30f64.to_radians().sin_cos();
+        mask.rotation = Some([0., 0., 30.]);
+        mask.aperture = 25.;
+        mask.substrate = plate_substrate(20.);
+        let n = system
+            .material_index("N-BK7_SCHOTT", bench.sources[0].wavelength)
+            .unwrap();
+        // Lateral run along the plate inside the glass.
+        let run = 20. * (s / n) / (1. - (s / n).powi(2)).sqrt();
+        let entry = 20. * s / c;
+        mask.regions = [("E", entry), ("X", entry - run)]
+            .map(|(port, y)| Region {
+                port: port.into(),
+                shape: RegionShape::Circle {
+                    center: [y, 0.],
+                    radius: 2.,
+                },
+                transmittance: 1.,
+                normal: None,
+            })
+            .into();
+        let trace = bench.trace(&system).unwrap();
+        accounted(&trace);
+        let (e, x) = (port_fraction(&trace, "E"), port_fraction(&trace, "X"));
+        assert!(e == 0. && x > 0.99, "{e} {x}");
     }
     fn strip(port: &str, center: f64, width: f64) -> Region {
         Region {
