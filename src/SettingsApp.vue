@@ -10,7 +10,9 @@ import {
     PanelsTopLeft,
     SlidersHorizontal,
     Languages,
+    Info,
 } from 'lucide-vue-next';
+import AboutSection from './components/AboutSection.vue';
 import { usePreferencesStore } from './stores/preferences';
 import { useAppearance } from './composables/useAppearance';
 import { tr } from './i18n';
@@ -48,6 +50,7 @@ const categories = [
     ['display', SlidersHorizontal],
     ['analysis', Settings2],
     ['agents', Plug],
+    ['about', Info],
 ] as const;
 const draft = ref<Preferences>(clone(store.preferences));
 const baseRevision = ref(store.revision);
@@ -61,6 +64,7 @@ const sections: Record<string, string> = {
     display: 'Display',
     analysis: 'Analysis',
     agents: 'Agents',
+    about: 'About',
 };
 const numberFields = [
     { key: 'fontSize', section: 'appearance', label: 'fontSize' },
@@ -246,7 +250,8 @@ void detect();
                     class="settings-section"
                 >
                     <h2>{{ tr(`settings.section${sections[id]}`) }}</h2>
-                    <fieldset :disabled="!store.loaded" class="settings-fields">
+                    <AboutSection v-if="id === 'about'" />
+                    <fieldset v-else :disabled="!store.loaded" class="settings-fields">
                         <template v-if="id === 'general'">
                             <label
                                 >{{ tr('settings.language')

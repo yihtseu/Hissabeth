@@ -3,6 +3,7 @@ import { createPinia } from 'pinia';
 import { i18n } from './i18n';
 import { usePreferencesStore } from './stores/preferences';
 import './styles.css';
+import './tailwind.css';
 import 'splitpanes/dist/splitpanes.css';
 async function boot(): Promise<void> {
     const pinia = createPinia();

@@ -1,0 +1,19 @@
+/* Tailwind theme and utilities, prefixed `tw:` so they never collide with the
+ * class names in styles.css. Preflight is left out: styles.css owns the base. */
+@import 'tailwindcss/theme.css' layer(theme) prefix(tw);
+@import 'tailwindcss/utilities.css';
+
+/* The app's design tokens, as Tailwind colors and radii. */
+@theme inline {
+    --color-text: var(--text);
+    --color-muted: var(--muted);
+    --color-border: var(--border);
+    --color-surface: var(--surface);
+    --color-panel: var(--panel);
+    --color-hover: var(--hover);
+    --color-accent: var(--accent);
+    --color-danger: var(--danger);
+    --color-danger-bg: var(--danger-bg);
+    --font-mono: var(--font-mono);
+    --radius-app: var(--radius);
+}

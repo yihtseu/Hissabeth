@@ -1517,6 +1517,30 @@ export default {
         sectionDisplay: 'Display',
         sectionAnalysis: 'Analysis defaults',
         sectionAgents: 'Agents',
+        sectionAbout: 'About',
+        aboutVersion: 'Version {version}',
+        aboutCommit: 'Source commit of this build',
+        aboutLicense:
+            'Hissabeth is free software under the GNU General Public License, version 3 or later. The application icon is excluded; see Name and icon below.',
+        aboutSource: 'Source code',
+        aboutLicenseText: 'License text',
+        aboutOpenFailed: 'Could not open {url}: {message}',
+        aboutAttribution: 'Attribution',
+        aboutGeopter:
+            'The optical implementation draws on Geopter, Copyright (C) 2021 Hiiragi, distributed under the GNU GPL. Source:',
+        aboutName: 'Name and icon',
+        aboutNameRights:
+            'The project name and the application icon are unofficial fan work based on a character from Reverse: 1999. All rights in the character, its name, and the related artwork belong to Bluepoch (© BLUEPOCH CO., LTD.). Hissabeth is a non-commercial project and is not affiliated with, endorsed by, or sponsored by Bluepoch.',
+        aboutNameIcon:
+            "The icon files are not covered by the project's license. They will be removed or replaced at the rights holder's request.",
+        aboutThirdParty: 'Third-party components',
+        aboutThirdPartySummary:
+            'This build includes {rust} Rust crates and {javascript} JavaScript packages. Each keeps its own license; below they are grouped by the license text they are used under.',
+        aboutThirdPartyFailed: 'The component list could not be loaded: {message}',
+        aboutRust: 'Rust crates ({count})',
+        aboutJavascript: 'JavaScript packages ({count})',
+        aboutPackages: 'Packages: {count}',
+        aboutNoLicenseText: 'The package ships no license text; see its source.',
         language: 'Language',
         theme: 'Theme',
         themeSystem: 'System',

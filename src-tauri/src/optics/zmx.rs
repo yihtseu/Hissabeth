@@ -47,7 +47,6 @@ struct ZmxSurface {
     params: BTreeMap<usize, f64>,
 }
 impl ZmxSurface {
-    #[allow(clippy::type_complexity)]
     fn profile(
         &self,
         surface: usize,

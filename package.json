@@ -9,12 +9,17 @@
         "preview": "vite preview",
         "tauri": "tauri",
         "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p src-tauri/tests/tsconfig.json --noEmit",
+        "test": "vitest run",
         "lint": "oxlint",
         "lint:fix": "oxlint --fix",
         "format": "oxfmt",
         "format:check": "oxfmt --check",
         "setup:chatgpt": "bun scripts/setup-chatgpt.mjs",
-        "build:agent": "bun build scripts/agent-bridge.ts --target=node --outfile=dist/agent-bridge.mjs"
+        "build:agent": "bun build scripts/agent-bridge.ts --target=node --outfile=dist/agent-bridge.mjs",
+        "licenses": "bun run licenses:rust && bun run licenses:javascript",
+        "licenses:rust": "cargo about generate --format json --frozen --fail -m src-tauri/Cargo.toml | jq -f scripts/licenses/rust.jq > src/assets/licenses-rust.json",
+        "licenses:javascript": "license-checker-rseidelsohn --production --excludePrivatePackages --json --customPath scripts/licenses/format.json --limitAttributes name,version,licenses,repository,licenseText --excludePackagesStartingWith '@anthropic-ai/claude-agent-sdk-;@openai/codex@' | jq -f scripts/licenses/javascript.jq > src/assets/licenses-javascript.json",
+        "licenses:check": "bun run licenses && git diff --exit-code -- src/assets/licenses-rust.json src/assets/licenses-javascript.json"
     },
     "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.312",
@@ -42,6 +47,7 @@
     },
     "devDependencies": {
         "@playwright/test": "^1.64.1",
+        "@tailwindcss/vite": "^4.3.5",
         "@tauri-apps/cli": "^2.12.4",
         "@types/d3-scale": "^4.0.9",
         "@types/d3-scale-chromatic": "^3.1.0",
@@ -51,8 +57,10 @@
         "@vitejs/plugin-vue": "^6.0.10",
         "@vue/test-utils": "^2.5.1",
         "jsdom": "^30.1.3",
+        "license-checker-rseidelsohn": "^5.0.1",
         "oxfmt": "^0.75.0",
         "oxlint": "^1.90.0",
+        "tailwindcss": "^4.3.5",
         "typescript": "^6.0.3",
         "vite": "^8.3.5",
         "vitest": "^5.0.5",

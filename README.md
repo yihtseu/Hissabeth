@@ -178,7 +178,20 @@ builds succeed. A failed build leaves the draft available for a rerun. Tags
 such as `v0.1.0-rc.1` publish prereleases. Windows signing and macOS signing
 and notarization are currently unconfigured.
 
+## Name and icon
+
+The project name and the application icon are unofficial fan work based on a
+character from _Reverse: 1999_. All rights in the character, its name, and the
+related artwork belong to Bluepoch (© BLUEPOCH CO., LTD.). Hissabeth is a
+non-commercial project and is not affiliated with, endorsed by, or sponsored by
+Bluepoch.
+
+The icon files in `public/` and `src-tauri/icons/` are not covered by the
+project's license. They will be removed or replaced at the rights holder's
+request.
+
 ## License
 
 Hissabeth is distributed under the GNU General Public License, version 3 or
-later. [License text](LICENSE.md)
+later, except for the icon files described in [Name and icon](#name-and-icon).
+[License text](LICENSE.md)

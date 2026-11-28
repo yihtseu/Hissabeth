@@ -40,6 +40,13 @@ jobs:
               run: |
                   bun install --frozen-lockfile
                   bun run build
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-about
+            - name: Check the third-party license list
+              run: |
+                  cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+                  bun run licenses:check
             - name: Install Tauri Linux system libraries
               run: |
                   sudo apt-get update
@@ -99,6 +106,7 @@ jobs:
             - uses: oven-sh/setup-bun@v2
             - run: bun install --frozen-lockfile
             - run: bun run typecheck
+            - run: bun run test
             - run: bun run lint
             - run: bun run format:check
             - run: bun run build
