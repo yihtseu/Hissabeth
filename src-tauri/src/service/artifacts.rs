@@ -118,12 +118,22 @@ pub(super) struct Exported {
 fn key(id: &str) -> Result<u64, String> {
     id.strip_prefix("artifact-")
         .and_then(|n| n.parse().ok())
-        .ok_or_else(|| format!("{id:?} is not an artifact id; artifact_start returns ids like \"artifact-1\""))
+        .ok_or_else(|| {
+            format!("{id:?} is not an artifact id; artifact_start returns ids like \"artifact-1\"")
+        })
 }
 
 impl Artifacts {
     pub(super) fn with_limits(item_limit: usize, total_limit: usize) -> Self {
-        Self { next: 1, clock: 0, jobs: BTreeMap::new(), item_limit, total_limit, active: 0, active_limit: ACTIVE_LIMIT }
+        Self {
+            next: 1,
+            clock: 0,
+            jobs: BTreeMap::new(),
+            item_limit,
+            total_limit,
+            active: 0,
+            active_limit: ACTIVE_LIMIT,
+        }
     }
 
     fn job(&self, id: &str) -> Result<&Job, String> {
@@ -161,7 +171,10 @@ impl Artifacts {
             (Some(output), State::Done) => Ok((job, output)),
             (_, state) => Err(format!(
                 "Artifact {id} is {}; fetch or export it once artifact_status reports done",
-                serde_json::to_value(state).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+                serde_json::to_value(state)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()
             )),
         }
     }
@@ -185,7 +198,10 @@ impl Artifacts {
     pub(super) fn export(&self, id: &str, path: &Path) -> Result<Exported, String> {
         let (_, output) = self.done(id)?;
         let wanted = Path::new(&output.filename).extension().unwrap_or_default();
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(wanted)) {
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(wanted))
+        {
             return Err(format!(
                 "Export path {} must end in .{} to match artifact {id} ({})",
                 path.display(),
@@ -194,10 +210,16 @@ impl Artifacts {
             ));
         }
         let dir = path.parent().ok_or("Export path has no parent directory")?;
-        let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut file =
+            tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::io::Write::write_all(&mut file, &output.bytes).map_err(|e| e.to_string())?;
-        file.persist(path).map_err(|e| format!("{}: {}", path.display(), e.error))?;
-        Ok(Exported { id: id.to_owned(), path: path.display().to_string(), bytes: output.bytes.len() })
+        file.persist(path)
+            .map_err(|e| format!("{}: {}", path.display(), e.error))?;
+        Ok(Exported {
+            id: id.to_owned(),
+            path: path.display().to_string(),
+            bytes: output.bytes.len(),
+        })
     }
 
     pub(super) fn cancel(&mut self, id: &str) -> Result<Status, String> {
@@ -210,12 +232,22 @@ impl Artifacts {
                 self.clock += 1;
                 job.finished = self.clock;
             }
-            _ => return Err(format!("Artifact {id} has already finished; only queued or running artifacts can be cancelled")),
+            _ => {
+                return Err(format!(
+                    "Artifact {id} has already finished; only queued or running artifacts can be cancelled"
+                ));
+            }
         }
         self.status(id)
     }
 
-    fn insert(&mut self, kind: &str, format: &str, revision: u64, saved: bool) -> Result<u64, String> {
+    fn insert(
+        &mut self,
+        kind: &str,
+        format: &str,
+        revision: u64,
+        saved: bool,
+    ) -> Result<u64, String> {
         if self.active >= self.active_limit {
             return Err(format!(
                 "{} artifacts are already being generated; wait for one to finish (cancelled ones still count until their generator returns)",
@@ -239,7 +271,9 @@ impl Artifacts {
             },
         );
         while self.jobs.len() > RECORD_LIMIT {
-            let Some(oldest) = self.oldest_finished(|_| true) else { break };
+            let Some(oldest) = self.oldest_finished(|_| true) else {
+                break;
+            };
             self.jobs.remove(&oldest);
         }
         Ok(number)
@@ -248,14 +282,18 @@ impl Artifacts {
     fn oldest_finished(&self, keep: impl Fn(&Job) -> bool) -> Option<u64> {
         self.jobs
             .iter()
-            .filter(|(_, job)| matches!(job.state, State::Done | State::Failed | State::Cancelled) && keep(job))
+            .filter(|(_, job)| {
+                matches!(job.state, State::Done | State::Failed | State::Cancelled) && keep(job)
+            })
             .min_by_key(|(_, job)| job.finished)
             .map(|(number, _)| *number)
     }
 
     fn finish(&mut self, number: u64, result: Result<Output, String>) {
         let item_limit = self.item_limit;
-        let Some(job) = self.jobs.get_mut(&number) else { return };
+        let Some(job) = self.jobs.get_mut(&number) else {
+            return;
+        };
         if job.state == State::Cancelled {
             return;
         }
@@ -275,7 +313,9 @@ impl Artifacts {
                 job.state = State::Done;
                 job.output = Some(output);
                 while self.held() > self.total_limit {
-                    let Some(oldest) = self.oldest_finished(|job| job.output.is_some() && job.finished != self.clock) else {
+                    let Some(oldest) = self
+                        .oldest_finished(|job| job.output.is_some() && job.finished != self.clock)
+                    else {
                         break;
                     };
                     self.jobs.remove(&oldest);
@@ -289,7 +329,11 @@ impl Artifacts {
     }
 
     fn held(&self) -> usize {
-        self.jobs.values().filter_map(|job| job.output.as_ref()).map(|o| o.bytes.len()).sum()
+        self.jobs
+            .values()
+            .filter_map(|job| job.output.as_ref())
+            .map(|o| o.bytes.len())
+            .sum()
     }
 }
 
@@ -303,9 +347,14 @@ pub(super) fn start(
     saved: bool,
     work: impl FnOnce() -> Result<Output, String> + Send + 'static,
 ) -> Result<Started, String> {
-    let number = store.lock().map_err(|e| e.to_string())?.insert(kind, format, revision, saved)?;
+    let number = store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(kind, format, revision, saved)?;
     spawn(store, number, work)?;
-    Ok(Started { id: format!("artifact-{number}") })
+    Ok(Started {
+        id: format!("artifact-{number}"),
+    })
 }
 
 /// Runs an inserted job's generator unless it was cancelled while queued.
@@ -315,29 +364,37 @@ fn spawn(
     work: impl FnOnce() -> Result<Output, String> + Send + 'static,
 ) -> Result<(), String> {
     let shared = store.clone();
-    let spawned = std::thread::Builder::new().name(format!("artifact-{number}")).spawn(move || {
-        let run = shared.lock().is_ok_and(|mut artifacts| match artifacts.jobs.get_mut(&number) {
-            Some(job) if job.state == State::Queued => {
-                job.state = State::Running;
-                true
+    let spawned = std::thread::Builder::new()
+        .name(format!("artifact-{number}"))
+        .spawn(move || {
+            let run =
+                shared
+                    .lock()
+                    .is_ok_and(|mut artifacts| match artifacts.jobs.get_mut(&number) {
+                        Some(job) if job.state == State::Queued => {
+                            job.state = State::Running;
+                            true
+                        }
+                        _ => false,
+                    });
+            let result = run.then(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .unwrap_or_else(|_| Err("The artifact generator failed unexpectedly".into()))
+            });
+            if let Ok(mut artifacts) = shared.lock() {
+                artifacts.active -= 1;
+                if let Some(result) = result {
+                    artifacts.finish(number, result);
+                }
             }
-            _ => false,
         });
-        let result = run.then(|| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                .unwrap_or_else(|_| Err("The artifact generator failed unexpectedly".into()))
-        });
-        if let Ok(mut artifacts) = shared.lock() {
-            artifacts.active -= 1;
-            if let Some(result) = result {
-                artifacts.finish(number, result);
-            }
-        }
-    });
     if let Err(e) = spawned {
         let mut artifacts = store.lock().map_err(|e| e.to_string())?;
         artifacts.active -= 1;
-        artifacts.finish(number, Err(format!("Could not start the artifact generator: {e}")));
+        artifacts.finish(
+            number,
+            Err(format!("Could not start the artifact generator: {e}")),
+        );
         return Err(e.to_string());
     }
     Ok(())
@@ -355,7 +412,8 @@ pub(super) mod tests {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let status = store.lock().unwrap().status(id).unwrap();
-            if !matches!(status.state, State::Queued | State::Running) || Instant::now() > deadline {
+            if !matches!(status.state, State::Queued | State::Running) || Instant::now() > deadline
+            {
                 return status;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -363,23 +421,31 @@ pub(super) mod tests {
     }
 
     fn output(bytes: usize) -> Output {
-        Output { filename: "a.bin".into(), mime: "application/octet-stream".into(), bytes: vec![7; bytes] }
+        Output {
+            filename: "a.bin".into(),
+            mime: "application/octet-stream".into(),
+            bytes: vec![7; bytes],
+        }
     }
-
 
     #[test]
     fn finished_artifacts_are_evicted_oldest_first_past_the_total_limit() {
         let store: Shared = Arc::new(Mutex::new(Artifacts::with_limits(40, 100)));
         let ids: Vec<_> = (0..3)
             .map(|_| {
-                let id = start(&store, "test", "bin", 1, true, || Ok(output(40))).unwrap().id;
+                let id = start(&store, "test", "bin", 1, true, || Ok(output(40)))
+                    .unwrap()
+                    .id;
                 assert_eq!(settle(&store, &id).state, State::Done);
                 id
             })
             .collect();
         let artifacts = store.lock().unwrap();
         let error = artifacts.status(&ids[0]).err().unwrap();
-        assert!(error.contains("evicted") && error.contains(&ids[0]), "{error}");
+        assert!(
+            error.contains("evicted") && error.contains(&ids[0]),
+            "{error}"
+        );
         assert_eq!(artifacts.status(&ids[1]).unwrap().bytes, Some(40));
         assert_eq!(artifacts.fetch(&ids[2]).unwrap().data, base64(&[7; 40]));
         assert_eq!(artifacts.held(), 80);
@@ -388,11 +454,20 @@ pub(super) mod tests {
     #[test]
     fn an_artifact_over_the_item_limit_fails() {
         let store: Shared = Arc::new(Mutex::new(Artifacts::with_limits(40, 100)));
-        let id = start(&store, "test", "bin", 1, true, || Ok(output(41))).unwrap().id;
+        let id = start(&store, "test", "bin", 1, true, || Ok(output(41)))
+            .unwrap()
+            .id;
         let status = settle(&store, &id);
         assert_eq!(status.state, State::Failed);
         assert!(status.error.unwrap().contains("41 bytes"));
-        assert!(store.lock().unwrap().fetch(&id).unwrap_err().contains("is failed"));
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .fetch(&id)
+                .unwrap_err()
+                .contains("is failed")
+        );
     }
 
     /// Waits until every generator thread has returned.
@@ -417,8 +492,14 @@ pub(super) mod tests {
         .unwrap()
         .id;
         running.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(store.lock().unwrap().status(&id).unwrap().state, State::Running);
-        assert_eq!(store.lock().unwrap().cancel(&id).unwrap().state, State::Cancelled);
+        assert_eq!(
+            store.lock().unwrap().status(&id).unwrap().state,
+            State::Running
+        );
+        assert_eq!(
+            store.lock().unwrap().cancel(&id).unwrap().state,
+            State::Cancelled
+        );
         release.send(()).unwrap();
         drain(&store);
         let artifacts = store.lock().unwrap();
@@ -426,15 +507,29 @@ pub(super) mod tests {
         assert_eq!(artifacts.held(), 0);
         assert!(artifacts.fetch(&id).unwrap_err().contains("is cancelled"));
         drop(artifacts);
-        assert!(store.lock().unwrap().cancel(&id).unwrap_err().contains("already finished"));
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .cancel(&id)
+                .unwrap_err()
+                .contains("already finished")
+        );
     }
 
     #[test]
     fn a_cancelled_queued_artifact_never_runs() {
         let store: Shared = Arc::default();
-        let number = store.lock().unwrap().insert("test", "bin", 1, true).unwrap();
+        let number = store
+            .lock()
+            .unwrap()
+            .insert("test", "bin", 1, true)
+            .unwrap();
         let id = format!("artifact-{number}");
-        assert_eq!(store.lock().unwrap().cancel(&id).unwrap().state, State::Cancelled);
+        assert_eq!(
+            store.lock().unwrap().cancel(&id).unwrap().state,
+            State::Cancelled
+        );
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = ran.clone();
         spawn(&store, number, move || {
@@ -444,7 +539,10 @@ pub(super) mod tests {
         .unwrap();
         drain(&store);
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(store.lock().unwrap().status(&id).unwrap().state, State::Cancelled);
+        assert_eq!(
+            store.lock().unwrap().status(&id).unwrap().state,
+            State::Cancelled
+        );
     }
 
     #[test]
@@ -469,7 +567,10 @@ pub(super) mod tests {
             running.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         // Cancelling does not free a slot while its generator is still running.
-        assert_eq!(store.lock().unwrap().status(&ids[0]).unwrap().state, State::Running);
+        assert_eq!(
+            store.lock().unwrap().status(&ids[0]).unwrap().state,
+            State::Running
+        );
         store.lock().unwrap().cancel(&ids[0]).unwrap();
         let error = start(&store, "test", "bin", 1, true, || Ok(output(1))).unwrap_err();
         assert!(error.contains("already being generated"), "{error}");
@@ -477,11 +578,15 @@ pub(super) mod tests {
             release.send(()).unwrap();
         }
         drain(&store);
-        let id = start(&store, "test", "bin", 1, true, || Ok(output(1))).unwrap().id;
+        let id = start(&store, "test", "bin", 1, true, || Ok(output(1)))
+            .unwrap()
+            .id;
         assert_eq!(settle(&store, &id).state, State::Done);
         // Finished records stay within the record limit.
         for _ in 0..RECORD_LIMIT + 10 {
-            let id = start(&store, "test", "bin", 1, true, || Ok(output(1))).unwrap().id;
+            let id = start(&store, "test", "bin", 1, true, || Ok(output(1)))
+                .unwrap()
+                .id;
             settle(&store, &id);
             drain(&store);
         }
@@ -491,10 +596,22 @@ pub(super) mod tests {
     #[test]
     fn a_failing_generator_reports_its_error() {
         let store: Shared = Arc::default();
-        let id = start(&store, "test", "bin", 1, true, || Err("no stages".into())).unwrap().id;
+        let id = start(&store, "test", "bin", 1, true, || Err("no stages".into()))
+            .unwrap()
+            .id;
         let status = settle(&store, &id);
-        assert_eq!((status.state, status.error.as_deref()), (State::Failed, Some("no stages")));
-        assert!(store.lock().unwrap().status("artifact-x").unwrap_err().contains("not an artifact id"));
+        assert_eq!(
+            (status.state, status.error.as_deref()),
+            (State::Failed, Some("no stages"))
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .status("artifact-x")
+                .unwrap_err()
+                .contains("not an artifact id")
+        );
     }
 
     mod flow {
@@ -514,7 +631,8 @@ pub(super) mod tests {
         /// the MCP result.
         fn mcp(w: &SharedWorkspace, name: &str, arguments: Value) -> Value {
             let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}});
-            rpc_shared(request, &Caller::Broker(Scope::default()), w, None).unwrap()["result"].clone()
+            rpc_shared(request, &Caller::Broker(Scope::default()), w, None).unwrap()["result"]
+                .clone()
         }
 
         fn ok(result: &Value) -> Value {
@@ -529,8 +647,17 @@ pub(super) mod tests {
         }
 
         fn michelson(w: &SharedWorkspace) {
-            let revision = dispatch(&Caller::Gui, w, "system_get", json!({}), None).unwrap()["revision"].clone();
-            dispatch(&Caller::Gui, w, "bench_template", json!({"name":"michelson","apply":true,"revision":revision}), None).unwrap();
+            let revision =
+                dispatch(&Caller::Gui, w, "system_get", json!({}), None).unwrap()["revision"]
+                    .clone();
+            dispatch(
+                &Caller::Gui,
+                w,
+                "bench_template",
+                json!({"name":"michelson","apply":true,"revision":revision}),
+                None,
+            )
+            .unwrap();
         }
 
         /// A valid RGBA PNG with stored (uncompressed) deflate blocks.
@@ -540,7 +667,11 @@ pub(super) mod tests {
                 for &b in data {
                     c ^= u32::from(b);
                     for _ in 0..8 {
-                        c = if c & 1 == 1 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                        c = if c & 1 == 1 {
+                            0xedb8_8320 ^ (c >> 1)
+                        } else {
+                            c >> 1
+                        };
                     }
                 }
                 !c
@@ -585,37 +716,90 @@ pub(super) mod tests {
         fn start_status_fetch_over_the_broker() {
             let (_dir, w) = workspace();
             michelson(&w);
-            let started = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"svg"})));
+            let started = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"svg"}),
+            ));
             let id = started["id"].as_str().unwrap();
             let status = wait(&w, id);
-            assert_eq!((status["state"].as_str(), status["mime"].as_str()), (Some("done"), Some("image/svg+xml")), "{status}");
+            assert_eq!(
+                (status["state"].as_str(), status["mime"].as_str()),
+                (Some("done"), Some("image/svg+xml")),
+                "{status}"
+            );
             let fetched = mcp(&w, "artifact_fetch", json!({"id": id}));
             let meta = ok(&fetched);
             assert_eq!(meta["filename"], status["filename"]);
-            assert!(meta.get("data").is_none(), "the bytes travel in the second content item only");
+            assert!(
+                meta.get("data").is_none(),
+                "the bytes travel in the second content item only"
+            );
             let resource = &fetched["content"][1];
             assert_eq!(resource["type"], "resource");
             assert_eq!(resource["resource"]["mimeType"], "image/svg+xml");
-            assert_eq!(resource["resource"]["uri"], format!("artifact://{id}/{}", status["filename"].as_str().unwrap()));
+            assert_eq!(
+                resource["resource"]["uri"],
+                format!("artifact://{id}/{}", status["filename"].as_str().unwrap())
+            );
             // The artifact equals the synchronous export of the same revision.
-            let direct = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"svg"}), None).unwrap();
+            let direct = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"svg"}),
+                None,
+            )
+            .unwrap();
             assert_eq!(resource["resource"]["text"], direct["content"]);
             assert_eq!(status["bytes"], direct["content"].as_str().unwrap().len());
             assert_eq!(status["revision"], direct["revision"]);
             // A draft is generated from the draft, and marked unsaved.
-            let mut draft = dispatch(&Caller::Gui, &w, "bench_get", json!({}), None).unwrap()["bench"].clone();
+            let mut draft =
+                dispatch(&Caller::Gui, &w, "bench_get", json!({}), None).unwrap()["bench"].clone();
             draft["name"] = json!("Draft bench");
-            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"alignment_md","params":{"bench":draft}})))["id"].clone();
+            let id = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"alignment_md","params":{"bench":draft}}),
+            ))["id"]
+                .clone();
             let status = wait(&w, id.as_str().unwrap());
-            assert_eq!((status["state"].as_str(), status["saved"].as_bool()), (Some("done"), Some(false)), "{status}");
+            assert_eq!(
+                (status["state"].as_str(), status["saved"].as_bool()),
+                (Some("done"), Some(false)),
+                "{status}"
+            );
             // Errors are reported by the job; ids are checked.
             let empty = workspace();
-            let error = mcp(&empty.1, "artifact_start", json!({"kind":"blueprint","format":"svg"}));
+            let error = mcp(
+                &empty.1,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"svg"}),
+            );
             assert_eq!(error["isError"], true);
-            assert!(mcp(&w, "artifact_fetch", json!({"id":"artifact-999"}))["content"][0]["text"].as_str().unwrap().contains("Unknown artifact"));
+            assert!(
+                mcp(&w, "artifact_fetch", json!({"id":"artifact-999"}))["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Unknown artifact")
+            );
             // Artifacts belong to the session, not to batches.
-            let batch = dispatch(&Caller::Gui, &w, "batch", json!({"steps":[{"command":"artifact_status","args":{"id":"artifact-1"}}]}), None).unwrap();
-            assert!(batch["failed"]["error"].as_str().unwrap().contains("not allowed inside a batch"), "{batch}");
+            let batch = dispatch(
+                &Caller::Gui,
+                &w,
+                "batch",
+                json!({"steps":[{"command":"artifact_status","args":{"id":"artifact-1"}}]}),
+                None,
+            )
+            .unwrap();
+            assert!(
+                batch["failed"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not allowed inside a batch"),
+                "{batch}"
+            );
         }
 
         #[test]
@@ -623,37 +807,134 @@ pub(super) mod tests {
             let (_dir, w) = workspace();
             michelson(&w);
             // PNG: MCP image content equal to the direct export of the same revision.
-            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":2}})))["id"].clone();
+            let id = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"png","params":{"px_per_mm":2}}),
+            ))["id"]
+                .clone();
             let status = wait(&w, id.as_str().unwrap());
-            assert_eq!((status["state"].as_str(), status["mime"].as_str(), status["filename"].as_str()), (Some("done"), Some("image/png"), Some("hissabeth-bench.png")), "{status}");
+            assert_eq!(
+                (
+                    status["state"].as_str(),
+                    status["mime"].as_str(),
+                    status["filename"].as_str()
+                ),
+                (Some("done"), Some("image/png"), Some("hissabeth-bench.png")),
+                "{status}"
+            );
             let fetched = mcp(&w, "artifact_fetch", json!({"id": id}));
             let image = &fetched["content"][1];
-            assert_eq!((image["type"].as_str(), image["mimeType"].as_str()), (Some("image"), Some("image/png")));
-            let direct = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"png","px_per_mm":2}), None).unwrap();
-            assert_eq!((direct["encoding"].as_str(), direct["mime"].as_str(), direct["filename"].as_str()), (Some("base64"), Some("image/png"), Some("hissabeth-bench.png")));
+            assert_eq!(
+                (image["type"].as_str(), image["mimeType"].as_str()),
+                (Some("image"), Some("image/png"))
+            );
+            let direct = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"png","px_per_mm":2}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    direct["encoding"].as_str(),
+                    direct["mime"].as_str(),
+                    direct["filename"].as_str()
+                ),
+                (
+                    Some("base64"),
+                    Some("image/png"),
+                    Some("hissabeth-bench.png")
+                )
+            );
             assert_eq!(image["data"], direct["content"]);
-            assert!(direct["content"].as_str().unwrap().starts_with("iVBORw0KGgo"), "PNG signature");
+            assert!(
+                direct["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("iVBORw0KGgo"),
+                "PNG signature"
+            );
             // PDF: an embedded base64 blob resource for MCP, base64 data for the app.
-            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"pdf"})))["id"].clone();
+            let id = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"pdf"}),
+            ))["id"]
+                .clone();
             let status = wait(&w, id.as_str().unwrap());
-            assert_eq!((status["mime"].as_str(), status["filename"].as_str()), (Some("application/pdf"), Some("hissabeth-bench.pdf")), "{status}");
+            assert_eq!(
+                (status["mime"].as_str(), status["filename"].as_str()),
+                (Some("application/pdf"), Some("hissabeth-bench.pdf")),
+                "{status}"
+            );
             let resource = &mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["resource"];
-            assert_eq!((resource["mimeType"].as_str(), resource.get("text")), (Some("application/pdf"), None));
-            assert!(resource["blob"].as_str().unwrap().starts_with("JVBERi0"), "%PDF- header");
-            let app = dispatch(&Caller::Gui, &w, "artifact_fetch", json!({"id": id}), None).unwrap();
-            assert_eq!((app["encoding"].as_str(), &app["data"]), (Some("base64"), &resource["blob"]));
+            assert_eq!(
+                (resource["mimeType"].as_str(), resource.get("text")),
+                (Some("application/pdf"), None)
+            );
+            assert!(
+                resource["blob"].as_str().unwrap().starts_with("JVBERi0"),
+                "%PDF- header"
+            );
+            let app =
+                dispatch(&Caller::Gui, &w, "artifact_fetch", json!({"id": id}), None).unwrap();
+            assert_eq!(
+                (app["encoding"].as_str(), &app["data"]),
+                (Some("base64"), &resource["blob"])
+            );
             // Text formats keep plain content; px_per_mm is only for png.
-            let svg = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"svg"}), None).unwrap();
+            let svg = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"svg"}),
+                None,
+            )
+            .unwrap();
             assert!(svg.get("encoding").is_none());
-            let refused = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf","px_per_mm":2}), None).unwrap_err();
-            assert!(refused.contains("px_per_mm applies only to png"), "{refused}");
-            let outside = mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":400}}));
-            assert!(outside["content"][0]["text"].as_str().unwrap().contains("Value outside range at arguments.params.px_per_mm"), "{outside}");
+            let refused = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"pdf","px_per_mm":2}),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                refused.contains("px_per_mm applies only to png"),
+                "{refused}"
+            );
+            let outside = mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"png","params":{"px_per_mm":400}}),
+            );
+            assert!(
+                outside["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Value outside range at arguments.params.px_per_mm"),
+                "{outside}"
+            );
             // In range but too many pixels: the job fails and says why.
-            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":40}})))["id"].clone();
+            let id = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"png","params":{"px_per_mm":40}}),
+            ))["id"]
+                .clone();
             let status = wait(&w, id.as_str().unwrap());
             assert_eq!(status["state"], "failed");
-            assert!(status["error"].as_str().unwrap().contains("MP limit; lower px_per_mm"), "{status}");
+            assert!(
+                status["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("MP limit; lower px_per_mm"),
+                "{status}"
+            );
         }
 
         #[test]
@@ -662,31 +943,93 @@ pub(super) mod tests {
             michelson(&w);
             let args = json!({"format":"layout3d","view":{"azimuth_deg":-25,"elevation_deg":35},"rays_per_source":19,"color_by":"wavelength"});
             let svg = ok(&mcp(&w, "bench_export_blueprint", args.clone()));
-            assert_eq!((svg["filename"].as_str(), svg["mime"].as_str()), (Some("hissabeth-layout3d.svg"), Some("image/svg+xml")), "{svg}");
+            assert_eq!(
+                (svg["filename"].as_str(), svg["mime"].as_str()),
+                (Some("hissabeth-layout3d.svg"), Some("image/svg+xml")),
+                "{svg}"
+            );
             let content = svg["content"].as_str().unwrap();
-            assert!(content.contains(r#"width="420mm""#) && content.contains("azimuth -25° · elevation 35° · 19 rays per source"), "{content}");
-            assert_eq!(dispatch(&Caller::Gui, &w, "bench_export_blueprint", args, None).unwrap()["content"], svg["content"]);
+            assert!(
+                content.contains(r#"width="420mm""#)
+                    && content.contains("azimuth -25° · elevation 35° · 19 rays per source"),
+                "{content}"
+            );
+            assert_eq!(
+                dispatch(&Caller::Gui, &w, "bench_export_blueprint", args, None).unwrap()["content"],
+                svg["content"]
+            );
             // Without options, layout3d uses the iso preset.
-            let iso = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"layout3d"}), None).unwrap();
+            let iso = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"layout3d"}),
+                None,
+            )
+            .unwrap();
             assert!(iso["content"].as_str().unwrap().contains("azimuth -45°"));
-            let top = ok(&mcp(&w, "bench_export_blueprint", json!({"format":"layout3d","preset":"top","rays_per_source":6})));
-            assert!(top["content"].as_str().unwrap().contains("azimuth 0° · elevation 90° · 6 rays per source"), "{top}");
+            let top = ok(&mcp(
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"layout3d","preset":"top","rays_per_source":6}),
+            ));
+            assert!(
+                top["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("azimuth 0° · elevation 90° · 6 rays per source"),
+                "{top}"
+            );
             // layout3d true asks for the default 3-D layout as pdf; without it pdf is the plan.
-            let pdf = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf","layout3d":true}), None).unwrap();
+            let pdf = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"pdf","layout3d":true}),
+                None,
+            )
+            .unwrap();
             assert_eq!(pdf["filename"], "hissabeth-layout3d.pdf");
-            let plan = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf"}), None).unwrap();
+            let plan = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"pdf"}),
+                None,
+            )
+            .unwrap();
             assert_eq!(plan["filename"], "hissabeth-bench.pdf");
             let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":1,"preset":"top","background":"white"}})))["id"].clone();
             let status = wait(&w, id.as_str().unwrap());
-            assert_eq!((status["state"].as_str(), status["filename"].as_str()), (Some("done"), Some("hissabeth-layout3d.png")), "{status}");
-            assert_eq!(mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["type"], "image");
+            assert_eq!(
+                (status["state"].as_str(), status["filename"].as_str()),
+                (Some("done"), Some("hissabeth-layout3d.png")),
+                "{status}"
+            );
+            assert_eq!(
+                mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["type"],
+                "image"
+            );
             // Options are checked by the schema and refused for plan-only formats.
-            for bad in [json!({"format":"layout3d","preset":"oblique"}), json!({"format":"layout3d","colour":"red"})] {
+            for bad in [
+                json!({"format":"layout3d","preset":"oblique"}),
+                json!({"format":"layout3d","colour":"red"}),
+            ] {
                 let unknown = mcp(&w, "bench_export_blueprint", bad);
                 assert_eq!(unknown["isError"], true, "{unknown}");
             }
-            let refused = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"dxf","preset":"top"}), None).unwrap_err();
-            assert!(refused.contains("layout3d options apply only to layout3d, pdf and png"), "{refused}");
+            let refused = dispatch(
+                &Caller::Gui,
+                &w,
+                "bench_export_blueprint",
+                json!({"format":"dxf","preset":"top"}),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                refused.contains("layout3d options apply only to layout3d, pdf and png"),
+                "{refused}"
+            );
         }
 
         #[test]
@@ -696,73 +1039,199 @@ pub(super) mod tests {
             let store = w.read().unwrap().artifacts();
             let expected = bytes.clone();
             let id = start(&store, "blueprint", "png", 0, true, move || {
-                Ok(Output { filename: "bench.png".into(), mime: "image/png".into(), bytes })
+                Ok(Output {
+                    filename: "bench.png".into(),
+                    mime: "image/png".into(),
+                    bytes,
+                })
             })
             .unwrap()
             .id;
             settle(&store, &id);
             let fetched = mcp(&w, "artifact_fetch", json!({"id": id}));
             let image = &fetched["content"][1];
-            assert_eq!(image, &json!({"type":"image","mimeType":"image/png","data":base64(&expected)}));
+            assert_eq!(
+                image,
+                &json!({"type":"image","mimeType":"image/png","data":base64(&expected)})
+            );
             assert_eq!(ok(&fetched)["bytes"], expected.len());
             // Binary data that is not an image is a base64 blob resource.
             let id = start(&store, "blueprint", "bin", 0, true, || {
-                Ok(Output { filename: "a.bin".into(), mime: "application/octet-stream".into(), bytes: vec![0, 159, 146, 150] })
+                Ok(Output {
+                    filename: "a.bin".into(),
+                    mime: "application/octet-stream".into(),
+                    bytes: vec![0, 159, 146, 150],
+                })
             })
             .unwrap()
             .id;
             settle(&store, &id);
             let resource = &mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["resource"];
-            assert_eq!((resource["blob"].as_str(), resource.get("text")), (Some("AJ+Slg=="), None));
+            assert_eq!(
+                (resource["blob"].as_str(), resource.get("text")),
+                (Some("AJ+Slg=="), None)
+            );
         }
 
         #[test]
         fn export_is_held_to_the_file_scope() {
             let (dir, w) = workspace();
             michelson(&w);
-            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"dxf"})))["id"].as_str().unwrap().to_owned();
+            let id = ok(&mcp(
+                &w,
+                "artifact_start",
+                json!({"kind":"blueprint","format":"dxf"}),
+            ))["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
             assert_eq!(wait(&w, &id)["state"], "done");
             let outside = dir.path().join("outside");
             std::fs::create_dir_all(&outside).unwrap();
-            let denied = mcp(&w, "artifact_export", json!({"id": id, "path": outside.join("bench.dxf")}));
-            assert!(denied["content"][0]["text"].as_str().unwrap().contains("File access denied"), "{denied}");
+            let denied = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": outside.join("bench.dxf")}),
+            );
+            assert!(
+                denied["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("File access denied"),
+                "{denied}"
+            );
             assert!(!outside.join("bench.dxf").exists());
             // Inside the data directory, relative to its projects folder.
-            let exported = ok(&mcp(&w, "artifact_export", json!({"id": id, "path": "bench.dxf"})));
+            let exported = ok(&mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "bench.dxf"}),
+            ));
             let written = std::fs::read(dir.path().join("data/projects/bench.dxf")).unwrap();
             assert_eq!(exported["bytes"], written.len());
-            let fetched = w.read().unwrap().artifacts().lock().unwrap().fetch(&id).unwrap();
+            let fetched = w
+                .read()
+                .unwrap()
+                .artifacts()
+                .lock()
+                .unwrap()
+                .fetch(&id)
+                .unwrap();
             assert_eq!(base64(&written), fetched.data);
             // The path needs an extension, and an existing parent.
             let error = mcp(&w, "artifact_export", json!({"id": id, "path": "bench"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("extension"), "{error}");
-            let error = mcp(&w, "artifact_export", json!({"id": id, "path": "missing/bench.dxf"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("does not exist"), "{error}");
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("extension"),
+                "{error}"
+            );
+            let error = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "missing/bench.dxf"}),
+            );
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not exist"),
+                "{error}"
+            );
             // The workspace's own system.json is the open project.
             let project = std::fs::read(dir.path().join("data/system.json")).unwrap();
-            let error = mcp(&w, "artifact_export", json!({"id": id, "path": "../system.json"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("open project"), "{error}");
+            let error = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "../system.json"}),
+            );
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("open project"),
+                "{error}"
+            );
             // Any other path must keep the artifact's extension.
-            let error = mcp(&w, "artifact_export", json!({"id": id, "path": "other.json"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("must end in .dxf"), "{error}");
-            assert_eq!(std::fs::read(dir.path().join("data/system.json")).unwrap(), project);
+            let error = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "other.json"}),
+            );
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("must end in .dxf"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("data/system.json")).unwrap(),
+                project
+            );
             // A project saved under the artifact's own extension is protected
             // by its path.
             let revision = w.read().unwrap().engine().unwrap().revision;
-            ok(&mcp(&w, "project_save_as", json!({"path": "design.dxf", "revision": revision})));
+            ok(&mcp(
+                &w,
+                "project_save_as",
+                json!({"path": "design.dxf", "revision": revision}),
+            ));
             let saved = std::fs::read(dir.path().join("data/projects/design.dxf")).unwrap();
-            let error = mcp(&w, "artifact_export", json!({"id": id, "path": "design.dxf"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("open project"), "{error}");
-            assert_eq!(std::fs::read(dir.path().join("data/projects/design.dxf")).unwrap(), saved);
+            let error = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "design.dxf"}),
+            );
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("open project"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("data/projects/design.dxf")).unwrap(),
+                saved
+            );
             // So is any other name for the same file, such as a hard link (or a
             // different letter case on a case-insensitive volume).
-            std::fs::hard_link(dir.path().join("data/projects/design.dxf"), dir.path().join("data/projects/alias.dxf")).unwrap();
-            let error = mcp(&w, "artifact_export", json!({"id": id, "path": "alias.dxf"}));
-            assert!(error["content"][0]["text"].as_str().unwrap().contains("open project"), "{error}");
-            assert_eq!(std::fs::read(dir.path().join("data/projects/design.dxf")).unwrap(), saved);
+            std::fs::hard_link(
+                dir.path().join("data/projects/design.dxf"),
+                dir.path().join("data/projects/alias.dxf"),
+            )
+            .unwrap();
+            let error = mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": "alias.dxf"}),
+            );
+            assert!(
+                error["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("open project"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("data/projects/design.dxf")).unwrap(),
+                saved
+            );
             // The GUI may export anywhere, and that grants the directory.
-            dispatch(&Caller::Gui, &w, "artifact_export", json!({"id": id, "path": outside.join("bench.dxf")}), None).unwrap();
-            ok(&mcp(&w, "artifact_export", json!({"id": id, "path": outside.join("again.dxf")})));
+            dispatch(
+                &Caller::Gui,
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": outside.join("bench.dxf")}),
+                None,
+            )
+            .unwrap();
+            ok(&mcp(
+                &w,
+                "artifact_export",
+                json!({"id": id, "path": outside.join("again.dxf")}),
+            ));
             assert!(outside.join("again.dxf").exists());
         }
     }

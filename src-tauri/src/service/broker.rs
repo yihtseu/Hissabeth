@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Multi-threaded loopback JSON-RPC broker and MCP stdio relay.
-use super::{Caller, ChangeNotifier, Scope, SharedWorkspace, ToolCaller, data_dir, dispatch, tools};
+use super::{
+    Caller, ChangeNotifier, Scope, SharedWorkspace, ToolCaller, data_dir, dispatch, tools,
+};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -66,9 +68,15 @@ fn respond(
 /// image content for images, or as an embedded resource holding text or a
 /// base64 blob.
 fn artifact_content(mut fetched: Value) -> Value {
-    let data = fetched.as_object_mut().and_then(|o| o.remove("data")).unwrap_or_default();
+    let data = fetched
+        .as_object_mut()
+        .and_then(|o| o.remove("data"))
+        .unwrap_or_default();
     let data = data.as_str().unwrap_or_default();
-    let mime = fetched["mime"].as_str().unwrap_or("application/octet-stream").to_owned();
+    let mime = fetched["mime"]
+        .as_str()
+        .unwrap_or("application/octet-stream")
+        .to_owned();
     let uri = format!(
         "artifact://{}/{}",
         fetched["id"].as_str().unwrap_or_default(),
@@ -78,7 +86,9 @@ fn artifact_content(mut fetched: Value) -> Value {
         json!({"type":"image","data":data,"mimeType":mime})
     } else {
         match decode_text(data) {
-            Some(text) => json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"text":text}}),
+            Some(text) => {
+                json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"text":text}})
+            }
             None => json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"blob":data}}),
         }
     };
@@ -185,7 +195,9 @@ pub fn serve_with_notifier(
                         let caller = Caller::Broker(scope.merge(&forwarded));
                         rpc_shared(req["request"].clone(), &caller, &engine, on_change.as_ref())
                     }
-                    Err(e) => Some(json!({"jsonrpc":"2.0","id":req["request"]["id"],"error":{"code":-32602,"message":e}})),
+                    Err(e) => Some(
+                        json!({"jsonrpc":"2.0","id":req["request"]["id"],"error":{"code":-32602,"message":e}}),
+                    ),
                 };
                 if let Some(r) = response {
                     let _ = writeln!(stream, "{r}");

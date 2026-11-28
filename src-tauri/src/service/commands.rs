@@ -322,7 +322,9 @@ pub(super) fn bench_set(target: Target<'_>, args: p::BenchSet) -> Result<BenchSe
         };
         let mut next = e.system.clone();
         next.bench = Some(bench);
-        let revision = e.commit_with_action(next, args.revision, "bench_set")?.revision;
+        let revision = e
+            .commit_with_action(next, args.revision, "bench_set")?
+            .revision;
         Ok(BenchSetResult { revision, trace })
     })
 }
@@ -366,7 +368,9 @@ pub(super) fn bench_drawing(
     if !(1. ..=50.).contains(&text_mm) {
         return Err(format!("text_mm must be between 1 and 50, got {text_mm}"));
     }
-    bench_report(target, args.bench, |b, s, _| bench_lab::blueprint_drawing(b, s, text_mm))
+    bench_report(target, args.bench, |b, s, _| {
+        bench_lab::blueprint_drawing(b, s, text_mm)
+    })
 }
 
 pub(super) fn bench_field(
@@ -380,7 +384,9 @@ pub(super) fn bench_field(
         realizations: args.realizations,
         arrays: args.arrays,
     };
-    bench_report(target, args.bench, |b, s, _| bench_lab::field::field(b, s, &request))
+    bench_report(target, args.bench, |b, s, _| {
+        bench_lab::field::field(b, s, &request)
+    })
 }
 
 pub(super) fn bench_readout(
@@ -406,7 +412,12 @@ pub(super) fn bench_export_blueprint(
     let saved = args.bench.is_none();
     bench_report(target, args.bench, |b, s, revision| {
         bench_lab::export_blueprint_file(
-            b, s, &args.format, args.px_per_mm, args.layout3d.requested(), Some(bench_lab::BlueprintRevision { revision, saved }),
+            b,
+            s,
+            &args.format,
+            args.px_per_mm,
+            args.layout3d.requested(),
+            Some(bench_lab::BlueprintRevision { revision, saved }),
         )
     })
 }
@@ -423,32 +434,60 @@ pub(super) fn artifact_start(
     let format = args.format.clone();
     let px_per_mm = args.params.px_per_mm;
     let layout3d = args.params.layout3d;
-    artifacts::start(&store, &args.kind, &args.format, revision, saved, move || {
-        let drawing = bench_lab::export_blueprint_file(
-            &bench, &system, &format, px_per_mm, layout3d.requested(), Some(bench_lab::BlueprintRevision { revision, saved }),
-        )?;
-        let (filename, mime, bytes) = drawing.into_file();
-        Ok(artifacts::Output { filename, mime: mime.into(), bytes })
-    })
+    artifacts::start(
+        &store,
+        &args.kind,
+        &args.format,
+        revision,
+        saved,
+        move || {
+            let drawing = bench_lab::export_blueprint_file(
+                &bench,
+                &system,
+                &format,
+                px_per_mm,
+                layout3d.requested(),
+                Some(bench_lab::BlueprintRevision { revision, saved }),
+            )?;
+            let (filename, mime, bytes) = drawing.into_file();
+            Ok(artifacts::Output {
+                filename,
+                mime: mime.into(),
+                bytes,
+            })
+        },
+    )
 }
 
-pub(super) fn artifact_status(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Status, String> {
+pub(super) fn artifact_status(
+    target: &Target<'_>,
+    args: p::ArtifactId,
+) -> Result<artifacts::Status, String> {
     let (_, store) = target.artifacts("artifact_status")?;
     store.lock().map_err(|e| e.to_string())?.status(&args.id)
 }
 
-pub(super) fn artifact_fetch(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Fetched, String> {
+pub(super) fn artifact_fetch(
+    target: &Target<'_>,
+    args: p::ArtifactId,
+) -> Result<artifacts::Fetched, String> {
     let (_, store) = target.artifacts("artifact_fetch")?;
     store.lock().map_err(|e| e.to_string())?.fetch(&args.id)
 }
 
-pub(super) fn artifact_export(target: &Target<'_>, args: p::ArtifactExport) -> Result<artifacts::Exported, String> {
+pub(super) fn artifact_export(
+    target: &Target<'_>,
+    args: p::ArtifactExport,
+) -> Result<artifacts::Exported, String> {
     let (workspace_file, store) = target.artifacts("artifact_export")?;
     if args.path.trim().is_empty() {
         return Err("Export path is required".into());
     }
     if Path::new(&args.path).extension().is_none() {
-        return Err(format!("Export path {:?} needs a file name with its extension, such as drawing.svg", args.path));
+        return Err(format!(
+            "Export path {:?} needs a file name with its extension, such as drawing.svg",
+            args.path
+        ));
     }
     let path = ProjectFiles::locate(&workspace_file, &args.path, true)?;
     if ProjectFiles::reserved(&workspace_file, &path) {
@@ -458,7 +497,10 @@ pub(super) fn artifact_export(target: &Target<'_>, args: p::ArtifactExport) -> R
     let linked = target
         .read(|e| Ok(e.projects.linked_path.clone()))
         .unwrap_or_else(|_| ProjectFiles::load(&workspace_file).linked_path);
-    let normal = |p: &Path| match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+    let normal = |p: &Path| match (
+        p.parent().and_then(|d| d.canonicalize().ok()),
+        p.file_name(),
+    ) {
         (Some(dir), Some(name)) => dir.join(name),
         _ => p.to_path_buf(),
     };
@@ -474,12 +516,21 @@ pub(super) fn artifact_export(target: &Target<'_>, args: p::ArtifactExport) -> R
         ));
     }
     if !path.parent().is_some_and(Path::is_dir) {
-        return Err(format!("Cannot write {}: its parent directory does not exist", path.display()));
+        return Err(format!(
+            "Cannot write {}: its parent directory does not exist",
+            path.display()
+        ));
     }
-    store.lock().map_err(|e| e.to_string())?.export(&args.id, &path)
+    store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .export(&args.id, &path)
 }
 
-pub(super) fn artifact_cancel(target: &Target<'_>, args: p::ArtifactId) -> Result<artifacts::Status, String> {
+pub(super) fn artifact_cancel(
+    target: &Target<'_>,
+    args: p::ArtifactId,
+) -> Result<artifacts::Status, String> {
     let (_, store) = target.artifacts("artifact_cancel")?;
     store.lock().map_err(|e| e.to_string())?.cancel(&args.id)
 }
@@ -523,7 +574,12 @@ pub(super) fn bench_auto_aim(
     args: p::BenchAutoAim,
 ) -> Result<Preview<bench_lab::AimResult>, String> {
     let aim = |scene: &bench::Bench, system: &System| {
-        bench_lab::aim(scene, args.snap_holes.unwrap_or(false), args.uniform_z, system)
+        bench_lab::aim(
+            scene,
+            args.snap_holes.unwrap_or(false),
+            args.uniform_z,
+            system,
+        )
     };
     if args.apply == Some(true) {
         let revision = args.revision.ok_or("Missing arguments.revision")?;
@@ -543,7 +599,11 @@ pub(super) fn bench_auto_aim(
     }
     if let Some(scene) = args.bench {
         target.standalone()?;
-        let data = if scene.elements.iter().any(|e| e.kind == bench::Kind::LensGroup) {
+        let data = if scene
+            .elements
+            .iter()
+            .any(|e| e.kind == bench::Kind::LensGroup)
+        {
             target.system(|system, _| aim(&scene, system))?
         } else {
             aim(&scene, &System::default())?

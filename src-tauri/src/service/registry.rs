@@ -162,7 +162,10 @@ impl Target<'_> {
     /// The workspace file and the session's artifact store. Artifacts belong
     /// to a workspace session, so batches (which run on the bare engine)
     /// cannot reach them.
-    pub(super) fn artifacts(&self, name: &str) -> Result<(PathBuf, super::artifacts::Shared), String> {
+    pub(super) fn artifacts(
+        &self,
+        name: &str,
+    ) -> Result<(PathBuf, super::artifacts::Shared), String> {
         match self {
             Self::Shared(shared, _) => {
                 let w = shared.read().map_err(|e| e.to_string())?;
@@ -248,7 +251,13 @@ macro_rules! tool {
 pub fn registry() -> &'static [CommandSpec] {
     static TOOLS: LazyLock<Vec<CommandSpec>> = LazyLock::new(|| {
         vec![
-            tool!(Meta, batch, Mutate, Steps, "Run ordered optical commands under one workspace lock. Supply an optional starting revision. Mutations inherit the current step revision. Stop at the first error; rollback defaults to true. History, workspace control, capabilities, artifact and nested batch commands are excluded."),
+            tool!(
+                Meta,
+                batch,
+                Mutate,
+                Steps,
+                "Run ordered optical commands under one workspace lock. Supply an optional starting revision. Mutations inherit the current step revision. Stop at the first error; rollback defaults to true. History, workspace control, capabilities, artifact and nested batch commands are excluded."
+            ),
             tool!(
                 bench_get,
                 Read,
@@ -334,49 +343,57 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Return a lab blueprint or alignment SOP with its filename, MIME type and content: text, or base64 with encoding base64 for pdf and png. SVG and PDF share one millimetre drawing; the PDF page is its physical size, so printing at 100% keeps hole pitch and rulers 1:1. PNG is rasterised at px_per_mm (default 4). The drawing shows the project revision, stage readings, branch OPL, assertion results and highlighted stage-controlled arms. Format layout3d returns a shaded axonometric 3-D layout SVG (A3) with solid parts, sampled ray bundles, scale bar and axis triad; options beside format choose the view (azimuth/elevation, zoom and pan as the workbench 3D mode, or preset iso, top, side), rays_per_source, color_by branch, wavelength or field, background, optional table, holes and mounts, stroke, thickness_mm and lens_shape; with pdf or png, any of them (or layout3d true) delivers that layout instead of the plan. Prefer artifact_start for pdf and png."
             ),
             tool!(
-                Meta, artifact_start,
+                Meta,
+                artifact_start,
                 Read,
                 None,
                 "Start generating a deliverable on a background thread and return its id at once. kind blueprint takes the bench blueprint formats of bench_export_blueprint; params.bench optionally supplies an unsaved bench draft; params.px_per_mm sets the png resolution; params also takes the 3-D layout options of bench_export_blueprint. Poll artifact_status, then artifact_fetch or artifact_export. Artifacts live for this session only: one may hold 16 MB, and the oldest finished ones are evicted once all exceed 64 MB."
             ),
             tool!(
-                Meta, artifact_status,
+                Meta,
+                artifact_status,
                 Read,
                 None,
                 "Read an artifact job: queued, running, done, failed (with error) or cancelled, the project revision it was generated from, and when done its filename, MIME type and byte size."
             ),
             tool!(
-                Meta, artifact_fetch,
+                Meta,
+                artifact_fetch,
                 Read,
                 None,
                 "Return a finished artifact's bytes. Over MCP an image arrives as image content and other files as an embedded resource (text, or base64 blob for binary data); the app receives base64 data with filename and MIME type."
             ),
             tool!(
-                Meta, artifact_export,
+                Meta,
+                artifact_export,
                 Read,
                 Write,
                 "Write a finished artifact to a file path that includes its extension. Relative paths resolve inside the workspace projects directory; the parent directory must exist, and an existing file is replaced atomically."
             ),
             tool!(
-                Meta, artifact_cancel,
+                Meta,
+                artifact_cancel,
                 Read,
                 None,
                 "Cancel a queued or running artifact; its result is discarded."
             ),
             tool!(
-                Meta, workspace_status,
+                Meta,
+                workspace_status,
                 Read,
                 None,
                 "Read the workspace state before requesting optical data. A recovery state is connected but has no active optical system."
             ),
             tool!(
-                Meta, workspace_retry,
+                Meta,
+                workspace_retry,
                 Mutate,
                 Read,
                 "While recovery is active, reread a user-repaired saved file under the current workspace lease. A missing or invalid file stays in recovery. Requires its current recovery revision."
             ),
             tool!(
-                Meta, workspace_recover,
+                Meta,
+                workspace_recover,
                 Mutate,
                 Write,
                 "While recovery is active, validate a chosen native/Geopter/ZMX project or create a new system. Preserve the original file before installing the chosen system; reject changed disk contents and stale recovery revisions. No optical tool can write through recovery."
@@ -442,31 +459,36 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Run parallel seeded Monte Carlo tolerance trials with optional autofocus compensator, returning distribution statistics (mean, std_dev, min/max, p50/p80/p90/p95/p98), pass yield rate, compensator stroke range, and histogram."
             ),
             tool!(
-                Meta, history_list,
+                Meta,
+                history_list,
                 Read,
                 None,
                 "List the in-memory revision history snapshots of the current workspace, including undo/redo availability."
             ),
             tool!(
-                Meta, history_undo,
+                Meta,
+                history_undo,
                 Mutate,
                 None,
                 "Undo the latest workspace mutation by restoring the previous prescription and project link. Requires the current revision."
             ),
             tool!(
-                Meta, history_redo,
+                Meta,
+                history_redo,
                 Mutate,
                 None,
                 "Redo a previously undone workspace mutation atomically. Requires the current revision."
             ),
             tool!(
-                Meta, history_restore,
+                Meta,
+                history_restore,
                 Mutate,
                 None,
                 "Restore a historical prescription and project link by its zero-based index from history_list. The restore is undoable and requires the current revision."
             ),
             tool!(
-                Meta, history_compare,
+                Meta,
+                history_compare,
                 Read,
                 None,
                 "Compare two revision history snapshots (default: previous vs current), returning optical metric deltas (EFL, BFL, F/#, RMS spot) and per-surface prescription diffs."
@@ -730,7 +752,8 @@ pub fn registry() -> &'static [CommandSpec] {
                 "Export the current prescription as native or Geopter JSON text"
             ),
             tool!(
-                Meta, capabilities,
+                Meta,
+                capabilities,
                 Read,
                 None,
                 "Describe all implemented tools and physical scope"

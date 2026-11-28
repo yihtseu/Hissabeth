@@ -51,7 +51,9 @@ impl Scope {
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let given = if arg == "--allow-path" {
-                args.next().ok_or("--allow-path requires a directory")?.clone()
+                args.next()
+                    .ok_or("--allow-path requires a directory")?
+                    .clone()
             } else if let Some(dir) = arg.strip_prefix("--allow-path=") {
                 dir.to_owned()
             } else {
@@ -79,13 +81,22 @@ impl Scope {
 
     /// Reads a relay envelope; every root is canonicalized again here.
     pub fn from_envelope(value: &Value) -> Result<Self, String> {
-        let mut scope = Self { allow: Vec::new(), any: value["any"] == true };
+        let mut scope = Self {
+            allow: Vec::new(),
+            any: value["any"] == true,
+        };
         for allowed in value["allow"].as_array().into_iter().flatten() {
-            let (Some(given), Some(root)) = (allowed["given"].as_str(), allowed["root"].as_str()) else {
+            let (Some(given), Some(root)) = (allowed["given"].as_str(), allowed["root"].as_str())
+            else {
                 return Err("Invalid relay scope".into());
             };
-            let root = Path::new(root).canonicalize().map_err(|e| format!("--allow-path {given}: {e}"))?;
-            scope.allow.push(Allowed { given: given.to_owned(), root });
+            let root = Path::new(root)
+                .canonicalize()
+                .map_err(|e| format!("--allow-path {given}: {e}"))?;
+            scope.allow.push(Allowed {
+                given: given.to_owned(),
+                root,
+            });
         }
         Ok(scope)
     }
@@ -102,34 +113,64 @@ impl Scope {
     }
 
     /// Checks every path a command (or each step of a batch) names.
-    pub(super) fn check(&self, workspace_file: &Path, session: &[PathBuf], name: &str, args: &Value) -> Result<(), String> {
+    pub(super) fn check(
+        &self,
+        workspace_file: &Path,
+        session: &[PathBuf],
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
         if self.any {
             return Ok(());
         }
         let spec = registry::lookup(name)?;
         match spec.files {
             FileAccess::None => Ok(()),
-            FileAccess::Steps => args["steps"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .try_for_each(|step| self.check(workspace_file, session, step["command"].as_str().unwrap_or(""), &step["args"])),
+            FileAccess::Steps => {
+                args["steps"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .try_for_each(|step| {
+                        self.check(
+                            workspace_file,
+                            session,
+                            step["command"].as_str().unwrap_or(""),
+                            &step["args"],
+                        )
+                    })
+            }
             FileAccess::Read | FileAccess::Write => match args["path"].as_str() {
                 // An empty path is the command's own error.
-                Some(path) if !path.trim().is_empty() => self.check_path(workspace_file, session, path, spec.files == FileAccess::Write),
+                Some(path) if !path.trim().is_empty() => self.check_path(
+                    workspace_file,
+                    session,
+                    path,
+                    spec.files == FileAccess::Write,
+                ),
                 Some(_) => Ok(()),
                 // Commands without a path still touch fixed locations; a link
                 // there must not lead out of the scope.
                 None => match implicit(name, workspace_file) {
-                    Some(path) => self.check_path(workspace_file, session, &path.to_string_lossy(), false),
+                    Some(path) => {
+                        self.check_path(workspace_file, session, &path.to_string_lossy(), false)
+                    }
                     None => Ok(()),
                 },
             },
         }
     }
 
-    fn check_path(&self, workspace_file: &Path, session: &[PathBuf], path: &str, save: bool) -> Result<(), String> {
-        let data = workspace_dir(workspace_file).canonicalize().map_err(|e| e.to_string())?;
+    fn check_path(
+        &self,
+        workspace_file: &Path,
+        session: &[PathBuf],
+        path: &str,
+        save: bool,
+    ) -> Result<(), String> {
+        let data = workspace_dir(workspace_file)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
         let located = ProjectFiles::locate(workspace_file, path, save)?;
         let (Some(parent), Some(name)) = (located.parent(), located.file_name()) else {
             return Err(format!("{path}: not a file path"));
@@ -143,8 +184,13 @@ impl Scope {
                 (joined.canonicalize().unwrap_or(joined), false)
             }
             Err(_) => {
-                let existing = parent.ancestors().find(|a| a.exists()).unwrap_or(Path::new("/"));
-                let base = existing.canonicalize().map_err(|e| format!("{path}: {}: {e}", existing.display()))?;
+                let existing = parent
+                    .ancestors()
+                    .find(|a| a.exists())
+                    .unwrap_or(Path::new("/"));
+                let base = existing
+                    .canonicalize()
+                    .map_err(|e| format!("{path}: {}: {e}", existing.display()))?;
                 let rest = parent.strip_prefix(existing).unwrap_or(parent);
                 (lexical(&base.join(rest).join(name)), true)
             }
@@ -163,9 +209,20 @@ impl Scope {
     /// Whether `resolved` lies in the scope; the refusal names the requested
     /// and resolved paths, the scope, any `--allow-path` the request seemed to
     /// fall under, and how to allow it.
-    fn within(&self, data: &Path, session: &[PathBuf], path: &str, located: &Path, resolved: &Path) -> Result<(), String> {
+    fn within(
+        &self,
+        data: &Path,
+        session: &[PathBuf],
+        path: &str,
+        located: &Path,
+        resolved: &Path,
+    ) -> Result<(), String> {
         let session = session.iter().filter_map(|d| d.canonicalize().ok());
-        if std::iter::once(data.to_path_buf()).chain(session).chain(self.allow.iter().map(|a| a.root.clone())).any(|root| resolved.starts_with(root)) {
+        if std::iter::once(data.to_path_buf())
+            .chain(session)
+            .chain(self.allow.iter().map(|a| a.root.clone()))
+            .any(|root| resolved.starts_with(root))
+        {
             return Ok(());
         }
         let near = self
@@ -178,7 +235,10 @@ impl Scope {
             "File access denied: {path} resolves to {}, outside the agent file scope (the app data directory {}, directories opened or saved in the app this session{}).{near} Start the MCP relay with --allow-path <dir> to allow a directory, or --allow-any-path to lift the scope.",
             resolved.display(),
             data.display(),
-            self.allow.iter().map(|a| format!(", --allow-path {}", a.given)).collect::<String>(),
+            self.allow
+                .iter()
+                .map(|a| format!(", --allow-path {}", a.given))
+                .collect::<String>(),
         ))
     }
 }
@@ -186,7 +246,11 @@ impl Scope {
 /// The fixed location a path-less file command reads or writes.
 fn implicit(name: &str, workspace_file: &Path) -> Option<PathBuf> {
     let dir = workspace_dir(workspace_file);
-    let dir = if dir.is_absolute() { dir.to_path_buf() } else { std::env::current_dir().ok()?.join(dir) };
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
     match name {
         "project_list" => Some(dir.join("projects")),
         "workspace_retry" | "workspace_recover" => Some(dir.join(workspace_file.file_name()?)),
@@ -275,10 +339,28 @@ mod tests {
         let (data, outside) = (root.path().join("data"), root.path().join("outside"));
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let workspace = Arc::new(RwLock::new(Workspace::open(data.join("system.json")).unwrap()));
-        let fixture = Fixture { _root: root, data, outside, workspace };
-        let text = dispatch(&Caller::Gui, &fixture.workspace, "project_export", json!({"format": "hissabeth"}), None).unwrap();
-        std::fs::write(fixture.outside.join("lens.hissabeth.json"), text["text"].as_str().unwrap()).unwrap();
+        let workspace = Arc::new(RwLock::new(
+            Workspace::open(data.join("system.json")).unwrap(),
+        ));
+        let fixture = Fixture {
+            _root: root,
+            data,
+            outside,
+            workspace,
+        };
+        let text = dispatch(
+            &Caller::Gui,
+            &fixture.workspace,
+            "project_export",
+            json!({"format": "hissabeth"}),
+            None,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.outside.join("lens.hissabeth.json"),
+            text["text"].as_str().unwrap(),
+        )
+        .unwrap();
         fixture
     }
 
@@ -288,7 +370,8 @@ mod tests {
         }
         fn save(&self, caller: &Caller, path: &str) -> Result<String, String> {
             let args = json!({"path": path, "revision": self.revision()});
-            dispatch(caller, &self.workspace, "project_save_as", args, None).map(|r| r["path"].as_str().unwrap().to_owned())
+            dispatch(caller, &self.workspace, "project_save_as", args, None)
+                .map(|r| r["path"].as_str().unwrap().to_owned())
         }
         fn open(&self, caller: &Caller, path: &str) -> Result<Value, String> {
             let args = json!({"path": path, "revision": self.revision()});
@@ -297,7 +380,9 @@ mod tests {
     }
 
     fn agent(args: &[&str]) -> Caller {
-        Caller::Broker(Scope::from_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap())
+        Caller::Broker(
+            Scope::from_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap(),
+        )
     }
 
     #[test]
@@ -310,8 +395,13 @@ mod tests {
         f.save(&default, "fresh/design").unwrap();
         f.open(&default, "fresh/design.hissabeth.json").unwrap();
         let allowed = agent(&["--allow-path", f.outside.to_str().unwrap()]);
-        f.open(&allowed, f.outside.join("lens.hissabeth.json").to_str().unwrap()).unwrap();
-        f.save(&allowed, f.outside.join("copy").to_str().unwrap()).unwrap();
+        f.open(
+            &allowed,
+            f.outside.join("lens.hissabeth.json").to_str().unwrap(),
+        )
+        .unwrap();
+        f.save(&allowed, f.outside.join("copy").to_str().unwrap())
+            .unwrap();
         assert!(f.outside.join("copy.hissabeth.json").is_file());
     }
 
@@ -320,12 +410,28 @@ mod tests {
         let f = fixture();
         let target = f.outside.join("lens.hissabeth.json");
         let error = f.open(&agent(&[]), target.to_str().unwrap()).unwrap_err();
-        assert!(error.contains("File access denied") && error.contains("--allow-path <dir>"), "{error}");
-        assert!(error.contains(&target.canonicalize().unwrap().display().to_string()), "{error}");
+        assert!(
+            error.contains("File access denied") && error.contains("--allow-path <dir>"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&target.canonicalize().unwrap().display().to_string()),
+            "{error}"
+        );
         // Missing files outside are refused, not reported as missing.
-        let error = f.open(&agent(&[]), f.outside.join("absent/lens.hissabeth.json").to_str().unwrap()).unwrap_err();
+        let error = f
+            .open(
+                &agent(&[]),
+                f.outside
+                    .join("absent/lens.hissabeth.json")
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap_err();
         assert!(error.contains("File access denied"), "{error}");
-        let error = f.save(&agent(&[]), f.outside.join("new").to_str().unwrap()).unwrap_err();
+        let error = f
+            .save(&agent(&[]), f.outside.join("new").to_str().unwrap())
+            .unwrap_err();
         assert!(error.contains("File access denied"), "{error}");
         assert!(!f.outside.join("new.hissabeth.json").exists());
         // Inside a batch, every step is checked before any runs.
@@ -346,13 +452,19 @@ mod tests {
         let only = agent(&["--allow-path", allowed.to_str().unwrap()]);
         std::fs::create_dir_all(f.data.join("projects")).unwrap();
         // `..` leaves the data directory.
-        let error = f.open(&only, "../../outside/lens.hissabeth.json").unwrap_err();
+        let error = f
+            .open(&only, "../../outside/lens.hissabeth.json")
+            .unwrap_err();
         assert!(error.contains("File access denied"), "{error}");
         #[cfg(unix)]
         {
             let link = f.data.join("projects");
             std::os::unix::fs::symlink(&f.outside, link.join("away")).unwrap();
-            std::os::unix::fs::symlink(f.outside.join("lens.hissabeth.json"), allowed.join("lens.hissabeth.json")).unwrap();
+            std::os::unix::fs::symlink(
+                f.outside.join("lens.hissabeth.json"),
+                allowed.join("lens.hissabeth.json"),
+            )
+            .unwrap();
             // A linked directory out of the data directory.
             let error = f.open(&only, "away/lens.hissabeth.json").unwrap_err();
             assert!(error.contains("File access denied"), "{error}");
@@ -360,8 +472,14 @@ mod tests {
             assert!(error.contains("File access denied"), "{error}");
             assert!(!f.outside.join("written.hissabeth.json").exists());
             // A linked file under an --allow-path names the rule it seemed to match.
-            let error = f.open(&only, allowed.join("lens.hissabeth.json").to_str().unwrap()).unwrap_err();
-            assert!(error.contains("lies under --allow-path") && error.contains(allowed.to_str().unwrap()), "{error}");
+            let error = f
+                .open(&only, allowed.join("lens.hissabeth.json").to_str().unwrap())
+                .unwrap_err();
+            assert!(
+                error.contains("lies under --allow-path")
+                    && error.contains(allowed.to_str().unwrap()),
+                "{error}"
+            );
         }
     }
 
@@ -373,8 +491,13 @@ mod tests {
         let projects = f.data.join("projects");
         std::fs::remove_dir_all(&projects).unwrap();
         std::os::unix::fs::symlink(&f.outside, &projects).unwrap();
-        let error = dispatch(&agent(&[]), &f.workspace, "project_list", json!({}), None).unwrap_err();
-        assert!(error.contains("File access denied") && error.contains(&f.outside.canonicalize().unwrap().display().to_string()), "{error}");
+        let error =
+            dispatch(&agent(&[]), &f.workspace, "project_list", json!({}), None).unwrap_err();
+        assert!(
+            error.contains("File access denied")
+                && error.contains(&f.outside.canonicalize().unwrap().display().to_string()),
+            "{error}"
+        );
         let listed = dispatch(&Caller::Gui, &f.workspace, "project_list", json!({}), None).unwrap();
         assert!(listed.to_string().contains("lens.hissabeth.json"));
     }
@@ -387,28 +510,56 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             dir
         };
-        let revision = |w: &SharedWorkspace| dispatch(&Caller::Gui, w, "system_get", json!({}), None).unwrap()["revision"].clone();
+        let revision = |w: &SharedWorkspace| {
+            dispatch(&Caller::Gui, w, "system_get", json!({}), None).unwrap()["revision"].clone()
+        };
         let save = |path: PathBuf| json!({"command": "project_save_as", "args": {"path": path}});
         let fail = json!({"command": "project_open", "args": {"path": f.data.join("projects/absent.hissabeth.json")}});
         let batch = |steps: Vec<Value>, rollback: bool| {
-            dispatch(&Caller::Gui, &f.workspace, "batch", json!({"steps": steps, "rollback": rollback}), None).unwrap()
+            dispatch(
+                &Caller::Gui,
+                &f.workspace,
+                "batch",
+                json!({"steps": steps, "rollback": rollback}),
+                None,
+            )
+            .unwrap()
         };
         let reachable = |dir: &Path| {
             let args = json!({"path": dir.join("design.hissabeth.json"), "revision": revision(&f.workspace)});
             dispatch(&agent(&[]), &f.workspace, "project_open", args, None).is_ok()
         };
-        let (kept, rolled, prefix, after) = (dir("kept"), dir("rolled"), dir("prefix"), dir("after"));
+        let (kept, rolled, prefix, after) =
+            (dir("kept"), dir("rolled"), dir("prefix"), dir("after"));
         assert_eq!(batch(vec![save(kept.join("design"))], true)["ok"], true);
         assert!(reachable(&kept));
         // A failed batch that rolls back keeps nothing.
-        assert_eq!(batch(vec![save(rolled.join("design")), fail.clone()], true)["ok"], false);
-        std::fs::write(rolled.join("design.hissabeth.json"), std::fs::read(kept.join("design.hissabeth.json")).unwrap()).unwrap();
+        assert_eq!(
+            batch(vec![save(rolled.join("design")), fail.clone()], true)["ok"],
+            false
+        );
+        std::fs::write(
+            rolled.join("design.hissabeth.json"),
+            std::fs::read(kept.join("design.hissabeth.json")).unwrap(),
+        )
+        .unwrap();
         assert!(!reachable(&rolled));
         // Without rollback, the steps before the failure are kept.
-        let report = batch(vec![save(prefix.join("design")), fail, save(after.join("design"))], false);
+        let report = batch(
+            vec![
+                save(prefix.join("design")),
+                fail,
+                save(after.join("design")),
+            ],
+            false,
+        );
         assert_eq!(report["ok"], false);
         assert!(reachable(&prefix));
-        std::fs::write(after.join("design.hissabeth.json"), std::fs::read(kept.join("design.hissabeth.json")).unwrap()).unwrap();
+        std::fs::write(
+            after.join("design.hissabeth.json"),
+            std::fs::read(kept.join("design.hissabeth.json")).unwrap(),
+        )
+        .unwrap();
         assert!(!reachable(&after));
     }
 
@@ -416,16 +567,33 @@ mod tests {
     fn new_files_outside_the_data_directory_need_an_existing_parent() {
         let f = fixture();
         let allowed = agent(&["--allow-path", f.outside.to_str().unwrap()]);
-        let error = f.save(&allowed, f.outside.join("missing/deeper/new").to_str().unwrap()).unwrap_err();
-        assert!(error.contains("does not exist") && error.contains("create the directory first"), "{error}");
+        let error = f
+            .save(
+                &allowed,
+                f.outside.join("missing/deeper/new").to_str().unwrap(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("does not exist") && error.contains("create the directory first"),
+            "{error}"
+        );
         assert!(!f.outside.join("missing").exists());
         // The data directory is no exception.
         let error = f.save(&agent(&[]), "missing/new").unwrap_err();
-        let target = f.data.canonicalize().unwrap().join("projects/missing/new.hissabeth.json");
-        assert!(error.contains(&target.display().to_string()) && error.contains("--allow-any-path"), "{error}");
+        let target = f
+            .data
+            .canonicalize()
+            .unwrap()
+            .join("projects/missing/new.hissabeth.json");
+        assert!(
+            error.contains(&target.display().to_string()) && error.contains("--allow-any-path"),
+            "{error}"
+        );
         assert!(!f.data.join("projects/missing").exists());
         // A missing subtree that climbs out with `..` is outside the scope.
-        let error = f.save(&agent(&[]), "missing/../../../outside/new").unwrap_err();
+        let error = f
+            .save(&agent(&[]), "missing/../../../outside/new")
+            .unwrap_err();
         assert!(error.contains("File access denied"), "{error}");
         #[cfg(unix)]
         {
@@ -435,9 +603,22 @@ mod tests {
             std::fs::create_dir_all(&allowed_dir).unwrap();
             std::os::unix::fs::symlink(&f.outside, allowed_dir.join("link")).unwrap();
             let only = agent(&["--allow-path", allowed_dir.to_str().unwrap()]);
-            let error = f.save(&only, allowed_dir.join("link/missing/new").to_str().unwrap()).unwrap_err();
-            let target = f.outside.canonicalize().unwrap().join("missing/new.hissabeth.json");
-            assert!(error.contains(&target.display().to_string()) && error.contains("lies under --allow-path"), "{error}");
+            let error = f
+                .save(
+                    &only,
+                    allowed_dir.join("link/missing/new").to_str().unwrap(),
+                )
+                .unwrap_err();
+            let target = f
+                .outside
+                .canonicalize()
+                .unwrap()
+                .join("missing/new.hissabeth.json");
+            assert!(
+                error.contains(&target.display().to_string())
+                    && error.contains("lies under --allow-path"),
+                "{error}"
+            );
         }
     }
 
@@ -445,8 +626,13 @@ mod tests {
     fn allow_any_path_and_the_gui_are_unrestricted() {
         let f = fixture();
         let target = f.outside.join("lens.hissabeth.json");
-        f.open(&agent(&["--allow-any-path"]), target.to_str().unwrap()).unwrap();
-        f.save(&agent(&["--allow-any-path"]), f.outside.join("missing/new").to_str().unwrap()).unwrap();
+        f.open(&agent(&["--allow-any-path"]), target.to_str().unwrap())
+            .unwrap();
+        f.save(
+            &agent(&["--allow-any-path"]),
+            f.outside.join("missing/new").to_str().unwrap(),
+        )
+        .unwrap();
         f.open(&Caller::Gui, target.to_str().unwrap()).unwrap();
     }
 
@@ -458,10 +644,19 @@ mod tests {
         f.open(&Caller::Gui, target.to_str().unwrap()).unwrap();
         f.open(&agent(&[]), target.to_str().unwrap()).unwrap();
         // A fresh session starts without it.
-        let Fixture { _root, data, workspace, .. } = f;
+        let Fixture {
+            _root,
+            data,
+            workspace,
+            ..
+        } = f;
         drop(workspace);
-        let reopened = Arc::new(RwLock::new(Workspace::open(data.join("system.json")).unwrap()));
-        let revision = dispatch(&Caller::Gui, &reopened, "system_get", json!({}), None).unwrap()["revision"].clone();
+        let reopened = Arc::new(RwLock::new(
+            Workspace::open(data.join("system.json")).unwrap(),
+        ));
+        let revision =
+            dispatch(&Caller::Gui, &reopened, "system_get", json!({}), None).unwrap()["revision"]
+                .clone();
         let args = json!({"path": target, "revision": revision});
         let error = dispatch(&agent(&[]), &reopened, "project_open", args, None).unwrap_err();
         assert!(error.contains("File access denied"), "{error}");
@@ -477,8 +672,17 @@ mod tests {
         let server = Scope::from_args(&["--engine".into(), "--allow-any-path".into()]).unwrap();
         let merged = Scope::default().merge(&forwarded).merge(&server);
         assert!(merged.any && merged.allow.len() == 1);
-        assert_eq!(Scope::from_envelope(&Value::Null).unwrap(), Scope::default());
+        assert_eq!(
+            Scope::from_envelope(&Value::Null).unwrap(),
+            Scope::default()
+        );
         assert!(Scope::from_args(&["--allow-path".into()]).is_err());
-        assert!(Scope::from_args(&["--allow-path".into(), dir.path().join("absent").to_str().unwrap().into()]).is_err());
+        assert!(
+            Scope::from_args(&[
+                "--allow-path".into(),
+                dir.path().join("absent").to_str().unwrap().into()
+            ])
+            .is_err()
+        );
     }
 }

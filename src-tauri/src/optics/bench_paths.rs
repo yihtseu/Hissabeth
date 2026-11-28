@@ -226,7 +226,11 @@ impl Branch {
 
 impl Bench {
     pub(super) fn nominal_paths(&self) -> Result<NominalPaths<'_>, String> {
-        if self.branches.len() > 128 || self.assertions.len() > 128 || self.folds.len() > 64 || self.relays.len() > 32 {
+        if self.branches.len() > 128
+            || self.assertions.len() > 128
+            || self.folds.len() > 64
+            || self.relays.len() > 32
+        {
             return Err("Bench branch, fold or assertion budget exceeded".into());
         }
         let mut edges = Connections::new();
@@ -242,9 +246,14 @@ impl Bench {
                 return Err(format!("Invalid or repeated branch ID: {}", branch.id));
             }
             if let Some(color) = branch.style.as_ref().and_then(|s| s.color.as_deref())
-                && !(color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit()))
+                && !(color.len() == 7
+                    && color.starts_with('#')
+                    && color[1..].chars().all(|c| c.is_ascii_hexdigit()))
             {
-                return Err(format!("Invalid branch style: {}: color must be #rrggbb", branch.id));
+                return Err(format!(
+                    "Invalid branch style: {}: color must be #rrggbb",
+                    branch.id
+                ));
             }
             if !(1..=64).contains(&branch.to.port.len()) || branch.via.len() > 128 {
                 return Err(format!(
@@ -277,7 +286,10 @@ impl Bench {
                 return Err(format!("Invalid or repeated fold ID: {}", fold.id));
             }
             if !(1..=64).contains(&fold.to.port.len()) || fold.via.len() > 128 {
-                return Err(format!("Invalid endpoint or intermediate ports: {}", fold.id));
+                return Err(format!(
+                    "Invalid endpoint or intermediate ports: {}",
+                    fold.id
+                ));
             }
             let route = fold.route(&edges)?;
             // A fold names the input its route actually arrives at: a branch-declared
@@ -313,12 +325,18 @@ impl Bench {
                 return Err(format!("Invalid assertion {}", assertion.id));
             }
             if assertion.kind == AssertionKind::Parity
-                && !(matches!(assertion.unit, AssertionUnit::Count) && (assertion.target == 0. || assertion.target == 1.))
+                && !(matches!(assertion.unit, AssertionUnit::Count)
+                    && (assertion.target == 0. || assertion.target == 1.))
             {
-                return Err(format!("Parity assertion {} needs unit count and target 0 or 1", assertion.id));
+                return Err(format!(
+                    "Parity assertion {} needs unit count and target 0 or 1",
+                    assertion.id
+                ));
             }
             let dispersion = assertion.kind == AssertionKind::Dispersion;
-            if dispersion != assertion.band_nm.is_some() || dispersion != assertion.quantity.is_some() {
+            if dispersion != assertion.band_nm.is_some()
+                || dispersion != assertion.quantity.is_some()
+            {
                 return Err(format!(
                     "Assertion {} needs band_nm and quantity exactly when it is a dispersion assertion",
                     assertion.id
@@ -326,9 +344,9 @@ impl Bench {
             }
             let valid = match assertion.kind {
                 AssertionKind::Dispersion => {
-                    let band_ok = assertion
-                        .band_nm
-                        .is_some_and(|[lo, hi]| (100. ..=20000.).contains(&lo) && (100. ..=20000.).contains(&hi) && lo < hi);
+                    let band_ok = assertion.band_nm.is_some_and(|[lo, hi]| {
+                        (100. ..=20000.).contains(&lo) && (100. ..=20000.).contains(&hi) && lo < hi
+                    });
                     band_ok
                         && matches!(
                             (assertion.quantity, assertion.unit),
@@ -353,7 +371,9 @@ impl Bench {
                     )
                 }
                 AssertionKind::Parity => true,
-                AssertionKind::ImageRotation => matches!(assertion.unit, AssertionUnit::Rad | AssertionUnit::Mrad),
+                AssertionKind::ImageRotation => {
+                    matches!(assertion.unit, AssertionUnit::Rad | AssertionUnit::Mrad)
+                }
             };
             if !valid {
                 return Err(format!(
@@ -371,24 +391,28 @@ impl Bench {
                 || !finite(relay.object_distance_mm)
                 || !finite(relay.image_distance_mm)
                 || relay.checks.len() > 8
-                || relay
-                    .checks
-                    .iter()
-                    .any(|c| {
-                        !c.target.is_finite()
-                            || (c.kind != RelayCheckKind::Magnification && c.target != 0.)
-                            || !c.tolerance.is_finite()
-                            || c.tolerance < 0.
-                    })
+                || relay.checks.iter().any(|c| {
+                    !c.target.is_finite()
+                        || (c.kind != RelayCheckKind::Magnification && c.target != 0.)
+                        || !c.tolerance.is_finite()
+                        || c.tolerance < 0.
+                })
                 || [&relay.pupil_stop, &relay.pupil_target]
                     .into_iter()
                     .flatten()
-                    .any(|id| !self.elements.iter().any(|e| &e.id == id) && !self.sources.iter().any(|s| &s.id == id))
+                    .any(|id| {
+                        !self.elements.iter().any(|e| &e.id == id)
+                            && !self.sources.iter().any(|s| &s.id == id)
+                    })
             {
                 return Err(format!("Invalid relay {}", relay.id));
             }
         }
-        Ok(NominalPaths { routes, folds, inputs })
+        Ok(NominalPaths {
+            routes,
+            folds,
+            inputs,
+        })
     }
 }
 
@@ -404,7 +428,7 @@ impl NominalPaths<'_> {
         self.routes.iter().find_map(|(branch, route)| {
             (branch.to.element == to
                 && route.last() == Some(&(from.element.as_str(), from.port.as_str())))
-                .then_some(*branch)
+            .then_some(*branch)
         })
     }
 }
@@ -622,9 +646,16 @@ impl PathIndex {
         routes: &[(&Branch, Vec<Edge<'_>>)],
         segments: &[Segment],
     ) -> Vec<BranchReport> {
-        let stage_by_member: HashMap<_, _> = bench.stages.iter().flat_map(|stage| {
-            stage.members.iter().map(|member| (member.as_str(), stage.id.as_str()))
-        }).collect();
+        let stage_by_member: HashMap<_, _> = bench
+            .stages
+            .iter()
+            .flat_map(|stage| {
+                stage
+                    .members
+                    .iter()
+                    .map(|member| (member.as_str(), stage.id.as_str()))
+            })
+            .collect();
         routes
             .iter()
             .map(|(branch, route)| {
@@ -662,7 +693,9 @@ impl PathIndex {
                 let interruption = paths.is_empty().then(|| {
                     PathBreak::new(&branch.from.element, &branch.from.port, "start_not_reached")
                 });
-                let stage_ids: HashSet<_> = route.iter().map(|&(element, _)| element)
+                let stage_ids: HashSet<_> = route
+                    .iter()
+                    .map(|&(element, _)| element)
                     .chain([branch.to.element.as_str()])
                     .filter_map(|element| stage_by_member.get(element).copied())
                     .collect();
@@ -670,7 +703,9 @@ impl PathIndex {
                     id: branch.id.clone(),
                     paths,
                     interruption,
-                    stage_ids: bench.stages.iter()
+                    stage_ids: bench
+                        .stages
+                        .iter()
                         .filter(|stage| stage_ids.contains(stage.id.as_str()))
                         .map(|stage| stage.id.clone())
                         .collect(),
@@ -789,8 +824,10 @@ impl BranchPath {
                 + flight.phase_rad;
             if segments[at].status == "substrate" {
                 match self.glass.last_mut() {
-                    Some(pass) if pass.element == flight.to_element && self.ports.last()
-                        == Some(&Port::new(&flight.from_element, &flight.from_port)) =>
+                    Some(pass)
+                        if pass.element == flight.to_element
+                            && self.ports.last()
+                                == Some(&Port::new(&flight.from_element, &flight.from_port)) =>
                     {
                         pass.length_mm += flight.length_mm;
                     }

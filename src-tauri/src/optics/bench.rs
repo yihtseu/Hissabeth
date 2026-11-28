@@ -11,13 +11,13 @@ use std::{
 
 #[path = "bench_paths.rs"]
 mod paths;
-pub use paths::{
-    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, BranchStyle, DispersionQuantity, GlassPass, Port, Relay,
-    RelayCheck, RelayCheckKind,
-};
 pub(super) use paths::BranchPath;
-pub(crate) use paths::PathBreak;
 pub(super) use paths::NominalPaths;
+pub(crate) use paths::PathBreak;
+pub use paths::{
+    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, BranchStyle, DispersionQuantity,
+    GlassPass, Port, Relay, RelayCheck, RelayCheckKind,
+};
 use paths::{Departure, Flight, PathIndex};
 
 #[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
@@ -133,7 +133,8 @@ impl PendingField {
     pub fn unit(self) -> &'static str {
         use PendingField::*;
         match self {
-            PositionX | PositionY | PositionZ | Aperture | BodyRadius | FocalLength | SubstrateThicknessMm | BeamRadius | Waist => "mm",
+            PositionX | PositionY | PositionZ | Aperture | BodyRadius | FocalLength
+            | SubstrateThicknessMm | BeamRadius | Waist => "mm",
             FastAxisDeg | SubstrateWedgeDeg => "deg",
             RetardanceWaves => "waves",
             Wavelength => "nm",
@@ -178,7 +179,10 @@ impl PendingField {
     }
     fn on_source(self) -> bool {
         use PendingField::*;
-        matches!(self, PositionX | PositionY | PositionZ | Wavelength | Power | BeamRadius | Waist)
+        matches!(
+            self,
+            PositionX | PositionY | PositionZ | Wavelength | Power | BeamRadius | Waist
+        )
     }
     fn on_element(self, e: &Element) -> bool {
         use PendingField::*;
@@ -328,7 +332,10 @@ pub struct Element {
     pub reflectance: f64,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub transmittance: f64,
-    #[schemars(required, schema_with = "schemars::SchemaGenerator::subschema_for::<Option<Mount>>")]
+    #[schemars(
+        required,
+        schema_with = "schemars::SchemaGenerator::subschema_for::<Option<Mount>>"
+    )]
     pub mount: Option<Mount>,
     /// Splitter substrate index; replaces scalar R/T with Fresnel splitting.
     #[serde(default)]
@@ -415,7 +422,9 @@ pub enum MetaValue {
 fn valid_slug(key: &str) -> bool {
     (1..=64).contains(&key.len())
         && key.bytes().enumerate().all(|(i, b)| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && matches!(b, b'_' | b'.' | b'-'))
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || (i > 0 && matches!(b, b'_' | b'.' | b'-'))
         })
 }
 
@@ -524,7 +533,9 @@ impl From<ElementInput> for Element {
             Kind::LensGroup | Kind::Aperture | Kind::Waveplate | Kind::Polarizer => (0., 0., 1.),
             Kind::Detector | Kind::Blocker => (0., 0., 0.),
         };
-        let aperture = input.aperture.unwrap_or(12.5_f64.min(input.body_radius.unwrap_or(15.)));
+        let aperture = input
+            .aperture
+            .unwrap_or(12.5_f64.min(input.body_radius.unwrap_or(15.)));
         Self {
             label: input.label.unwrap_or_else(|| input.id.clone()),
             id: input.id,
@@ -535,8 +546,12 @@ impl From<ElementInput> for Element {
             aperture,
             body_radius: input.body_radius.unwrap_or(aperture.max(15.)),
             focal_length: input.focal_length.unwrap_or(focal_length),
-            reflectance: input.reflectance.unwrap_or_else(|| reflectance.min(1. - input.transmittance.unwrap_or(0.))),
-            transmittance: input.transmittance.unwrap_or_else(|| transmittance.min(1. - input.reflectance.unwrap_or(0.))),
+            reflectance: input
+                .reflectance
+                .unwrap_or_else(|| reflectance.min(1. - input.transmittance.unwrap_or(0.))),
+            transmittance: input
+                .transmittance
+                .unwrap_or_else(|| transmittance.min(1. - input.reflectance.unwrap_or(0.))),
             mount: input.mount,
             index: input.index,
             coating: input.coating,
@@ -754,21 +769,34 @@ impl Action {
         let finite = |v: &[f64]| v.iter().all(|x| x.is_finite());
         match self {
             Self::Nd { od } => (0. ..=10.).contains(od),
-            Self::Mask { shape, matrix, pitch_um, inside, outside } => {
+            Self::Mask {
+                shape,
+                matrix,
+                pitch_um,
+                inside,
+                outside,
+            } => {
                 (0. ..=1.).contains(inside)
                     && (0. ..=1.).contains(outside)
                     && match (shape, matrix) {
                         (Some(shape), None) => shape.valid() && pitch_um.is_none(),
                         (None, Some(rows)) => {
                             (1..=64).contains(&rows.len())
-                                && rows.iter().all(|r| r.len() == rows[0].len() && (1..=64).contains(&r.len()))
+                                && rows.iter().all(|r| {
+                                    r.len() == rows[0].len() && (1..=64).contains(&r.len())
+                                })
                                 && rows.iter().flatten().all(|v| (0. ..=1.).contains(v))
                                 && pitch_um.is_some_and(|p| (0.1..=1e5).contains(&p))
                         }
                         _ => false,
                     }
             }
-            Self::Slm { segments, size_mm, phases_rad, tilts_mrad } => {
+            Self::Slm {
+                segments,
+                size_mm,
+                phases_rad,
+                tilts_mrad,
+            } => {
                 segments.iter().all(|n| (1..=64).contains(n))
                     && size_mm.iter().all(|s| (1e-6..=1e5).contains(s))
                     && phases_rad.len() == segments[0] * segments[1]
@@ -778,9 +806,11 @@ impl Action {
                     && tilts_mrad.iter().flatten().all(|t| t.abs() <= 100.)
             }
             Self::TipTilt { tilt_mrad } => tilt_mrad.iter().all(|t| t.abs() <= 100.),
-            Self::Rgg { correlation_um, roughness_waves, .. } => {
-                (0.1..=1e5).contains(correlation_um) && (0. ..=100.).contains(roughness_waves)
-            }
+            Self::Rgg {
+                correlation_um,
+                roughness_waves,
+                ..
+            } => (0.1..=1e5).contains(correlation_um) && (0. ..=100.).contains(roughness_waves),
         }
     }
 }
@@ -817,7 +847,9 @@ pub enum ModeFamily {
     /// Superpositions of Hermite–Gauss modes given in `custom`.
     Custom,
 }
-#[derive(schemars::JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ModeNormalization {
     /// Unit-power mode functions: a mode reading is the power coupled into it.
@@ -857,9 +889,23 @@ impl ModeBasis {
     /// Laguerre–Gauss), which sets the finest feature of the basis.
     pub fn sampling_order(&self) -> u32 {
         match self.basis {
-            ModeFamily::HermiteGauss => self.indices.iter().flatten().map(|i| i.unsigned_abs()).max(),
-            ModeFamily::LaguerreGauss => self.indices.iter().map(|[p, l]| 2 * p.unsigned_abs() + l.unsigned_abs()).max(),
-            ModeFamily::Custom => self.custom.iter().flat_map(|c| &c.terms).flat_map(|t| t.hg).max(),
+            ModeFamily::HermiteGauss => self
+                .indices
+                .iter()
+                .flatten()
+                .map(|i| i.unsigned_abs())
+                .max(),
+            ModeFamily::LaguerreGauss => self
+                .indices
+                .iter()
+                .map(|[p, l]| 2 * p.unsigned_abs() + l.unsigned_abs())
+                .max(),
+            ModeFamily::Custom => self
+                .custom
+                .iter()
+                .flat_map(|c| &c.terms)
+                .flat_map(|t| t.hg)
+                .max(),
         }
         .unwrap_or(0)
     }
@@ -909,8 +955,16 @@ impl ModeBasis {
     /// Mode labels in reading order.
     pub(crate) fn labels(&self) -> Vec<String> {
         match self.basis {
-            ModeFamily::HermiteGauss => self.indices.iter().map(|[m, n]| format!("HG{m},{n}")).collect(),
-            ModeFamily::LaguerreGauss => self.indices.iter().map(|[p, l]| format!("LG{p},{l}")).collect(),
+            ModeFamily::HermiteGauss => self
+                .indices
+                .iter()
+                .map(|[m, n]| format!("HG{m},{n}"))
+                .collect(),
+            ModeFamily::LaguerreGauss => self
+                .indices
+                .iter()
+                .map(|[p, l]| format!("LG{p},{l}"))
+                .collect(),
             ModeFamily::Custom => self.custom.iter().map(|c| c.label.clone()).collect(),
         }
     }
@@ -920,11 +974,17 @@ impl Readout {
         let mut ids = HashSet::new();
         for p in &self.ports {
             if p.id.is_empty() || !ids.insert(p.id.as_str()) {
-                return Err(format!("readout port ids must be unique and non-empty: {:?}", p.id));
+                return Err(format!(
+                    "readout port ids must be unique and non-empty: {:?}",
+                    p.id
+                ));
             }
             let [y, z, w, h] = p.roi;
             if ![y, z, w, h].iter().all(|v| v.is_finite() && v.abs() <= 1e5) || w <= 0. || h <= 0. {
-                return Err(format!("readout port {} needs a finite ROI with positive width and height", p.id));
+                return Err(format!(
+                    "readout port {} needs a finite ROI with positive width and height",
+                    p.id
+                ));
             }
         }
         if self.ports.is_empty() || self.ports.len() > 16 {
@@ -936,13 +996,21 @@ impl Readout {
         }
         let count = match m.basis {
             ModeFamily::HermiteGauss => {
-                if !m.custom.is_empty() || m.indices.iter().flatten().any(|i| !(0..=20).contains(i)) {
-                    return Err("Hermite–Gauss modes take indices [m, n] in 0..20 and no custom modes".into());
+                if !m.custom.is_empty() || m.indices.iter().flatten().any(|i| !(0..=20).contains(i))
+                {
+                    return Err(
+                        "Hermite–Gauss modes take indices [m, n] in 0..20 and no custom modes"
+                            .into(),
+                    );
                 }
                 m.indices.len()
             }
             ModeFamily::LaguerreGauss => {
-                if !m.custom.is_empty() || m.indices.iter().any(|[p, l]| !(0..=10).contains(p) || !(-20..=20).contains(l)) {
+                if !m.custom.is_empty()
+                    || m.indices
+                        .iter()
+                        .any(|[p, l]| !(0..=10).contains(p) || !(-20..=20).contains(l))
+                {
                     return Err("Laguerre–Gauss modes take indices [p, l] with p in 0..10, |l| ≤ 20 and no custom modes".into());
                 }
                 m.indices.len()
@@ -954,11 +1022,25 @@ impl Readout {
                         c.label.is_empty()
                             || !labels.insert(c.label.as_str())
                             || !(1..=16).contains(&c.terms.len())
-                            || c.terms.iter().any(|t| t.hg.iter().any(|i| *i > 20) || !t.coefficient.iter().all(|v| v.is_finite() && v.abs() <= 1e6))
+                            || c.terms.iter().any(|t| {
+                                t.hg.iter().any(|i| *i > 20)
+                                    || !t
+                                        .coefficient
+                                        .iter()
+                                        .all(|v| v.is_finite() && v.abs() <= 1e6)
+                            })
                             || {
                                 // Repeated HG indices add; a mode whose terms cancel has no shape.
-                                let scale = c.terms.iter().map(|t| t.coefficient[0].hypot(t.coefficient[1])).sum::<f64>();
-                                let norm = c.merged().iter().map(|(_, k)| k[0].hypot(k[1])).fold(0., f64::max);
+                                let scale = c
+                                    .terms
+                                    .iter()
+                                    .map(|t| t.coefficient[0].hypot(t.coefficient[1]))
+                                    .sum::<f64>();
+                                let norm = c
+                                    .merged()
+                                    .iter()
+                                    .map(|(_, k)| k[0].hypot(k[1]))
+                                    .fold(0., f64::max);
                                 norm <= 1e-9 * scale
                             }
                     })
@@ -975,7 +1057,11 @@ impl Readout {
             return Err("readout takes at most 16 balanced pairs".into());
         }
         for pair in &self.balanced_pairs {
-            if pair.signal.is_empty() || pair.plus == pair.minus || !ids.contains(pair.plus.as_str()) || !ids.contains(pair.minus.as_str()) {
+            if pair.signal.is_empty()
+                || pair.plus == pair.minus
+                || !ids.contains(pair.plus.as_str())
+                || !ids.contains(pair.minus.as_str())
+            {
                 return Err(format!(
                     "balanced pair {}: plus and minus must be two different readout ports",
                     pair.signal
@@ -1026,7 +1112,9 @@ pub struct FieldSampling {
 }
 impl FieldSampling {
     fn valid(&self) -> bool {
-        self.grid.iter().all(|n| n.is_power_of_two() && (8..=256).contains(n))
+        self.grid
+            .iter()
+            .all(|n| n.is_power_of_two() && (8..=256).contains(n))
             && (0.1..=1000.).contains(&self.pitch_um)
             && (0.1..=1e6).contains(&self.waist_um)
             && self.polarization.is_none_or(|j| {
@@ -1046,7 +1134,10 @@ fn slab_faces(e: &Element, substrate: &Substrate) -> [SlabFace; 2] {
             normal: rotate([1., 0., 0.], e.rotation()),
         },
         SlabFace {
-            point: add(e.position, rotate([-substrate.thickness_mm, 0., 0.], e.rotation())),
+            point: add(
+                e.position,
+                rotate([-substrate.thickness_mm, 0., 0.], e.rotation()),
+            ),
             normal: rotate([wedge.cos(), wedge.sin(), 0.], e.rotation()),
         },
     ]
@@ -1061,7 +1152,11 @@ fn face_distance(p: V3, d: V3, face: &SlabFace) -> Option<f64> {
 /// Vector Snell refraction with relative index `eta = n_incident / n_transmitted`;
 /// `None` on total internal reflection.
 fn refract(d: V3, normal: V3, eta: f64) -> Option<V3> {
-    let m = if dot(d, normal) > 0. { scale(normal, -1.) } else { normal };
+    let m = if dot(d, normal) > 0. {
+        scale(normal, -1.)
+    } else {
+        normal
+    };
     let cos_i = -dot(d, m);
     let k = 1. - eta * eta * (1. - cos_i * cos_i);
     (k >= 0.).then(|| add(scale(d, eta), scale(m, eta * cos_i - k.sqrt())))
@@ -1085,7 +1180,10 @@ fn slab_path(
 ) -> Result<SlabPath, &'static str> {
     let (enter, other) = (&faces[first], &faces[1 - first]);
     if reflected == Some(first) {
-        return Ok(SlabPath { points: vec![], direction: reflect(d, enter.normal) });
+        return Ok(SlabPath {
+            points: vec![],
+            direction: reflect(d, enter.normal),
+        });
     }
     let inside = refract(d, enter.normal, eta).ok_or("tir")?;
     let s = face_distance(entry, inside, other).ok_or("substrate_geometry")?;
@@ -1094,9 +1192,15 @@ fn slab_path(
         let back = reflect(inside, other.normal);
         let s = face_distance(at, back, enter).ok_or("substrate_geometry")?;
         let exit = add(at, scale(back, s));
-        (vec![entry, at, exit], refract(back, enter.normal, 1. / eta).ok_or("tir")?)
+        (
+            vec![entry, at, exit],
+            refract(back, enter.normal, 1. / eta).ok_or("tir")?,
+        )
     } else {
-        (vec![entry, at], refract(inside, other.normal, 1. / eta).ok_or("tir")?)
+        (
+            vec![entry, at],
+            refract(inside, other.normal, 1. / eta).ok_or("tir")?,
+        )
     };
     Ok(SlabPath { points, direction })
 }
@@ -1109,8 +1213,15 @@ impl Element {
     /// port's facet normal, the element plane and a substrate's back face.
     pub(crate) fn surface_normals(&self, port: &str) -> Vec<V3> {
         let r = self.rotation();
-        let facet = self.regions.iter().find(|g| g.port == port).and_then(|g| g.normal);
-        let back = self.substrate.as_ref().map(|s| slab_faces(self, s)[1].normal);
+        let facet = self
+            .regions
+            .iter()
+            .find(|g| g.port == port)
+            .and_then(|g| g.normal);
+        let back = self
+            .substrate
+            .as_ref()
+            .map(|s| slab_faces(self, s)[1].normal);
         facet
             .and_then(|n| unit(rotate(n, r)).ok())
             .into_iter()
@@ -1384,7 +1495,9 @@ fn valid_vec(v: V3) -> bool {
 fn check_stage_travel(stage: &str, dof: &str, value: f64, allowed: [f64; 2]) -> Result<(), String> {
     let [min, max] = allowed;
     if !min.is_finite() || !max.is_finite() || min > max {
-        return Err(format!("Stage {stage:?}: invalid {dof} travel range {allowed:?}"));
+        return Err(format!(
+            "Stage {stage:?}: invalid {dof} travel range {allowed:?}"
+        ));
     }
     if !(min..=max).contains(&value) {
         return Err(format!(
@@ -1410,10 +1523,13 @@ impl Bench {
             if !valid_vec(stage.axis) || (norm(stage.axis) - 1.).abs() > 1e-9 {
                 return Err(format!("Stage {id:?}: axis must be a unit vector"));
             }
-            if stage.members.is_empty() || stage.members.len() > 128
+            if stage.members.is_empty()
+                || stage.members.len() > 128
                 || stage.reference_pose.len() != stage.members.len()
             {
-                return Err(format!("Stage {id:?}: reference_pose must match the member list"));
+                return Err(format!(
+                    "Stage {id:?}: reference_pose must match the member list"
+                ));
             }
             check_stage_travel(id, "position", stage.position_mm, stage.travel)?;
             let mut displacement = stage.position_mm;
@@ -1440,9 +1556,14 @@ impl Bench {
                 {
                     return Err(format!("Stage {id:?}: invalid pose for {member:?}"));
                 }
-                let pose = StagePose { position, rotation: reference.rotation };
+                let pose = StagePose {
+                    position,
+                    rotation: reference.rotation,
+                };
                 if poses.insert(member.clone(), pose).is_some() {
-                    return Err(format!("Stage {id:?}: {member:?} belongs to more than one stage"));
+                    return Err(format!(
+                        "Stage {id:?}: {member:?} belongs to more than one stage"
+                    ));
                 }
             }
         }
@@ -1459,9 +1580,13 @@ impl Bench {
     }
 
     fn with_stage_poses(&self, poses: &BTreeMap<String, StagePose>) -> Cow<'_, Self> {
-        if !poses.is_empty() && self.elements.iter().any(|e| {
-            poses.get(&e.id).is_some_and(|p| e.position != p.position || e.rotation != Some(p.rotation))
-        }) {
+        if !poses.is_empty()
+            && self.elements.iter().any(|e| {
+                poses
+                    .get(&e.id)
+                    .is_some_and(|p| e.position != p.position || e.rotation != Some(p.rotation))
+            })
+        {
             let mut resolved = self.clone();
             resolved.apply_stage_poses(poses);
             Cow::Owned(resolved)
@@ -1488,14 +1613,21 @@ impl Bench {
 
     fn validated_paths(&self) -> Result<NominalPaths<'_>, String> {
         let paths = self.draft_paths()?;
-        let unresolved: Vec<_> = self.elements.iter()
+        let unresolved: Vec<_> = self
+            .elements
+            .iter()
             .filter(|e| e.rotation.is_none())
             .map(|e| e.id.as_str())
             .collect();
         if !unresolved.is_empty() {
-            return Err(format!("Unresolved bench rotations: {}", unresolved.join(", ")));
+            return Err(format!(
+                "Unresolved bench rotations: {}",
+                unresolved.join(", ")
+            ));
         }
-        let periscope_mirrors: HashSet<&str> = self.periscopes.iter()
+        let periscope_mirrors: HashSet<&str> = self
+            .periscopes
+            .iter()
             .flat_map(|p| [p.lower.as_str(), p.upper.as_str()])
             .collect();
         for e in &self.elements {
@@ -1556,7 +1688,10 @@ impl Bench {
                 ));
             }
             if e.metadata.len() > 32 {
-                return Err(format!("Element {} has more than 32 metadata entries", e.id));
+                return Err(format!(
+                    "Element {} has more than 32 metadata entries",
+                    e.id
+                ));
             }
             for (key, value) in &e.metadata {
                 if !valid_slug(key) {
@@ -1567,10 +1702,16 @@ impl Bench {
                 }
                 match value {
                     MetaValue::Number(x) if !x.is_finite() => {
-                        return Err(format!("Element {} metadata {key} must be a finite number", e.id));
+                        return Err(format!(
+                            "Element {} metadata {key} must be a finite number",
+                            e.id
+                        ));
                     }
                     MetaValue::Text(text) if text.chars().count() > 256 => {
-                        return Err(format!("Element {} metadata {key} text is longer than 256 characters", e.id));
+                        return Err(format!(
+                            "Element {} metadata {key} text is longer than 256 characters",
+                            e.id
+                        ));
                     }
                     _ => {}
                 }
@@ -1647,7 +1788,9 @@ impl Bench {
                 ) || !e.regions.is_empty()
                     || s.material.is_empty()
                     || s.material.len() > 128
-                    || !(s.thickness_mm.is_finite() && s.thickness_mm > 0. && s.thickness_mm <= 1e4)
+                    || !(s.thickness_mm.is_finite()
+                        && s.thickness_mm > 0.
+                        && s.thickness_mm <= 1e4)
                     || s.wedge_deg.is_some_and(|w| !(-45. ..=45.).contains(&w))
                     || (s.coated_face.is_some() != matches!(e.kind, Kind::Splitter | Kind::Pbs)))
             {
@@ -1659,7 +1802,12 @@ impl Bench {
             if let Some(p) = &e.phase
                 && (!matches!(
                     e.kind,
-                    Kind::Aperture | Kind::Lens | Kind::Splitter | Kind::Pbs | Kind::Waveplate | Kind::Polarizer
+                    Kind::Aperture
+                        | Kind::Lens
+                        | Kind::Splitter
+                        | Kind::Pbs
+                        | Kind::Waveplate
+                        | Kind::Polarizer
                 ) || !e.regions.is_empty()
                     || p.radians.is_some() == p.waves.is_some()
                     || p.radians.is_some_and(|r| !(-1e6..=1e6).contains(&r))
@@ -1723,9 +1871,13 @@ impl Bench {
             }
             if let Some(r) = &e.readout {
                 if e.kind != Kind::Detector {
-                    return Err(format!("Invalid readout on {}: readouts need a detector", e.id));
+                    return Err(format!(
+                        "Invalid readout on {}: readouts need a detector",
+                        e.id
+                    ));
                 }
-                r.valid().map_err(|m| format!("Invalid readout on {}: {m}", e.id))?;
+                r.valid()
+                    .map_err(|m| format!("Invalid readout on {}: {m}", e.id))?;
             }
             if let Some(bins) = e.pixels
                 && (e.kind != Kind::Detector || bins.iter().any(|b| !(2..=128).contains(b)))
@@ -1753,9 +1905,12 @@ impl Bench {
                 || s.waist_offset.is_some_and(|x| !x.is_finite())
                 || s.m2.is_some_and(|x| !x.is_finite() || x < 1.)
                 || matches!(s.polarization, Some(Polarization::Linear { angle_deg }) if !angle_deg.is_finite())
-                || s.field.as_ref().is_some_and(|f| !f.valid() || (f.polarization.is_some() && s.polarization.is_some()))
+                || s.field.as_ref().is_some_and(|f| {
+                    !f.valid() || (f.polarization.is_some() && s.polarization.is_some())
+                })
                 || s.coherence.as_ref().is_some_and(|c| {
-                    !(1..=64).contains(&c.group.len()) || c.length_mm.is_some_and(|l| !(1e-6..=1e12).contains(&l))
+                    !(1..=64).contains(&c.group.len())
+                        || c.length_mm.is_some_and(|l| !(1e-6..=1e12).contains(&l))
                 })
             {
                 return Err(format!("Invalid source: {}", s.id));
@@ -1764,10 +1919,11 @@ impl Bench {
         }
         for (i, a) in self.sources.iter().enumerate() {
             let Some(ca) = &a.coherence else { continue };
-            if let Some(b) = self.sources[..i]
-                .iter()
-                .find(|b| b.coherence.as_ref().is_some_and(|cb| cb.group == ca.group && cb.length_mm != ca.length_mm))
-            {
+            if let Some(b) = self.sources[..i].iter().find(|b| {
+                b.coherence
+                    .as_ref()
+                    .is_some_and(|cb| cb.group == ca.group && cb.length_mm != ca.length_mm)
+            }) {
                 return Err(format!(
                     "Sources {} and {} share coherence group {} with different length_mm; a group has one coherence length",
                     b.id, a.id, ca.group
@@ -1819,7 +1975,11 @@ impl Bench {
                 return Err(format!("Invalid or repeated layer: {}", l.id));
             }
         }
-        if self.layers.len() > 16 || self.periscopes.len() > 32 || self.zones.len() > 32 || self.annotations.len() > 64 {
+        if self.layers.len() > 16
+            || self.periscopes.len() > 32
+            || self.zones.len() > 32
+            || self.annotations.len() > 64
+        {
             return Err("Bench layer, periscope, zone or annotation budget exceeded".into());
         }
         for e in &self.elements {
@@ -1840,9 +2000,10 @@ impl Bench {
                 && [&p.lower, &p.upper].iter().all(|id| {
                     element(id).is_some_and(|e| e.kind == Kind::Mirror && e.regions.is_empty())
                 })
-                && self.connections.iter().any(|c| {
-                    c.from == p.lower && c.port == "reflected" && c.to == p.upper
-                });
+                && self
+                    .connections
+                    .iter()
+                    .any(|c| c.from == p.lower && c.port == "reflected" && c.to == p.upper);
             if !valid {
                 return Err(format!(
                     "Invalid periscope {}: it needs a unique ID and two distinct plane mirrors without regions, used by no other periscope, with the lower mirror's reflected output connected to the upper mirror",
@@ -1857,11 +2018,15 @@ impl Bench {
                 && ids.insert(&z.id)
                 && z.label.len() <= 256
                 && z.polygon_mm.is_some() != z.rect.is_some()
-                && z.rect.is_none_or(|r| r.min[0] < r.max[0] && r.min[1] < r.max[1])
+                && z.rect
+                    .is_none_or(|r| r.min[0] < r.max[0] && r.min[1] < r.max[1])
                 && z.members.len() <= 128
                 && z.members.iter().all(|m| element(m).is_some())
                 && (3..=64).contains(&outline.len())
-                && outline.iter().flatten().all(|v| v.is_finite() && v.abs() <= 1e6)
+                && outline
+                    .iter()
+                    .flatten()
+                    .all(|v| v.is_finite() && v.abs() <= 1e6)
                 && polygon_area(&outline) > 1e-9
                 && simple_polygon(&outline);
             if !valid {
@@ -1873,7 +2038,9 @@ impl Bench {
         }
         for (index, note) in self.annotations.iter().enumerate() {
             let known = match &note.target {
-                AnnotationTarget::Element(id) => element(id).is_some() || self.sources.iter().any(|s| &s.id == id),
+                AnnotationTarget::Element(id) => {
+                    element(id).is_some() || self.sources.iter().any(|s| &s.id == id)
+                }
                 AnnotationTarget::Branch(id) => self.branches.iter().any(|b| &b.id == id),
             };
             if !known || note.text.trim().is_empty() || note.text.chars().count() > 256 {
@@ -1886,7 +2053,9 @@ impl Bench {
         for (index, input) in self.pending.iter().enumerate() {
             let applies = match element(&input.target) {
                 Some(e) => input.field.on_element(e),
-                None => self.sources.iter().any(|s| s.id == input.target) && input.field.on_source(),
+                None => {
+                    self.sources.iter().any(|s| s.id == input.target) && input.field.on_source()
+                }
             };
             if self.pending.len() > 128
                 || !applies
@@ -1940,7 +2109,10 @@ fn simple_polygon(points: &[[f64; 2]]) -> bool {
         (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
     };
     let on = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
-        p[0] >= a[0].min(b[0]) && p[0] <= a[0].max(b[0]) && p[1] >= a[1].min(b[1]) && p[1] <= a[1].max(b[1])
+        p[0] >= a[0].min(b[0])
+            && p[0] <= a[0].max(b[0])
+            && p[1] >= a[1].min(b[1])
+            && p[1] <= a[1].max(b[1])
     };
     let touch = |a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]| {
         let (d1, d2) = (cross(c, d, a), cross(c, d, b));
@@ -1955,7 +2127,12 @@ fn simple_polygon(points: &[[f64; 2]]) -> bool {
         (i + 1..n).all(|j| {
             let adjacent = j == i + 1 || (i == 0 && j == n - 1);
             adjacent
-                || !touch(points[i], points[(i + 1) % n], points[j], points[(j + 1) % n])
+                || !touch(
+                    points[i],
+                    points[(i + 1) % n],
+                    points[j],
+                    points[(j + 1) % n],
+                )
         })
     })
 }
@@ -1983,7 +2160,9 @@ pub(crate) fn inside_polygon(points: &[[f64; 2]], p: [f64; 2]) -> bool {
         {
             return true;
         }
-        if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+        if (a[1] > p[1]) != (b[1] > p[1])
+            && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+        {
             inside = !inside;
         }
     }
@@ -2150,7 +2329,14 @@ struct Packet {
     beam: Vec<Port>,
 }
 impl Packet {
-    fn segment(&self, from: V3, to: V3, element: Option<&str>, status: &str, flight: Option<Flight>) -> Segment {
+    fn segment(
+        &self,
+        from: V3,
+        to: V3,
+        element: Option<&str>,
+        status: &str,
+        flight: Option<Flight>,
+    ) -> Segment {
         Segment {
             source: self.source.clone(),
             branch: self.branch.clone(),
@@ -2166,7 +2352,13 @@ impl Packet {
         }
     }
 
-    fn finish(self, element: Option<String>, position: V3, reason: &str, last_segment: Option<usize>) -> Termination {
+    fn finish(
+        self,
+        element: Option<String>,
+        position: V3,
+        reason: &str,
+        last_segment: Option<usize>,
+    ) -> Termination {
         Termination {
             source: self.source,
             branch: self.branch,
@@ -2181,12 +2373,16 @@ impl Packet {
 
 fn group_media(system: &System) -> Vec<&str> {
     let mut medium = system.object_material.as_str();
-    system.surfaces.iter().map(|surface| {
-        if surface.interaction == Interaction::Refract {
-            medium = &surface.material;
-        }
-        medium
-    }).collect()
+    system
+        .surfaces
+        .iter()
+        .map(|surface| {
+            if surface.interaction == Interaction::Refract {
+                medium = &surface.material;
+            }
+            medium
+        })
+        .collect()
 }
 
 fn surface_port(element: &str, face: usize) -> Port {
@@ -2273,9 +2469,18 @@ impl GhostWalk<'_> {
                 }
             };
             let face = i as usize;
-            let medium_after_face = if step > 0 { face.checked_sub(1) } else { Some(face) };
+            let medium_after_face = if step > 0 {
+                face.checked_sub(1)
+            } else {
+                Some(face)
+            };
             let n1 = medium_after_face.map_or(self.entry, |face| self.after[face]);
-            points.push(GhostHit { point: hit.point, face, index: n1, medium_after_face });
+            points.push(GhostHit {
+                point: hit.point,
+                face,
+                index: n1,
+                medium_after_face,
+            });
             if s.clear_aperture && hit.point[0].hypot(hit.point[1]) > s.aperture + 1e-9 {
                 self.paths.push(GhostPath {
                     points,
@@ -2285,7 +2490,11 @@ impl GhostWalk<'_> {
                 });
                 return;
             }
-            let n2 = if step > 0 { self.after[face] } else { self.before(face) };
+            let n2 = if step > 0 {
+                self.after[face]
+            } else {
+                self.before(face)
+            };
             let ci = dot(v, hit.normal).clamp(-1., 1.);
             let reflectance = coating::fresnel(n1, n2, ci).unwrap_or(1.);
             if reflectance > 0. {
@@ -2433,7 +2642,9 @@ impl Bench {
             let mut nearest = None;
             for (i, surface) in system.surfaces.iter().enumerate() {
                 if let Ok(hit) =
-                    surface.profile().intersect([p[1], p[2], p[0]], [d[1], d[2], d[0]], vertex)
+                    surface
+                        .profile()
+                        .intersect([p[1], p[2], p[0]], [d[1], d[2], d[0]], vertex)
                     && (!bounded || hit.point[0].hypot(hit.point[1]) <= element.body_radius)
                     && hit.distance > 1e-7
                     && nearest.is_none_or(|(distance, _)| hit.distance < distance)
@@ -2455,7 +2666,9 @@ impl Bench {
                 if side[i] * dot(direction, face.normal) <= 0. {
                     continue;
                 }
-                let Some(distance) = face_distance(position, direction, face) else { continue };
+                let Some(distance) = face_distance(position, direction, face) else {
+                    continue;
+                };
                 let point = add(position, scale(direction, distance));
                 let other = &faces[1 - i];
                 let hit = local(sub(point, element.position), element.rotation());
@@ -2495,7 +2708,8 @@ impl Bench {
                     closest = Some((distance, e, mount, surface));
                 }
             };
-            if let Some((distance, face)) = Self::surface_hit(e, system, position, direction, true) {
+            if let Some((distance, face)) = Self::surface_hit(e, system, position, direction, true)
+            {
                 take(distance, false, face);
             }
             // A periscope's upper mirror shares the lower mirror's post: its own
@@ -2535,7 +2749,12 @@ impl Bench {
                 reason: "budget".into(),
                 last_segment: Some(arrival),
             });
-            paths.group_stop(ray.departure.nominal, arrival, arrival, PathBreak::new(&e.id, "in", "budget"));
+            paths.group_stop(
+                ray.departure.nominal,
+                arrival,
+                arrival,
+                PathBreak::new(&e.id, "in", "budget"),
+            );
             return Ok(());
         }
         let entry = ray.air;
@@ -2586,8 +2805,16 @@ impl Bench {
             for point in path.points.iter().skip(1) {
                 let end = world(point.point);
                 let to = surface_port(&e.id, point.face);
-                let medium = point.medium_after_face.map_or(system.object_material.as_str(), |i| media[i]);
-                let flight = departure.flight(to.clone(), norm(sub(end, last)), medium, point.index, ray.wavelength);
+                let medium = point
+                    .medium_after_face
+                    .map_or(system.object_material.as_str(), |i| media[i]);
+                let flight = departure.flight(
+                    to.clone(),
+                    norm(sub(end, last)),
+                    medium,
+                    point.index,
+                    ray.wavelength,
+                );
                 previous = out.segments.len();
                 let status = if main { "group_surface" } else { "group_ghost" };
                 let mut segment = ray.segment(last, end, Some(&e.id), status, Some(flight));
@@ -2645,7 +2872,12 @@ impl Bench {
                 GhostEnd::Blocked(reason) => {
                     out.power.blocked += power;
                     let reason = format!("group_{reason}");
-                    paths.group_stop(departure.nominal, arrival, previous, PathBreak::new(&e.id, &departure.port.port, &reason));
+                    paths.group_stop(
+                        departure.nominal,
+                        arrival,
+                        previous,
+                        PathBreak::new(&e.id, &departure.port.port, &reason),
+                    );
                     out.terminations.push(termination(reason));
                 }
             }
@@ -2662,7 +2894,11 @@ impl Bench {
 
     /// Lists every region port's power and marks branches leaving an unlit
     /// region as unreachable: their probe path stays geometric only.
-    fn report_region_power(&self, out: &mut Trace, (ports, beams): &(HashMap<Port, f64>, HashMap<Vec<Port>, f64>)) {
+    fn report_region_power(
+        &self,
+        out: &mut Trace,
+        (ports, beams): &(HashMap<Port, f64>, HashMap<Vec<Port>, f64>),
+    ) {
         let region_ports: HashSet<Port> = self
             .elements
             .iter()
@@ -2680,7 +2916,12 @@ impl Bench {
         }
         // A path is lit only where its own incoming beam (same source and upstream
         // route) put sampled power through each region port it leaves.
-        for path in out.branches.iter_mut().chain(out.folds.iter_mut()).flat_map(|b| b.paths.iter_mut()) {
+        for path in out
+            .branches
+            .iter_mut()
+            .chain(out.folds.iter_mut())
+            .flat_map(|b| b.paths.iter_mut())
+        {
             if path.interruption.is_some() {
                 continue;
             }
@@ -2688,12 +2929,12 @@ impl Bench {
                 let segment = &out.segments[at];
                 let flight = segment.flight.as_ref()?;
                 let port = Port::new(&flight.from_element, &flight.from_port);
-                (region_ports.contains(&port)
-                    && beams.get(&segment.beam).is_none_or(|p| *p <= 0.))
-                .then_some(port)
+                (region_ports.contains(&port) && beams.get(&segment.beam).is_none_or(|p| *p <= 0.))
+                    .then_some(port)
             });
             if let Some(port) = unlit {
-                path.interruption = Some(PathBreak::new(&port.element, &port.port, "not_illuminated"));
+                path.interruption =
+                    Some(PathBreak::new(&port.element, &port.port, "not_illuminated"));
             }
         }
     }
@@ -2702,7 +2943,14 @@ impl Bench {
     }
 
     pub(super) fn trace_alignment(&self, system: &System, nominal: bool) -> Result<Trace, String> {
-        self.trace_mode(system, if nominal { TraceMode::Nominal } else { TraceMode::Axial })
+        self.trace_mode(
+            system,
+            if nominal {
+                TraceMode::Nominal
+            } else {
+                TraceMode::Axial
+            },
+        )
     }
 
     fn trace_mode(&self, system: &System, mode: TraceMode) -> Result<Trace, String> {
@@ -2749,7 +2997,11 @@ impl Bench {
             ))?;
             let v = cross(d, u);
             let mut offsets = vec![[0., 0., 0.]];
-            let rings = if mode == TraceMode::Physical { s.rings } else { 0 };
+            let rings = if mode == TraceMode::Physical {
+                s.rings
+            } else {
+                0
+            };
             for ring in 1..=rings {
                 for j in 0..6 * ring {
                     let a = std::f64::consts::TAU * j as f64 / (6 * ring) as f64;
@@ -2785,7 +3037,10 @@ impl Bench {
                         port: Port::new(&s.id, "out"),
                         previous: None,
                         arrival: None,
-                        nominal: i == 0 && (mode != TraceMode::Physical || !self.branches.is_empty() || !self.folds.is_empty()),
+                        nominal: i == 0
+                            && (mode != TraceMode::Physical
+                                || !self.branches.is_empty()
+                                || !self.folds.is_empty()),
                         phase: 0.,
                     },
                     air,
@@ -2804,20 +3059,27 @@ impl Bench {
                 || out.segments.len() >= 50_000;
             if cutoff {
                 let departure = &ray.departure;
-                paths.stop(departure, PathBreak::new(&departure.port.element, &departure.port.port, "budget"));
+                paths.stop(
+                    departure,
+                    PathBreak::new(&departure.port.element, &departure.port.port, "budget"),
+                );
                 if ray.probe {
                     continue;
                 }
                 out.power.truncated += ray.power;
                 let (position, last) = (ray.p, departure.previous);
-                out.terminations.push(ray.finish(None, position, "budget", last));
+                out.terminations
+                    .push(ray.finish(None, position, "budget", last));
                 continue;
             }
             let closest = if directed {
-                self.elements.iter().find(|e| Some(&e.id) == ray.expected.as_ref()).and_then(|e| {
-                    let (distance, face) = Self::surface_hit(e, system, ray.p, ray.d, false)?;
-                    Some((distance, e, false, face))
-                })
+                self.elements
+                    .iter()
+                    .find(|e| Some(&e.id) == ray.expected.as_ref())
+                    .and_then(|e| {
+                        let (distance, face) = Self::surface_hit(e, system, ray.p, ray.d, false)?;
+                        Some((distance, e, false, face))
+                    })
             } else {
                 self.nearest(system, ray.p, ray.d, None)
             };
@@ -2826,12 +3088,20 @@ impl Bench {
                     ray.p,
                     scale(ray.d, self.table_size[0].hypot(self.table_size[1])),
                 );
-                let status = if ray.expected.is_some() { "missed_target" } else { "escaped" };
+                let status = if ray.expected.is_some() {
+                    "missed_target"
+                } else {
+                    "escaped"
+                };
                 // The displayed extension has no measured endpoint.
-                out.segments.push(ray.segment(ray.p, end, None, status, None));
+                out.segments
+                    .push(ray.segment(ray.p, end, None, status, None));
                 let departure = &ray.departure;
                 let (element, port) = ray.expected.as_deref().map_or(
-                    (departure.port.element.as_str(), departure.port.port.as_str()),
+                    (
+                        departure.port.element.as_str(),
+                        departure.port.port.as_str(),
+                    ),
                     |id| (id, nominal.input(&departure.port)),
                 );
                 paths.stop(departure, PathBreak::new(element, port, status));
@@ -2840,7 +3110,8 @@ impl Bench {
                 }
                 let (expected, last) = (ray.expected.clone(), departure.previous);
                 out.power.escaped += ray.power;
-                out.terminations.push(ray.finish(expected, end, "escaped", last));
+                out.terminations
+                    .push(ray.finish(expected, end, "escaped", last));
                 continue;
             };
             let hit = add(ray.p, scale(ray.d, distance));
@@ -2872,12 +3143,26 @@ impl Bench {
                 "in"
             };
             // A substrate is entered on the face the hit test stopped at.
-            let slab = e.substrate.as_ref().filter(|_| !mount && reason.is_none()).map(|substrate| {
-                (substrate, slab_faces(e, substrate), face.unwrap_or(0))
-            });
+            let slab = e
+                .substrate
+                .as_ref()
+                .filter(|_| !mount && reason.is_none())
+                .map(|substrate| (substrate, slab_faces(e, substrate), face.unwrap_or(0)));
             let entry = hit;
-            let flight = ray.departure.flight(Port::new(&e.id, input), distance, "AIR", ray.air, ray.wavelength);
-            out.segments.push(ray.segment(ray.p, entry, Some(&e.id), reason.unwrap_or("hit"), Some(flight)));
+            let flight = ray.departure.flight(
+                Port::new(&e.id, input),
+                distance,
+                "AIR",
+                ray.air,
+                ray.wavelength,
+            );
+            out.segments.push(ray.segment(
+                ray.p,
+                entry,
+                Some(&e.id),
+                reason.unwrap_or("hit"),
+                Some(flight),
+            ));
             // A region element still anchors its arms when the chief sample lands on the
             // plate between regions: the arms start from region probes, and their
             // illumination is judged from the sampled port power afterwards.
@@ -2949,19 +3234,37 @@ impl Bench {
                     continue;
                 }
                 out.power.blocked += ray.power;
-                out.terminations.push(ray.finish(Some(e.id.clone()), hit, reason, Some(arrival)));
+                out.terminations
+                    .push(ray.finish(Some(e.id.clone()), hit, reason, Some(arrival)));
                 continue;
             }
             if e.kind == Kind::LensGroup {
                 let group_size = system.surfaces.len();
                 if !directed && e.ghosts > 0 {
-                    self.trace_group_ghosts(system, (&mut out, &mut paths), &mut queue, &ray, e, arrival)?;
+                    self.trace_group_ghosts(
+                        system,
+                        (&mut out, &mut paths),
+                        &mut queue,
+                        &ray,
+                        e,
+                        arrival,
+                    )?;
                     continue;
                 }
                 if ray.depth + group_size > self.max_interactions {
                     out.power.truncated += ray.power;
-                    paths.group_stop(ray.departure.nominal, arrival, arrival, PathBreak::new(&e.id, input, "budget"));
-                    out.terminations.push(ray.finish(Some(e.id.clone()), hit, "budget", Some(arrival)));
+                    paths.group_stop(
+                        ray.departure.nominal,
+                        arrival,
+                        arrival,
+                        PathBreak::new(&e.id, input, "budget"),
+                    );
+                    out.terminations.push(ray.finish(
+                        Some(e.id.clone()),
+                        hit,
+                        "budget",
+                        Some(arrival),
+                    ));
                     continue;
                 }
                 let p = local(sub(ray.p, e.position), e.rotation());
@@ -2997,35 +3300,66 @@ impl Bench {
                     phase: 0.,
                 };
                 if let Some(path) = &traced {
-                    let internal = path.segments.iter().skip(1).map(|segment| (segment.point, segment.n_before));
+                    let internal = path
+                        .segments
+                        .iter()
+                        .skip(1)
+                        .map(|segment| (segment.point, segment.n_before));
                     let failed_hit = failure.and_then(|(_, point)| {
-                        path.segments.last().zip(point).map(|(before, point)| (point, before.n_after))
+                        path.segments
+                            .last()
+                            .zip(point)
+                            .map(|(before, point)| (point, before.n_after))
                     });
                     for (gap, (point, index)) in internal.chain(failed_hit).enumerate() {
                         let end = world(point);
                         let delta = sub(end, last);
                         let length = norm(delta);
-                        let mut visit = (end, length, surface_port(&e.id, gap + 1), "group_surface");
+                        let mut visit =
+                            (end, length, surface_port(&e.id, gap + 1), "group_surface");
                         if length > 1e-7 {
                             let direction = scale(delta, 1. / length);
                             if dot(direction, rotate([1., 0., 0.], e.rotation())) <= 0. {
                                 blocked = Some(("group_geometry", departure.port.clone()));
                                 break;
                             }
-                            if !directed && let Some((distance, obstacle, mount, _)) =
-                                self.nearest(system, last, direction, Some(&e.id))
+                            if !directed
+                                && let Some((distance, obstacle, mount, _)) =
+                                    self.nearest(system, last, direction, Some(&e.id))
                                 && distance < length - 1e-7
                             {
-                                let port = Port::new(&obstacle.id, if mount { "mount" } else { "in" });
-                                let reason = if mount { "mount_obstruction" } else { "group_obstruction" };
+                                let port =
+                                    Port::new(&obstacle.id, if mount { "mount" } else { "in" });
+                                let reason = if mount {
+                                    "mount_obstruction"
+                                } else {
+                                    "group_obstruction"
+                                };
                                 blocked = Some((reason, port.clone()));
-                                visit = (add(last, scale(direction, distance)), distance, port, "group_obstruction");
+                                visit = (
+                                    add(last, scale(direction, distance)),
+                                    distance,
+                                    port,
+                                    "group_obstruction",
+                                );
                             }
                         }
                         let (end, length, port, status) = visit;
-                        let flight = departure.flight(port.clone(), length, media[gap], index, ray.wavelength);
+                        let flight = departure.flight(
+                            port.clone(),
+                            length,
+                            media[gap],
+                            index,
+                            ray.wavelength,
+                        );
                         departure.previous = Some(out.segments.len());
-                        out.segments.push(ray.segment(last, end, Some(&port.element), status, Some(flight)));
+                        out.segments.push(ray.segment(
+                            last,
+                            end,
+                            Some(&port.element),
+                            status,
+                            Some(flight),
+                        ));
                         departure.port = port;
                         last = end;
                         if blocked.is_some() {
@@ -3043,8 +3377,18 @@ impl Bench {
                 if let Some((reason, port)) = blocked {
                     out.power.blocked += ray.power;
                     let previous = departure.previous.unwrap();
-                    paths.group_stop(departure.nominal, arrival, previous, PathBreak::new(&port.element, &port.port, reason));
-                    out.terminations.push(ray.finish(Some(port.element), last, reason, Some(previous)));
+                    paths.group_stop(
+                        departure.nominal,
+                        arrival,
+                        previous,
+                        PathBreak::new(&port.element, &port.port, reason),
+                    );
+                    out.terminations.push(ray.finish(
+                        Some(port.element),
+                        last,
+                        reason,
+                        Some(previous),
+                    ));
                 } else if let Some(path) = traced {
                     out.power.absorbed += ray.power * (1. - e.transmittance);
                     if e.transmittance > 0. {
@@ -3066,7 +3410,12 @@ impl Bench {
                             probe: ray.probe,
                         });
                     } else {
-                        paths.group_stop(departure.nominal, arrival, departure.previous.unwrap(), PathBreak::new(&e.id, "out", "no_output"));
+                        paths.group_stop(
+                            departure.nominal,
+                            arrival,
+                            departure.previous.unwrap(),
+                            PathBreak::new(&e.id, "out", "no_output"),
+                        );
                     }
                 }
                 continue;
@@ -3095,7 +3444,12 @@ impl Bench {
                     acc.sum2[0] += ray.power * h[1] * h[1];
                     acc.sum2[1] += ray.power * h[2] * h[2];
                 }
-                out.terminations.push(ray.finish(Some(e.id.clone()), hit, "detected", Some(arrival)));
+                out.terminations.push(ray.finish(
+                    Some(e.id.clone()),
+                    hit,
+                    "detected",
+                    Some(arrival),
+                ));
                 continue;
             }
             let n = rotate([1., 0., 0.], e.rotation());
@@ -3228,7 +3582,13 @@ impl Bench {
                         l[1].hypot(l[2]) <= e.aperture
                     };
                     let path = slab_path(faces, *first, entry, ray.d, reflected, ray.air / n_glass)
-                        .and_then(|path| if path.points.iter().all(inside) { Ok(path) } else { Err("clipped") });
+                        .and_then(|path| {
+                            if path.points.iter().all(inside) {
+                                Ok(path)
+                            } else {
+                                Err("clipped")
+                            }
+                        });
                     match path {
                         Ok(path) => {
                             let mut previous = arrival;
@@ -3263,7 +3623,11 @@ impl Bench {
                                     beam: child_beam.clone(),
                                 });
                             }
-                            start = (path.points.last().copied().unwrap_or(entry), path.direction, previous);
+                            start = (
+                                path.points.last().copied().unwrap_or(entry),
+                                path.direction,
+                                previous,
+                            );
                         }
                         Err(reason) => {
                             let departure = Departure {
@@ -3334,7 +3698,8 @@ impl Bench {
                 }
                 if kept > 0. {
                     if !e.regions.is_empty() && !ray.probe {
-                        *region_power.0.entry(Port::new(&e.id, port)).or_default() += ray.power * kept;
+                        *region_power.0.entry(Port::new(&e.id, port)).or_default() +=
+                            ray.power * kept;
                         *region_power
                             .1
                             .entry(next_beam(&ray.beam, &e.id, port))
@@ -3360,7 +3725,8 @@ impl Bench {
                             // heading towards it goes, so the other beam is unrouted.
                             !matches!(e.kind, Kind::Splitter | Kind::Pbs)
                                 || self.elements.iter().find(|t| &t.id == to).is_none_or(|t| {
-                                    unit(sub(t.position, hit)).is_ok_and(|u| dot(u, d) > std::f64::consts::FRAC_1_SQRT_2)
+                                    unit(sub(t.position, hit))
+                                        .is_ok_and(|u| dot(u, d) > std::f64::consts::FRAC_1_SQRT_2)
                                 })
                         }),
                         departure: Departure {
@@ -3707,7 +4073,10 @@ pub fn example() -> Bench {
 }
 /// The beam identity of a packet leaving `element` through `port`.
 pub(super) fn next_beam(beam: &[Port], element: &str, port: &str) -> Vec<Port> {
-    beam.iter().cloned().chain(std::iter::once(Port::new(element, port))).collect()
+    beam.iter()
+        .cloned()
+        .chain(std::iter::once(Port::new(element, port)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -3719,23 +4088,58 @@ mod tests {
         // +y towards D2 carries no expectation, so it lands on D2 as detected.
         let mut scene = super::super::bench_lab::template("mach_zehnder").unwrap();
         for port in ["transmitted", "reflected"] {
-            scene.connections.push(Connection { from: "BS2".into(), port: port.into(), to: "D1".into() });
+            scene.connections.push(Connection {
+                from: "BS2".into(),
+                port: port.into(),
+                to: "D1".into(),
+            });
         }
         let system = System::default();
         let trace = scene.trace(&system).unwrap();
         accounted(&trace);
-        assert!(trace.terminations.iter().all(|t| t.reason == "detected"), "{:?}", trace.terminations);
+        assert!(
+            trace.terminations.iter().all(|t| t.reason == "detected"),
+            "{:?}",
+            trace.terminations
+        );
         for id in ["D1", "D2"] {
-            assert_eq!(trace.terminations.iter().filter(|t| t.element.as_deref() == Some(id)).count(), 2);
+            assert_eq!(
+                trace
+                    .terminations
+                    .iter()
+                    .filter(|t| t.element.as_deref() == Some(id))
+                    .count(),
+                2
+            );
         }
         // A blocker in front of D1 still interrupts the routed beams.
-        let mut stop = scene.elements.iter().find(|e| e.id == "D1").unwrap().clone();
-        (stop.id, stop.kind, stop.position, stop.mount) = ("STOP".into(), Kind::Blocker, [550., 400., 75.], None);
+        let mut stop = scene
+            .elements
+            .iter()
+            .find(|e| e.id == "D1")
+            .unwrap()
+            .clone();
+        (stop.id, stop.kind, stop.position, stop.mount) =
+            ("STOP".into(), Kind::Blocker, [550., 400., 75.], None);
         scene.elements.push(stop);
         let trace = scene.trace(&system).unwrap();
-        let hits: Vec<_> = trace.terminations.iter().map(|t| (t.element.as_deref().unwrap(), t.reason.as_str())).collect();
-        assert_eq!(hits.iter().filter(|h| **h == ("STOP", "unexpected_hit")).count(), 2, "{hits:?}");
-        assert_eq!(hits.iter().filter(|h| **h == ("D2", "detected")).count(), 2, "{hits:?}");
+        let hits: Vec<_> = trace
+            .terminations
+            .iter()
+            .map(|t| (t.element.as_deref().unwrap(), t.reason.as_str()))
+            .collect();
+        assert_eq!(
+            hits.iter()
+                .filter(|h| **h == ("STOP", "unexpected_hit"))
+                .count(),
+            2,
+            "{hits:?}"
+        );
+        assert_eq!(
+            hits.iter().filter(|h| **h == ("D2", "detected")).count(),
+            2,
+            "{hits:?}"
+        );
     }
     #[test]
     fn half_wave_plate_switches_pbs_output_with_finite_extinction() {
@@ -3896,9 +4300,19 @@ mod tests {
             assert!(arm.nominal_match);
             assert!((arm.length_mm - 110.).abs() <= 1e-9);
             assert!((arm.opl_mm - 114.).abs() <= 1e-9);
-            let end = trace.terminations.iter().find(|end| end.reason == "detected").unwrap();
-            let exit = trace.segments[end.last_segment.unwrap()].flight.as_ref().unwrap();
-            let glass = trace.segments[exit.previous_segment.unwrap()].flight.as_ref().unwrap();
+            let end = trace
+                .terminations
+                .iter()
+                .find(|end| end.reason == "detected")
+                .unwrap();
+            let exit = trace.segments[end.last_segment.unwrap()]
+                .flight
+                .as_ref()
+                .unwrap();
+            let glass = trace.segments[exit.previous_segment.unwrap()]
+                .flight
+                .as_ref()
+                .unwrap();
             assert_eq!(glass.from_port, "surface:1");
             assert_eq!(glass.to_port, "surface:2");
             assert_eq!(glass.medium, "1.5:60");
@@ -4342,7 +4756,9 @@ mod tests {
         let (rho, delta) = (r * (1. + 0.5 / n as f64), r / n as f64);
         let norm = 1. - g(rho);
         let analytic = (1. - g(a)) / norm;
-        let band = 2. * std::f64::consts::PI * a * delta * 2. / (std::f64::consts::PI * w * w) * g(a) / norm;
+        let band = 2. * std::f64::consts::PI * a * delta * 2. / (std::f64::consts::PI * w * w)
+            * g(a)
+            / norm;
         println!("gaussian: {f:.4} vs {analytic:.4} (band {band:.4})");
         assert!((f - analytic).abs() <= band, "{f} vs {analytic}");
         // The profile really is Gaussian: the sampled power differs from flat-top.
@@ -4367,7 +4783,9 @@ mod tests {
         let source = &scene.sources[0];
         let (r, n) = (source.beam_radius, source.rings);
         let (rho, delta) = (r * (1. + 0.5 / n as f64), r / n as f64);
-        let intensity = |x: f64, y: f64| 2. / (std::f64::consts::PI * w * w) * (-2. * (x * x + y * y) / (w * w)).exp();
+        let intensity = |x: f64, y: f64| {
+            2. / (std::f64::consts::PI * w * w) * (-2. * (x * x + y * y) / (w * w)).exp()
+        };
         let norm = 1. - (-2. * rho * rho / (w * w)).exp();
         let mut points = vec![([0., 0.], 1.)];
         for k in 1..=n {
@@ -4414,7 +4832,12 @@ mod tests {
         // is a different incoming beam at AP2 and must keep its own anchor.
         let system = System::default();
         let mut bench = super::super::bench_lab::template("three_arm").unwrap();
-        let plate = bench.elements.iter().find(|e| e.id == "AP").unwrap().clone();
+        let plate = bench
+            .elements
+            .iter()
+            .find(|e| e.id == "AP")
+            .unwrap()
+            .clone();
         let mut common = plate.clone();
         common.id = "A".into();
         common.position[0] += 50.;
@@ -4425,13 +4848,19 @@ mod tests {
         second.position[0] += 100.;
         bench.elements.retain(|e| !e.id.starts_with("D_"));
         bench.elements.extend([common, second]);
-        bench.connections = [("S1", "out", "AP"), ("AP", "L", "A"), ("AP", "C", "A"), ("AP", "R", "A"), ("A", "out", "AP2")]
-            .map(|(from, port, to)| Connection {
-                from: from.into(),
-                port: port.into(),
-                to: to.into(),
-            })
-            .into();
+        bench.connections = [
+            ("S1", "out", "AP"),
+            ("AP", "L", "A"),
+            ("AP", "C", "A"),
+            ("AP", "R", "A"),
+            ("A", "out", "AP2"),
+        ]
+        .map(|(from, port, to)| Connection {
+            from: from.into(),
+            port: port.into(),
+            to: to.into(),
+        })
+        .into();
         bench.branches = ["L", "C", "R"]
             .map(|arm| Branch {
                 id: arm.into(),
@@ -4446,7 +4875,11 @@ mod tests {
             let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
             assert!(report.interruption.is_none(), "{arm}");
             assert_eq!(report.paths.len(), 1, "{arm}: {:?}", report.paths);
-            assert!(report.paths[0].interruption.is_none(), "{arm}: {:?}", report.paths[0].interruption);
+            assert!(
+                report.paths[0].interruption.is_none(),
+                "{arm}: {:?}",
+                report.paths[0].interruption
+            );
             assert!((report.paths[0].length_mm - 100.).abs() < 1e-9);
         }
     }
@@ -4472,8 +4905,16 @@ mod tests {
             assert_eq!(report.paths.len(), 2, "{arm}");
             for path in &report.paths {
                 let unlit = arm == "R" && path.source == "S2";
-                let reason = path.interruption.as_ref().map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
-                assert_eq!(reason, unlit.then_some(("AP", "R", "not_illuminated")), "{arm} {}", path.source);
+                let reason = path
+                    .interruption
+                    .as_ref()
+                    .map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
+                assert_eq!(
+                    reason,
+                    unlit.then_some(("AP", "R", "not_illuminated")),
+                    "{arm} {}",
+                    path.source
+                );
             }
         }
         assert!(port_fraction(&trace, "R") > 0.);
@@ -4496,19 +4937,32 @@ mod tests {
         accounted(&trace);
         for (arm, length) in [("L", 200.), ("C", 250.), ("R", 300.)] {
             let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
-            assert!(report.interruption.is_none(), "{arm}: {:?}", report.interruption);
+            assert!(
+                report.interruption.is_none(),
+                "{arm}: {:?}",
+                report.interruption
+            );
             let mut sources: Vec<_> = report.paths.iter().map(|p| p.source.as_str()).collect();
             sources.sort();
             assert_eq!(sources, ["S1", "S2"], "{arm}");
             for path in &report.paths {
                 assert!(path.interruption.is_none());
-                assert!((path.length_mm - length).abs() < 1e-9, "{arm}: {}", path.length_mm);
+                assert!(
+                    (path.length_mm - length).abs() < 1e-9,
+                    "{arm}: {}",
+                    path.length_mm
+                );
             }
         }
         // Cascade: the L arm (led by a zero-power probe) meets a second region plate.
         // Its arms U / V start once each from that probe, never again from samples.
         let mut cascade = super::super::bench_lab::template("three_arm").unwrap();
-        let mut second = cascade.elements.iter().find(|e| e.id == "AP").unwrap().clone();
+        let mut second = cascade
+            .elements
+            .iter()
+            .find(|e| e.id == "AP")
+            .unwrap()
+            .clone();
         second.id = "AP2".into();
         second.position[0] += 100.;
         second.position[1] += 10.;
@@ -4550,12 +5004,21 @@ mod tests {
         accounted(&trace);
         for arm in ["U", "V"] {
             let report = trace.branches.iter().find(|b| b.id == arm).unwrap();
-            assert!(report.interruption.is_none(), "{arm}: {:?}", report.interruption);
+            assert!(
+                report.interruption.is_none(),
+                "{arm}: {:?}",
+                report.interruption
+            );
             assert_eq!(report.paths.len(), 1, "{arm}: {:?}", report.paths);
             assert!(report.paths[0].interruption.is_none(), "{arm}");
             assert!((report.paths[0].length_mm - 100.).abs() < 1e-9);
         }
-        assert!(["U", "V"].iter().all(|p| trace.port_power.iter().any(|q| q.element == "AP2" && q.port == *p && q.power > 0.)));
+        assert!(["U", "V"].iter().all(|p| {
+            trace
+                .port_power
+                .iter()
+                .any(|q| q.element == "AP2" && q.port == *p && q.power > 0.)
+        }));
     }
     #[test]
     fn unlit_sub_aperture_reports_zero_power_and_unreachable_arm() {
@@ -4611,15 +5074,30 @@ mod tests {
         // Area consistency with a margin smaller than the expectation: one 10 mm hole,
         // expected 100/ρ², worst-case edge band 2·10·δ/ρ² (≈35 % of the value).
         let mut wide = scene.clone();
-        wide.elements.iter_mut().find(|e| e.id == "AP").unwrap().regions.retain(|r| r.port == "C");
-        if let RegionShape::Circle { radius, .. } = &mut wide.elements.iter_mut().find(|e| e.id == "AP").unwrap().regions[0].shape {
+        wide.elements
+            .iter_mut()
+            .find(|e| e.id == "AP")
+            .unwrap()
+            .regions
+            .retain(|r| r.port == "C");
+        if let RegionShape::Circle { radius, .. } = &mut wide
+            .elements
+            .iter_mut()
+            .find(|e| e.id == "AP")
+            .unwrap()
+            .regions[0]
+            .shape
+        {
             *radius = 10.;
         }
         wide.connections.retain(|c| c.from != "AP" || c.port == "C");
         wide.branches.retain(|b| b.id == "C");
         wide.assertions.clear();
         let f = port_fraction(&wide.trace(&system).unwrap(), "C");
-        assert!((f - 100. / (rho * rho)).abs() <= 20. * delta / (rho * rho), "{f}");
+        assert!(
+            (f - 100. / (rho * rho)).abs() <= 20. * delta / (rho * rho),
+            "{f}"
+        );
         let lit: f64 = ["L", "C", "R"]
             .iter()
             .map(|p| port_fraction(&centered, p))
@@ -4648,7 +5126,10 @@ mod tests {
         let count = |f: &dyn Fn(f64) -> bool| {
             pts.iter().filter(|p| f(p[0].hypot(p[1]))).count() as f64 / pts.len() as f64
         };
-        close(trace.power.escaped / trace.power.launched, count(&|r| r > plate.body_radius));
+        close(
+            trace.power.escaped / trace.power.launched,
+            count(&|r| r > plate.body_radius),
+        );
         let lit_now: f64 = ["L", "C"].iter().map(|p| port_fraction(&trace, p)).sum();
         close(
             trace.power.blocked / trace.power.launched,
@@ -4683,9 +5164,22 @@ mod tests {
         close(path.length_mm, 300.);
         // A fold over the dark arm is unlit too.
         let mut folded = shifted.clone();
-        folded.folds = vec![folded.branches.iter().find(|b| b.id == "R").unwrap().clone()];
+        folded.folds = vec![
+            folded
+                .branches
+                .iter()
+                .find(|b| b.id == "R")
+                .unwrap()
+                .clone(),
+        ];
         let fold = &folded.trace(&system).unwrap().folds[0];
-        assert_eq!(fold.paths[0].interruption.as_ref().map(|b| b.reason.as_str()), Some("not_illuminated"));
+        assert_eq!(
+            fold.paths[0]
+                .interruption
+                .as_ref()
+                .map(|b| b.reason.as_str()),
+            Some("not_illuminated")
+        );
         for id in ["L", "C"] {
             let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
             assert!(
@@ -4712,9 +5206,15 @@ mod tests {
             close(port_fraction(&trace, id), expect(&pts, id));
             let arm = trace.branches.iter().find(|b| b.id == id).unwrap();
             assert_eq!(arm.paths.len(), 1, "{id}");
-            let broken = arm.paths[0].interruption.as_ref().or(arm.interruption.as_ref());
+            let broken = arm.paths[0]
+                .interruption
+                .as_ref()
+                .or(arm.interruption.as_ref());
             if id == "L" {
-                assert!(port_fraction(&trace, id) > 0. && broken.is_none(), "{broken:?}");
+                assert!(
+                    port_fraction(&trace, id) > 0. && broken.is_none(),
+                    "{broken:?}"
+                );
             } else {
                 assert_eq!(broken.map(|b| b.reason.as_str()), Some("not_illuminated"));
             }
@@ -4773,7 +5273,11 @@ mod tests {
             let arm_only = direct.branches.iter().find(|b| b.id == arm).unwrap();
             assert_eq!(report.paths.len(), 1, "{arm}");
             let path = &report.paths[0];
-            assert!(path.interruption.is_none(), "{arm}: {:?}", path.interruption);
+            assert!(
+                path.interruption.is_none(),
+                "{arm}: {:?}",
+                path.interruption
+            );
             close(path.length_mm, approach + arm_only.paths[0].length_mm);
         }
 
@@ -4781,7 +5285,10 @@ mod tests {
         bench.sources[0].position[1] += 7.;
         let trace = bench.trace(&system).unwrap();
         let report = trace.branches.iter().find(|b| b.id == "R").unwrap();
-        let reason = report.paths[0].interruption.as_ref().map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
+        let reason = report.paths[0]
+            .interruption
+            .as_ref()
+            .map(|b| (b.element.as_str(), b.port.as_str(), b.reason.as_str()));
         assert_eq!(reason, Some(("AP", "R", "not_illuminated")));
     }
     #[test]
@@ -4814,7 +5321,12 @@ mod tests {
             for report in &trace.branches {
                 assert!(!report.paths.is_empty(), "{original} {}", report.id);
                 for path in &report.paths {
-                    assert!(path.interruption.is_none(), "{original} {}: {:?}", report.id, path.interruption);
+                    assert!(
+                        path.interruption.is_none(),
+                        "{original} {}: {:?}",
+                        report.id,
+                        path.interruption
+                    );
                 }
             }
             let envelope = super::super::bench_lab::gaussian_envelope(&bench, &system);
@@ -5097,17 +5609,31 @@ mod tests {
         // Round trip, and absent on elements without them.
         let again = serde_json::to_value(&bench).unwrap();
         assert_eq!(again["elements"][1]["role"], value["elements"][1]["role"]);
-        assert_eq!(again["elements"][1]["metadata"], json!({"lot": 7.0, "part": "BB1-E02", "spare": true}));
-        assert!(again["elements"][0].get("role").is_none() && again["elements"][0].get("metadata").is_none());
+        assert_eq!(
+            again["elements"][1]["metadata"],
+            json!({"lot": 7.0, "part": "BB1-E02", "spare": true})
+        );
+        assert!(
+            again["elements"][0].get("role").is_none()
+                && again["elements"][0].get("metadata").is_none()
+        );
         // Assembly lists them per item, omitting them where empty.
         let assembly = bench.assembly();
         assert_eq!(assembly["items"][1]["role"], "reference_arm.mirror-1");
         assert_eq!(assembly["items"][1]["metadata"]["part"], "BB1-E02");
-        assert!(assembly["items"][0].get("role").is_none() && assembly["items"][0].get("metadata").is_none());
+        assert!(
+            assembly["items"][0].get("role").is_none()
+                && assembly["items"][0].get("metadata").is_none()
+        );
         // Other unknown element fields are still refused.
         let mut unknown = value.clone();
         unknown["elements"][1]["purpose"] = json!("reference");
-        assert!(serde_json::from_value::<Bench>(unknown).unwrap_err().to_string().contains("unknown field `purpose`"));
+        assert!(
+            serde_json::from_value::<Bench>(unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field `purpose`")
+        );
         // Metadata values are flags, numbers or text only.
         let mut nested = value.clone();
         nested["elements"][1]["metadata"]["nested"] = json!({"a": 1});
@@ -5121,17 +5647,38 @@ mod tests {
             let error = invalid(&|e| e.role = Some(role.into()));
             assert!(error.contains("Element M1 role"), "{role:?}: {error}");
         }
-        assert!(invalid(&|e| e.metadata.insert("Part".into(), MetaValue::Flag(true)).map_or((), drop))
-            .contains(r#"metadata key "Part""#));
-        assert!(invalid(&|e| e.metadata.insert("gain".into(), MetaValue::Number(f64::NAN)).map_or((), drop))
-            .contains("metadata gain must be a finite number"));
-        assert!(invalid(&|e| e.metadata.insert("note".into(), MetaValue::Text("é".repeat(257))).map_or((), drop))
-            .contains("metadata note text is longer than 256"));
+        assert!(
+            invalid(&|e| e
+                .metadata
+                .insert("Part".into(), MetaValue::Flag(true))
+                .map_or((), drop))
+            .contains(r#"metadata key "Part""#)
+        );
+        assert!(
+            invalid(&|e| e
+                .metadata
+                .insert("gain".into(), MetaValue::Number(f64::NAN))
+                .map_or((), drop))
+            .contains("metadata gain must be a finite number")
+        );
+        assert!(
+            invalid(&|e| e
+                .metadata
+                .insert("note".into(), MetaValue::Text("é".repeat(257)))
+                .map_or((), drop))
+            .contains("metadata note text is longer than 256")
+        );
         let mut b = bench.clone();
-        b.elements[1].metadata.insert("note".into(), MetaValue::Text("é".repeat(256)));
+        b.elements[1]
+            .metadata
+            .insert("note".into(), MetaValue::Text("é".repeat(256)));
         b.validate().unwrap();
-        assert!(invalid(&|e| e.metadata = (0..33).map(|i| (format!("k{i}"), MetaValue::Flag(false))).collect())
-            .contains("more than 32 metadata entries"));
+        assert!(
+            invalid(&|e| e.metadata = (0..33)
+                .map(|i| (format!("k{i}"), MetaValue::Flag(false)))
+                .collect())
+            .contains("more than 32 metadata entries")
+        );
     }
     #[test]
     fn forty_components_and_assembly_geometry() {

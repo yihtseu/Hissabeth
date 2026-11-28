@@ -1225,7 +1225,10 @@ fn solve_linear(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Result<Vec<f64>, Strin
             let factor = a[row][col] / diag;
             a[row][col] = 0.;
             let (pivot_rows, rest) = a.split_at_mut(row);
-            for (x, p) in rest[0][col + 1..].iter_mut().zip(&pivot_rows[col][col + 1..]) {
+            for (x, p) in rest[0][col + 1..]
+                .iter_mut()
+                .zip(&pivot_rows[col][col + 1..])
+            {
                 *x -= factor * p;
             }
             b[row] -= factor * b[col];

@@ -1053,7 +1053,12 @@ mod tests {
         // The 0.25 mm defocus term contributes 4 * 0.25 / 10² to curvature.
         assert!((report["petzval_sum"].as_f64().unwrap() - 0.01).abs() < 1e-12);
 
-        s.surfaces[0].zernike.as_mut().unwrap().coefficients.push(0.25);
+        s.surfaces[0]
+            .zernike
+            .as_mut()
+            .unwrap()
+            .coefficients
+            .push(0.25);
         assert!(s.paraxial(587.562).unwrap()["petzval_sum"].is_null());
     }
 

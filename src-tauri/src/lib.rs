@@ -63,7 +63,13 @@ mod desktop {
         let workspace = state.inner().clone();
         let notifier = notifier.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
-            service::dispatch(&service::Caller::Gui, &workspace, &name, args, Some(&notifier))
+            service::dispatch(
+                &service::Caller::Gui,
+                &workspace,
+                &name,
+                args,
+                Some(&notifier),
+            )
         })
         .await
         .map_err(|e| e.to_string())?

@@ -2,7 +2,10 @@
 
 use super::super::{
     Surface, System,
-    bench::{Bench, BranchReport, Element, Kind, PathBreak, Port, Segment, Trace, inside_polygon, local, polygon_area, rotate},
+    bench::{
+        Bench, BranchReport, Element, Kind, PathBreak, Port, Segment, Trace, inside_polygon, local,
+        polygon_area, rotate,
+    },
     math::{V3, add, dot, norm, scale, sub, unit},
 };
 use serde::Serialize;
@@ -65,7 +68,11 @@ pub(crate) struct FoldPath {
 }
 
 pub(crate) fn folds(bench: &Bench, trace: &Trace) -> Vec<FoldReading> {
-    trace.folds.iter().map(|report| fold(bench, report)).collect()
+    trace
+        .folds
+        .iter()
+        .map(|report| fold(bench, report))
+        .collect()
 }
 
 fn fold(bench: &Bench, report: &BranchReport) -> FoldReading {
@@ -74,13 +81,17 @@ fn fold(bench: &Bench, report: &BranchReport) -> FoldReading {
         id: report.id.clone(),
         from: declared.map(|f| f.from.element.clone()).unwrap_or_default(),
         to: declared.map(|f| f.to.element.clone()).unwrap_or_default(),
-        paths: report.paths.iter().map(|p| FoldPath {
-            source: p.source.clone(),
-            wavelength_nm: p.wavelength_nm,
-            length_mm: p.length_mm,
-            opl_mm: p.opl_mm,
-            interruption: p.interruption.clone(),
-        }).collect(),
+        paths: report
+            .paths
+            .iter()
+            .map(|p| FoldPath {
+                source: p.source.clone(),
+                wavelength_nm: p.wavelength_nm,
+                length_mm: p.length_mm,
+                opl_mm: p.opl_mm,
+                interruption: p.interruption.clone(),
+            })
+            .collect(),
         interruption: report.interruption.clone(),
     }
 }
@@ -138,7 +149,13 @@ impl Solid {
             return 0.;
         }
         let rho = q[1].hypot(q[2]);
-        let rim = |x: f64| if rho > 0. { [x, r * q[1] / rho, r * q[2] / rho] } else { [x, r, 0.] };
+        let rim = |x: f64| {
+            if rho > 0. {
+                [x, r * q[1] / rho, r * q[2] / rho]
+            } else {
+                [x, r, 0.]
+            }
+        };
         let mut candidates = vec![
             [self.front, q[1], q[2]],
             sub(q, scale(n, dot(sub(q, b), n))),
@@ -153,7 +170,8 @@ impl Solid {
             };
             let gap = |t: f64| norm(sub(at(t), q));
             let steps = 256;
-            let best = (0..steps).map(|i| std::f64::consts::TAU * f64::from(i) / f64::from(steps))
+            let best = (0..steps)
+                .map(|i| std::f64::consts::TAU * f64::from(i) / f64::from(steps))
                 .min_by(|a, b| gap(*a).total_cmp(&gap(*b)))
                 .unwrap_or_default();
             let h = std::f64::consts::TAU / f64::from(steps);
@@ -173,7 +191,8 @@ impl Solid {
                 candidates.extend([[self.front, y, z], [self.front, y, -z]]);
             }
         }
-        candidates.into_iter()
+        candidates
+            .into_iter()
             .filter(|c| self.contains(*c, tol))
             .map(|c| norm(sub(c, q)))
             .fold(f64::INFINITY, f64::min)
@@ -214,7 +233,9 @@ impl Glass {
     /// Both faces turned about the axis (spheres, conics, even aspheres, radial
     /// Zernike terms): the body is then a solid of revolution.
     fn turned(&self) -> bool {
-        [&self.front, &self.back].iter().all(|f| f.1.as_ref().is_none_or(|s| s.profile().is_radial()))
+        [&self.front, &self.back]
+            .iter()
+            .all(|f| f.1.as_ref().is_none_or(|s| s.profile().is_radial()))
     }
 
     /// Every face is defined over the whole body disc (checked on the polar grid
@@ -222,35 +243,53 @@ impl Glass {
     /// or cylinder narrower than the body), the glass would gain side walls that
     /// the face and rim search does not see, so such a piece is not measured.
     fn defined(&self) -> bool {
-        let grid = (0..=48).flat_map(|i| (0..96).map(move |j| (i, j))).map(|(i, j)| {
-            let (rho, angle) = (self.radius * f64::from(i) / 48., std::f64::consts::TAU * f64::from(j) / 96.);
-            (rho * angle.cos(), rho * angle.sin())
-        });
+        let grid = (0..=48)
+            .flat_map(|i| (0..96).map(move |j| (i, j)))
+            .map(|(i, j)| {
+                let (rho, angle) = (
+                    self.radius * f64::from(i) / 48.,
+                    std::f64::consts::TAU * f64::from(j) / 96.,
+                );
+                (rho * angle.cos(), rho * angle.sin())
+            });
         let rim = (0..512).map(|j| {
             let angle = std::f64::consts::TAU * f64::from(j) / 512.;
             (self.radius * angle.cos(), self.radius * angle.sin())
         });
-        grid.chain(rim).all(|(y, z)| Self::face(&self.front, y, z).is_some() && Self::face(&self.back, y, z).is_some())
+        grid.chain(rim).all(|(y, z)| {
+            Self::face(&self.front, y, z).is_some() && Self::face(&self.back, y, z).is_some()
+        })
     }
 
     /// Face position at transverse (y, z); `None` outside the surface's domain.
     fn face(face: &(f64, Option<Surface>), y: f64, z: f64) -> Option<f64> {
         match &face.1 {
-            Some(surface) => surface.profile().sag2(y, z).ok().map(|(x, _, _)| face.0 + x),
+            Some(surface) => surface
+                .profile()
+                .sag2(y, z)
+                .ok()
+                .map(|(x, _, _)| face.0 + x),
             None => Some(face.0),
         }
     }
 
     /// Axial extent of the glass at transverse (y, z), where it exists.
     fn span(&self, y: f64, z: f64) -> Option<(f64, f64)> {
-        let (lo, hi) = (Self::face(&self.front, y, z)?, Self::face(&self.back, y, z)?);
+        let (lo, hi) = (
+            Self::face(&self.front, y, z)?,
+            Self::face(&self.back, y, z)?,
+        );
         (lo <= hi).then_some((lo, hi))
     }
 
     /// Distance from a local point to the glass: zero inside, else the nearest of
     /// the two faces and the rim.
     fn distance(&self, q: V3) -> f64 {
-        if q[1].hypot(q[2]) <= self.radius && self.span(q[1], q[2]).is_some_and(|(lo, hi)| lo <= q[0] && q[0] <= hi) {
+        if q[1].hypot(q[2]) <= self.radius
+            && self
+                .span(q[1], q[2])
+                .is_some_and(|(lo, hi)| lo <= q[0] && q[0] <= hi)
+        {
             0.
         } else if self.turned() {
             self.turned_distance(q)
@@ -323,7 +362,8 @@ fn disc_min(f: impl Fn(f64, f64) -> f64, radius: f64) -> f64 {
     }
     let mut step = radius / f64::from(rings);
     while step > radius * 1e-13 {
-        let moved = [(step, 0.), (-step, 0.), (0., step), (0., -step)].into_iter()
+        let moved = [(step, 0.), (-step, 0.), (0., step), (0., -step)]
+            .into_iter()
             .map(|(dy, dz)| (f(best.1 + dy, best.2 + dz), best.1 + dy, best.2 + dz))
             .find(|c| c.0 < best.0);
         match moved {
@@ -339,7 +379,9 @@ fn disc_min(f: impl Fn(f64, f64) -> f64, radius: f64) -> f64 {
 fn sampled_min(f: impl Fn(f64) -> f64, a: f64, b: f64, n: u32) -> f64 {
     let step = (b - a) / f64::from(n);
     let at = |i: u32| a + step * f64::from(i);
-    let best = (0..=n).min_by(|i, j| f(at(*i)).total_cmp(&f(at(*j)))).unwrap_or(0);
+    let best = (0..=n)
+        .min_by(|i, j| f(at(*i)).total_cmp(&f(at(*j))))
+        .unwrap_or(0);
     let (mut lo, mut hi) = (at(best.saturating_sub(1)), at((best + 1).min(n)));
     for _ in 0..100 {
         let (m1, m2) = (lo + (hi - lo) / 3., hi - (hi - lo) / 3.);
@@ -353,7 +395,11 @@ fn disc_distance(p: V3, centre: V3, normal: V3, radius: f64) -> f64 {
     let r = sub(p, centre);
     let h = dot(r, normal);
     let planar = norm(sub(r, scale(normal, h)));
-    if planar <= radius { h.abs() } else { h.hypot(planar - radius) }
+    if planar <= radius {
+        h.abs()
+    } else {
+        h.hypot(planar - radius)
+    }
 }
 
 /// Distance from a point to an element's upright, yaw-rotated mount box.
@@ -363,16 +409,24 @@ fn mount_distance(e: &Element, p: V3, table_z: f64) -> Option<f64> {
     if top <= 0. {
         return None;
     }
-    let q = local(sub(p, [e.position[0], e.position[1], table_z]), [0., 0., e.rotation()[2]]);
+    let q = local(
+        sub(p, [e.position[0], e.position[1], table_z]),
+        [0., 0., e.rotation()[2]],
+    );
     let low = [-m.base_size[0] / 2., -m.base_size[1] / 2., 0.];
     let high = [m.base_size[0] / 2., m.base_size[1] / 2., top];
-    let gap: Vec<f64> = (0..3).map(|i| (low[i] - q[i]).max(q[i] - high[i]).max(0.)).collect();
+    let gap: Vec<f64> = (0..3)
+        .map(|i| (low[i] - q[i]).max(q[i] - high[i]).max(0.))
+        .collect();
     Some(norm([gap[0], gap[1], gap[2]]))
 }
 
 /// A lens group with a glass piece the clearance cannot measure ([`Glass::defined`]).
 fn unmeasured(system: &System, e: &Element) -> bool {
-    e.kind == Kind::LensGroup && Glass::pieces(e, system).iter().any(|piece| !piece.defined())
+    e.kind == Kind::LensGroup
+        && Glass::pieces(e, system)
+            .iter()
+            .any(|piece| !piece.defined())
 }
 
 /// Gap between segment `a`–`b` and element `e`; the shared-post mount of a
@@ -385,13 +439,21 @@ fn clearance(bench: &Bench, system: &System, e: &Element, a: V3, b: V3, receiver
     } else if e.kind == Kind::LensGroup {
         // Glass between curved faces need not be convex: sample along the leg.
         let to_local = |t: f64| local(sub(at(t), e.position), e.rotation());
-        Glass::pieces(e, system).iter()
+        Glass::pieces(e, system)
+            .iter()
             .map(|piece| sampled_min(|t| piece.distance(to_local(t)), 0., 1., 256))
             .fold(f64::INFINITY, f64::min)
     } else if let Some(slab) = Solid::of(e) {
         convex_min(|t| slab.distance(local(sub(at(t), e.position), e.rotation())))
     } else {
-        convex_min(|t| disc_distance(at(t), e.position, rotate([1., 0., 0.], e.rotation()), e.body_radius))
+        convex_min(|t| {
+            disc_distance(
+                at(t),
+                e.position,
+                rotate([1., 0., 0.], e.rotation()),
+                e.body_radius,
+            )
+        })
     };
     let post = !bench.periscopes.iter().any(|p| p.upper == e.id);
     let mount = if post && e.mount.is_some() {
@@ -407,8 +469,15 @@ fn clearance(bench: &Bench, system: &System, e: &Element, a: V3, b: V3, receiver
 /// trace, which says which beams carry power: a centre leg whose beam (source and
 /// upstream route) is lit there counts even if its own centre ray is a zero-power
 /// region probe, because sampled rays light that region.
-pub(crate) fn periscopes(bench: &Bench, system: &System, centre: &Trace, full: &Trace) -> Vec<PeriscopeReading> {
-    let lit: HashSet<(&str, &[Port])> = full.segments.iter()
+pub(crate) fn periscopes(
+    bench: &Bench,
+    system: &System,
+    centre: &Trace,
+    full: &Trace,
+) -> Vec<PeriscopeReading> {
+    let lit: HashSet<(&str, &[Port])> = full
+        .segments
+        .iter()
         .filter(|s| s.power > 0.)
         .map(|s| (s.source.as_str(), s.beam.as_slice()))
         .collect();
@@ -508,14 +577,20 @@ pub(crate) fn periscopes(bench: &Bench, system: &System, centre: &Trace, full: &
 fn footprint(e: &Element) -> Vec<[f64; 2]> {
     let [x, y, _] = e.position;
     let (half, yaw) = match &e.mount {
-        Some(m) => ([m.base_size[0] / 2., m.base_size[1] / 2.], e.rotation.map_or(0., |r| r[2])),
+        Some(m) => (
+            [m.base_size[0] / 2., m.base_size[1] / 2.],
+            e.rotation.map_or(0., |r| r[2]),
+        ),
         None => ([e.body_radius; 2], 0.),
     };
     let (s, c) = yaw.to_radians().sin_cos();
-    [[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]].iter().map(|[i, j]| {
-        let (u, v) = (i * half[0], j * half[1]);
-        [x + u * c - v * s, y + u * s + v * c]
-    }).collect()
+    [[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]]
+        .iter()
+        .map(|[i, j]| {
+            let (u, v) = (i * half[0], j * half[1]);
+            [x + u * c - v * s, y + u * s + v * c]
+        })
+        .collect()
 }
 
 fn cross2(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -573,31 +648,49 @@ fn contains(outline: &[[f64; 2]], corners: &[[f64; 2]]) -> bool {
 }
 
 pub(crate) fn zones(bench: &Bench) -> Vec<ZoneReading> {
-    bench.zones.iter().map(|z| {
-        let outline = z.outline();
-        let members: Vec<&Element> = if z.members.is_empty() {
-            bench.elements.iter()
-                .filter(|e| inside_polygon(&outline, [e.position[0], e.position[1]]))
-                .collect()
-        } else {
-            z.members.iter().filter_map(|m| bench.elements.iter().find(|e| &e.id == m)).collect()
-        };
-        let fold = |f: fn(f64, f64) -> f64, i: usize, start: f64| outline.iter().map(|p| p[i]).fold(start, f);
-        ZoneReading {
-            id: z.id.clone(),
-            label: z.label.clone(),
-            area_mm2: polygon_area(&outline),
-            bounds_mm: [
-                [fold(f64::min, 0, f64::INFINITY), fold(f64::min, 1, f64::INFINITY)],
-                [fold(f64::max, 0, f64::NEG_INFINITY), fold(f64::max, 1, f64::NEG_INFINITY)],
-            ],
-            out_of_bounds: members.iter()
-                .filter(|e| !contains(&outline, &footprint(e)))
-                .map(|e| e.id.clone())
-                .collect(),
-            members: members.iter().map(|e| e.id.clone()).collect(),
-        }
-    }).collect()
+    bench
+        .zones
+        .iter()
+        .map(|z| {
+            let outline = z.outline();
+            let members: Vec<&Element> = if z.members.is_empty() {
+                bench
+                    .elements
+                    .iter()
+                    .filter(|e| inside_polygon(&outline, [e.position[0], e.position[1]]))
+                    .collect()
+            } else {
+                z.members
+                    .iter()
+                    .filter_map(|m| bench.elements.iter().find(|e| &e.id == m))
+                    .collect()
+            };
+            let fold = |f: fn(f64, f64) -> f64, i: usize, start: f64| {
+                outline.iter().map(|p| p[i]).fold(start, f)
+            };
+            ZoneReading {
+                id: z.id.clone(),
+                label: z.label.clone(),
+                area_mm2: polygon_area(&outline),
+                bounds_mm: [
+                    [
+                        fold(f64::min, 0, f64::INFINITY),
+                        fold(f64::min, 1, f64::INFINITY),
+                    ],
+                    [
+                        fold(f64::max, 0, f64::NEG_INFINITY),
+                        fold(f64::max, 1, f64::NEG_INFINITY),
+                    ],
+                ],
+                out_of_bounds: members
+                    .iter()
+                    .filter(|e| !contains(&outline, &footprint(e)))
+                    .map(|e| e.id.clone())
+                    .collect(),
+                members: members.iter().map(|e| e.id.clone()).collect(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -608,13 +701,22 @@ mod tests {
     fn slab_distance_matches_a_dense_sample_of_its_glass() {
         // A wedge steep enough that its back face cuts the front face inside the rim.
         let wedge = 40_f64.to_radians();
-        let solid = Solid { radius: 18., front: 0., back: [-2., 0., 0.], back_normal: [wedge.cos(), wedge.sin(), 0.] };
+        let solid = Solid {
+            radius: 18.,
+            front: 0.,
+            back: [-2., 0., 0.],
+            back_normal: [wedge.cos(), wedge.sin(), 0.],
+        };
         let mut glass = vec![];
         let n = 60;
         for i in 0..=n {
             for j in 0..=n {
                 for k in 0..=n {
-                    let q = [-20. + 20. * f64::from(i) / f64::from(n), -18. + 36. * f64::from(j) / f64::from(n), -18. + 36. * f64::from(k) / f64::from(n)];
+                    let q = [
+                        -20. + 20. * f64::from(i) / f64::from(n),
+                        -18. + 36. * f64::from(j) / f64::from(n),
+                        -18. + 36. * f64::from(k) / f64::from(n),
+                    ];
                     if solid.contains(q, 0.) {
                         glass.push(q);
                     }
@@ -622,24 +724,52 @@ mod tests {
             }
         }
         let spacing = 36. / f64::from(n);
-        for q in [[5., 3., 1.], [-30., -25., 4.], [-3., 20., 2.], [1., -15., 19.], [-12., 0., 25.], [-1., 5., 0.]] {
+        for q in [
+            [5., 3., 1.],
+            [-30., -25., 4.],
+            [-3., 20., 2.],
+            [1., -15., 19.],
+            [-12., 0., 25.],
+            [-1., 5., 0.],
+        ] {
             let exact = solid.distance(q);
-            let sampled = glass.iter().map(|g| norm(sub(*g, q))).fold(f64::INFINITY, f64::min);
-            assert!(exact <= sampled + 1e-9 && sampled - exact < 2. * spacing, "{q:?}: {exact} vs {sampled}");
+            let sampled = glass
+                .iter()
+                .map(|g| norm(sub(*g, q)))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                exact <= sampled + 1e-9 && sampled - exact < 2. * spacing,
+                "{q:?}: {exact} vs {sampled}"
+            );
         }
         assert_eq!(solid.distance([-1., 10., 0.]), 0.);
     }
 
     #[test]
     fn concave_notch_is_outside_the_zone() {
-        let zone = [[0., 0.], [40., 0.], [40., 40.], [30., 40.], [30., 20.], [10., 20.], [10., 40.], [0., 40.]];
+        let zone = [
+            [0., 0.],
+            [40., 0.],
+            [40., 40.],
+            [30., 40.],
+            [30., 20.],
+            [10., 20.],
+            [10., 40.],
+            [0., 40.],
+        ];
         let square = |lo: f64, hi: f64| [[lo, lo], [hi, lo], [hi, hi], [lo, hi]];
         // Corners on the notch walls, top edge across the notch.
         assert!(!contains(&zone, &square(10., 30.)));
         assert!(contains(&zone, &square(1., 19.)));
         // Touching the outline from inside still counts as inside.
-        assert!(contains(&zone, &[[0., 0.], [10., 0.], [10., 40.], [0., 40.]]));
+        assert!(contains(
+            &zone,
+            &[[0., 0.], [10., 0.], [10., 40.], [0., 40.]]
+        ));
         // A reflex vertex poking into the footprint.
-        assert!(!contains(&zone, &[[5., 15.], [15., 15.], [15., 25.], [5., 25.]]));
+        assert!(!contains(
+            &zone,
+            &[[5., 15.], [15., 15.], [15., 25.], [5., 25.]]
+        ));
     }
 }

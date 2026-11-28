@@ -36,7 +36,9 @@
 
 use super::super::{
     System,
-    bench::{Action, Bench, BranchPath, Element, FieldProfile, Kind, Port, Source, Trace, local, rotate},
+    bench::{
+        Action, Bench, BranchPath, Element, FieldProfile, Kind, Port, Source, Trace, local, rotate,
+    },
     math::{V3, add, dot, scale, sub, unit},
 };
 use super::relay::{Frame, frames_along};
@@ -66,13 +68,19 @@ impl C {
         Self { re: c, im: s }
     }
     fn conj(self) -> Self {
-        Self { re: self.re, im: -self.im }
+        Self {
+            re: self.re,
+            im: -self.im,
+        }
     }
     fn norm2(self) -> f64 {
         self.re * self.re + self.im * self.im
     }
     fn scale(self, s: f64) -> Self {
-        Self { re: self.re * s, im: self.im * s }
+        Self {
+            re: self.re * s,
+            im: self.im * s,
+        }
     }
     fn arg(self) -> f64 {
         self.im.atan2(self.re)
@@ -96,7 +104,10 @@ impl Sub for C {
 impl Mul for C {
     type Output = Self;
     fn mul(self, o: Self) -> Self {
-        Self::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
+        Self::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
     }
 }
 
@@ -125,7 +136,9 @@ fn fft(a: &mut [C], inverse: bool) {
     let mut len = 2;
     while len <= n {
         let half = len / 2;
-        let twiddles: Vec<C> = (0..half).map(|k| C::cis(sign * TAU * k as f64 / len as f64)).collect();
+        let twiddles: Vec<C> = (0..half)
+            .map(|k| C::cis(sign * TAU * k as f64 / len as f64))
+            .collect();
         for start in (0..n).step_by(len) {
             for (k, w) in twiddles.iter().enumerate() {
                 let u = a[start + k];
@@ -161,7 +174,11 @@ fn fft2(data: &mut [C], n: [usize; 2], inverse: bool) {
 
 /// Signed frequency index of FFT bin `k` out of `n`.
 fn signed(k: usize, n: usize) -> f64 {
-    if k < n / 2 { k as f64 } else { k as f64 - n as f64 }
+    if k < n / 2 {
+        k as f64
+    } else {
+        k as f64 - n as f64
+    }
 }
 
 /// SplitMix64 generator: deterministic, seedable phase screens.
@@ -186,8 +203,9 @@ impl Rng {
 }
 
 fn fnv(text: &str) -> u64 {
-    text.bytes()
-        .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 /// Sampling grid: `n` [columns, rows] centred on the chief ray, `pitch` in mm.
@@ -271,7 +289,9 @@ struct Screen {
 impl Screen {
     fn new(grid: Grid, correlation_mm: f64, rms_rad: f64, seed: u64) -> Self {
         let mut rng = Rng(seed);
-        let mut data: Vec<C> = (0..grid.len()).map(|_| C::new(rng.gaussian(), 0.)).collect();
+        let mut data: Vec<C> = (0..grid.len())
+            .map(|_| C::new(rng.gaussian(), 0.))
+            .collect();
         fft2(&mut data, grid.n, false);
         // |G|² = exp(−π²c²f²) gives the correlation exp(−r²/c²).
         for (i, v) in data.iter_mut().enumerate() {
@@ -280,9 +300,13 @@ impl Screen {
         }
         fft2(&mut data, grid.n, true);
         let mean = data.iter().map(|c| c.re).sum::<f64>() / data.len() as f64;
-        let rms = (data.iter().map(|c| (c.re - mean).powi(2)).sum::<f64>() / data.len() as f64).sqrt();
+        let rms =
+            (data.iter().map(|c| (c.re - mean).powi(2)).sum::<f64>() / data.len() as f64).sqrt();
         let gain = if rms > 0. { rms_rad / rms } else { 0. };
-        Self { grid, phase: data.iter().map(|c| (c.re - mean) * gain).collect() }
+        Self {
+            grid,
+            phase: data.iter().map(|c| (c.re - mean) * gain).collect(),
+        }
     }
     fn at(&self, point: [f64; 2]) -> f64 {
         self.grid.sample(&self.phase, point, true)
@@ -464,7 +488,12 @@ impl Arm<'_> {
 /// places `arm` on the reference plane.
 fn carrier_step(arm: &Arm, reference: &Arm) -> f64 {
     let k = TAU * arm.end_index / (arm.wavelength_nm * 1e-6);
-    reference.end.basis.map(|b| k * dot(b, arm.end.direction).abs() * reference.grid.pitch).into_iter().fold(0., f64::max)
+    reference
+        .end
+        .basis
+        .map(|b| k * dot(b, arm.end.direction).abs() * reference.grid.pitch)
+        .into_iter()
+        .fold(0., f64::max)
 }
 
 /// Row-major 2×2 map from grid to physical transverse coordinates.
@@ -481,7 +510,10 @@ fn product(a: M2, b: M2) -> M2 {
 
 fn inverse(m: M2) -> M2 {
     let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    [[m[1][1] / det, -m[0][1] / det], [-m[1][0] / det, m[0][0] / det]]
+    [
+        [m[1][1] / det, -m[0][1] / det],
+        [-m[1][0] / det, m[0][0] / det],
+    ]
 }
 
 fn transpose(m: M2) -> M2 {
@@ -501,14 +533,30 @@ fn refraction(n1: f64, d1: V3, n2: f64, d2: V3, [u, v]: [V3; 2]) -> Option<([f64
     (cos_i > 1e-9).then(|| ([dot(t, u), dot(t, v)], cos_t / cos_i))
 }
 
-fn arm<'a>(bench: &'a Bench, trace: &Trace, label: String, path: &BranchPath) -> Result<Arm<'a>, String> {
-    let end = path.end_segment.ok_or_else(|| format!("Branch {label} has no end segment"))?;
+fn arm<'a>(
+    bench: &'a Bench,
+    trace: &Trace,
+    label: String,
+    path: &BranchPath,
+) -> Result<Arm<'a>, String> {
+    let end = path
+        .end_segment
+        .ok_or_else(|| format!("Branch {label} has no end segment"))?;
     let mut chain = vec![end];
-    while let Some(previous) = trace.segments[*chain.last().unwrap()].flight.as_ref().and_then(|f| f.previous_segment) {
+    while let Some(previous) = trace.segments[*chain.last().unwrap()]
+        .flight
+        .as_ref()
+        .and_then(|f| f.previous_segment)
+    {
         chain.push(previous);
     }
     chain.reverse();
-    let flight = |i: usize| trace.segments[chain[i]].flight.as_ref().expect("branch flights");
+    let flight = |i: usize| {
+        trace.segments[chain[i]]
+            .flight
+            .as_ref()
+            .expect("branch flights")
+    };
     for i in 0..chain.len() {
         let f = flight(i);
         for id in [&f.from_element, &f.to_element] {
@@ -524,13 +572,21 @@ fn arm<'a>(bench: &'a Bench, trace: &Trace, label: String, path: &BranchPath) ->
         .iter()
         .find(|s| s.id == path.source)
         .ok_or_else(|| format!("Unknown source {}", path.source))?;
-    let sampling = source
-        .field
-        .as_ref()
-        .ok_or_else(|| format!("Source {} of branch {label} has no field sampling", source.id))?;
-    let grid = Grid { n: sampling.grid, pitch: sampling.pitch_um * 1e-3 };
+    let sampling = source.field.as_ref().ok_or_else(|| {
+        format!(
+            "Source {} of branch {label} has no field sampling",
+            source.id
+        )
+    })?;
+    let grid = Grid {
+        n: sampling.grid,
+        pitch: sampling.pitch_um * 1e-3,
+    };
     if sampling.profile == FieldProfile::Flat && sampling.waist_um < sampling.pitch_um {
-        return Err(format!("Source {} flat field radius is below its sampling pitch", source.id));
+        return Err(format!(
+            "Source {} flat field radius is below its sampling pitch",
+            source.id
+        ));
     }
     let end_jones = trace.segments[end].jones.ok_or_else(|| {
         format!(
@@ -559,7 +615,8 @@ fn arm<'a>(bench: &'a Bench, trace: &Trace, label: String, path: &BranchPath) ->
         let (a, b) = (frames[step - 1], frames[step]);
         if a.reflections == b.reflections
             && (f.index - before.index).abs() > 1e-12
-            && let Some((axis, stretch)) = refraction(before.index, a.direction, f.index, b.direction, b.basis)
+            && let Some((axis, stretch)) =
+                refraction(before.index, a.direction, f.index, b.direction, b.basis)
         {
             refractions.push((step, axis, stretch));
         }
@@ -572,7 +629,9 @@ fn arm<'a>(bench: &'a Bench, trace: &Trace, label: String, path: &BranchPath) ->
         if f.from_element == before.from_element {
             continue;
         }
-        let Some(e) = element(bench, &f.from_element) else { continue };
+        let Some(e) = element(bench, &f.from_element) else {
+            continue;
+        };
         let mut last = step;
         while last + 1 < chain.len() && flight(last + 1).from_element == f.from_element {
             last += 1;
@@ -585,7 +644,10 @@ fn arm<'a>(bench: &'a Bench, trace: &Trace, label: String, path: &BranchPath) ->
             tilted = true;
             let r = e.rotation();
             let n = rotate([1., 0., 0.], r);
-            let t = add(scale(rotate([0., 1., 0.], r), tilt_mrad[0]), scale(rotate([0., 0., 1.], r), tilt_mrad[1]));
+            let t = add(
+                scale(rotate([0., 1., 0.], r), tilt_mrad[0]),
+                scale(rotate([0., 0., 1.], r), tilt_mrad[1]),
+            );
             // Keep the in-plane phase gradient and stay transverse to the exit ray.
             let d = outgoing.direction;
             let delta = sub(t, scale(n, dot(t, d) / dot(n, d)));
@@ -655,7 +717,10 @@ fn propagate(a: &mut [C], grid: Grid, g: M2, length: f64, wavelength: f64) -> (f
     // grid-frequency gradient bounded by the largest absolute row sum of G⁻¹G⁻ᵀ.
     let to_physical = transpose(inverse(g));
     let metric = product(inverse(g), to_physical);
-    let gain = metric.map(|row| row[0].abs() + row[1].abs()).into_iter().fold(0., f64::max);
+    let gain = metric
+        .map(|row| row[0].abs() + row[1].abs())
+        .into_iter()
+        .fold(0., f64::max);
     let limit = grid.n.map(|n| {
         let df = 1. / (n as f64 * grid.pitch);
         1. / (wavelength * ((2. * df * length * gain).powi(2) + 1.).sqrt())
@@ -678,7 +743,10 @@ fn propagate(a: &mut [C], grid: Grid, g: M2, length: f64, wavelength: f64) -> (f
     }
     fft2(a, grid.n, true);
     let total = kept + dropped;
-    ((limit[0].min(limit[1]) * wavelength).min(1.), if total > 0. { dropped / total } else { 0. })
+    (
+        (limit[0].min(limit[1]) * wavelength).min(1.),
+        if total > 0. { dropped / total } else { 0. },
+    )
 }
 
 type Screens = HashMap<(String, usize), Screen>;
@@ -689,15 +757,43 @@ struct Band {
     dropped: f64,
 }
 
-fn screen<'s>(screens: &'s mut Screens, grid: Grid, e: &Element, realization: usize) -> Option<&'s Screen> {
-    let Some(Action::Rgg { correlation_um, roughness_waves, seed }) = &e.action else { return None };
-    Some(screens.entry((e.id.clone(), realization)).or_insert_with(|| {
-        let seed = fnv(&e.id) ^ (u64::from(*seed) << 32) ^ realization as u64;
-        Screen::new(grid, correlation_um * 1e-3, TAU * roughness_waves, Rng(seed).next())
-    }))
+fn screen<'s>(
+    screens: &'s mut Screens,
+    grid: Grid,
+    e: &Element,
+    realization: usize,
+) -> Option<&'s Screen> {
+    let Some(Action::Rgg {
+        correlation_um,
+        roughness_waves,
+        seed,
+    }) = &e.action
+    else {
+        return None;
+    };
+    Some(
+        screens
+            .entry((e.id.clone(), realization))
+            .or_insert_with(|| {
+                let seed = fnv(&e.id) ^ (u64::from(*seed) << 32) ^ realization as u64;
+                Screen::new(
+                    grid,
+                    correlation_um * 1e-3,
+                    TAU * roughness_waves,
+                    Rng(seed).next(),
+                )
+            }),
+    )
 }
 
-fn interact(a: &mut [C], grid: Grid, g: M2, event: &Event, k: f64, screen: Option<&Screen>) -> Result<(), String> {
+fn interact(
+    a: &mut [C],
+    grid: Grid,
+    g: M2,
+    event: &Event,
+    k: f64,
+    screen: Option<&Screen>,
+) -> Result<(), String> {
     let e = event.element;
     let r = e.rotation();
     let normal = rotate([1., 0., 0.], r);
@@ -711,7 +807,9 @@ fn interact(a: &mut [C], grid: Grid, g: M2, event: &Event, k: f64, screen: Optio
     let region = (!e.regions.is_empty())
         .then(|| e.regions.iter().find(|x| x.port == event.port))
         .flatten();
-    let focal = matches!(e.kind, Kind::Lens | Kind::CurvedMirror).then_some(e.focal_length).filter(|f| *f != 0.);
+    let focal = matches!(e.kind, Kind::Lens | Kind::CurvedMirror)
+        .then_some(e.focal_length)
+        .filter(|f| *f != 0.);
     let to_local = |[x, y]: [f64; 2]| {
         let offset = add(scale(bu, x), scale(bv, y));
         let point = sub(add(event.hit, offset), scale(d, dot(offset, normal) / cos));
@@ -736,9 +834,15 @@ fn interact(a: &mut [C], grid: Grid, g: M2, event: &Event, k: f64, screen: Optio
         }
     }
     match &e.action {
-        Some(Action::TipTilt { tilt_mrad: [ty, tz] }) => shifts.push(shift([k * 1e-3 * ty, k * 1e-3 * tz])),
+        Some(Action::TipTilt {
+            tilt_mrad: [ty, tz],
+        }) => shifts.push(shift([k * 1e-3 * ty, k * 1e-3 * tz])),
         Some(Action::Slm { tilts_mrad, .. }) => {
-            shifts.extend(tilts_mrad.iter().map(|[ty, tz]| shift([k * 1e-3 * ty, k * 1e-3 * tz])));
+            shifts.extend(
+                tilts_mrad
+                    .iter()
+                    .map(|[ty, tz]| shift([k * 1e-3 * ty, k * 1e-3 * tz])),
+            );
         }
         _ => {}
     }
@@ -770,20 +874,41 @@ fn interact(a: &mut [C], grid: Grid, g: M2, event: &Event, k: f64, screen: Optio
             phase -= k * ((ly - hit[1]).powi(2) + (lz - hit[2]).powi(2)) / (2. * f);
         }
         match &e.action {
-            Some(Action::Mask { shape: Some(shape), inside, outside, .. }) => {
-                transmittance = if shape.contains(ly, lz) { *inside } else { *outside };
+            Some(Action::Mask {
+                shape: Some(shape),
+                inside,
+                outside,
+                ..
+            }) => {
+                transmittance = if shape.contains(ly, lz) {
+                    *inside
+                } else {
+                    *outside
+                };
             }
-            Some(Action::Mask { matrix: Some(rows), pitch_um: Some(pitch), outside, .. }) => {
+            Some(Action::Mask {
+                matrix: Some(rows),
+                pitch_um: Some(pitch),
+                outside,
+                ..
+            }) => {
                 let pitch = pitch * 1e-3;
                 let col = (ly / pitch + rows[0].len() as f64 / 2.).floor();
                 let row = (-lz / pitch + rows.len() as f64 / 2.).floor();
-                transmittance = if (0. ..rows[0].len() as f64).contains(&col) && (0. ..rows.len() as f64).contains(&row) {
+                transmittance = if (0. ..rows[0].len() as f64).contains(&col)
+                    && (0. ..rows.len() as f64).contains(&row)
+                {
                     rows[row as usize][col as usize]
                 } else {
                     *outside
                 };
             }
-            Some(Action::Slm { segments: [columns, rows], size_mm: [w, h], phases_rad, tilts_mrad }) => {
+            Some(Action::Slm {
+                segments: [columns, rows],
+                size_mm: [w, h],
+                phases_rad,
+                tilts_mrad,
+            }) => {
                 if ly.abs() <= w / 2. && lz.abs() <= h / 2. {
                     let col = (((ly + w / 2.) / w * *columns as f64) as usize).min(columns - 1);
                     let row = (((h / 2. - lz) / h * *rows as f64) as usize).min(rows - 1);
@@ -796,7 +921,9 @@ fn interact(a: &mut [C], grid: Grid, g: M2, event: &Event, k: f64, screen: Optio
                     }
                 }
             }
-            Some(Action::TipTilt { tilt_mrad: [ty, tz] }) => phase += k * 1e-3 * (ty * ly + tz * lz),
+            Some(Action::TipTilt {
+                tilt_mrad: [ty, tz],
+            }) => phase += k * 1e-3 * (ty * ly + tz * lz),
             Some(Action::Rgg { .. }) => phase += screen.map_or(0., |s| s.at([ly, lz])),
             Some(Action::Nd { .. } | Action::Mask { .. }) | None => {}
         }
@@ -814,12 +941,18 @@ fn band(a: &[C], grid: Grid) -> [[f64; 2]; 2] {
         let n = grid.n[axis];
         let mut marginal = vec![0.; n];
         for (i, v) in spectrum.iter().enumerate() {
-            let bin = if axis == 0 { i % grid.n[0] } else { i / grid.n[0] };
+            let bin = if axis == 0 {
+                i % grid.n[0]
+            } else {
+                i / grid.n[0]
+            };
             marginal[bin] += v.norm2();
         }
         // Order bins from −n/2 to n/2 − 1.
-        let ordered: Vec<(f64, f64)> =
-            (0..n).map(|j| (j + n - n / 2) % n).map(|bin| (signed(bin, n) / n as f64, marginal[bin])).collect();
+        let ordered: Vec<(f64, f64)> = (0..n)
+            .map(|j| (j + n - n / 2) % n)
+            .map(|bin| (signed(bin, n) / n as f64, marginal[bin]))
+            .collect();
         let total: f64 = marginal.iter().sum();
         fn edge<'i>(items: impl Iterator<Item = &'i (f64, f64)>, threshold: f64) -> f64 {
             let mut sum = 0.;
@@ -831,7 +964,10 @@ fn band(a: &[C], grid: Grid) -> [[f64; 2]; 2] {
                 })
                 .map_or(0., |(f, _)| *f)
         }
-        [edge(ordered.iter(), 1e-4 * total), edge(ordered.iter().rev(), 1e-4 * total)]
+        [
+            edge(ordered.iter(), 1e-4 * total),
+            edge(ordered.iter().rev(), 1e-4 * total),
+        ]
     })
 }
 
@@ -842,7 +978,11 @@ fn unaliased(a: &[C], grid: Grid, shifts: &[[f64; 2]]) -> Result<(), f64> {
     for s in shifts {
         for axis in 0..2 {
             let [lo, hi] = limits[axis];
-            let worst = if s[axis] >= 0. { hi + s[axis] } else { lo + s[axis] };
+            let worst = if s[axis] >= 0. {
+                hi + s[axis]
+            } else {
+                lo + s[axis]
+            };
             if worst.abs() >= 0.5 {
                 return Err(worst);
             }
@@ -872,13 +1012,25 @@ fn compute(
         }
         while let Some(&(_, [tu, tv], m)) = refractions.next_if(|r| r.0 == step) {
             // Stretch the tangential axis by m; the amplitude keeps the power.
-            let stretch = [[1. + (m - 1.) * tu * tu, (m - 1.) * tu * tv], [(m - 1.) * tu * tv, 1. + (m - 1.) * tv * tv]];
+            let stretch = [
+                [1. + (m - 1.) * tu * tu, (m - 1.) * tu * tv],
+                [(m - 1.) * tu * tv, 1. + (m - 1.) * tv * tv],
+            ];
             g = product(stretch, g);
             let gain = 1. / m.sqrt();
             a.iter_mut().for_each(|c| *c = c.scale(gain));
         }
-        let f = trace.segments[index].flight.as_ref().expect("branch flights");
-        let (sin, dropped) = propagate(&mut a, arm.grid, g, f.length_mm, f.wavelength_nm * 1e-6 / f.index);
+        let f = trace.segments[index]
+            .flight
+            .as_ref()
+            .expect("branch flights");
+        let (sin, dropped) = propagate(
+            &mut a,
+            arm.grid,
+            g,
+            f.length_mm,
+            f.wavelength_nm * 1e-6 / f.index,
+        );
         band.sin = band.sin.min(sin);
         band.dropped = band.dropped.max(dropped);
     }
@@ -900,7 +1052,10 @@ fn map(arm: &Arm, reference: &Arm, (a, g): (Vec<C>, M2), carrier: bool) -> Resul
     let d = arm.end.direction;
     let cos = dot(d, reference.end.direction);
     if cos < 0.05 {
-        return Err(format!("Branch {} crosses the plane of branch {} at grazing or reversed incidence", arm.label, reference.label));
+        return Err(format!(
+            "Branch {} crosses the plane of branch {} at grazing or reversed incidence",
+            arm.label, reference.label
+        ));
     }
     let obliquity = cos.sqrt();
     let k = TAU * arm.end_index / (arm.wavelength_nm * 1e-6);
@@ -910,7 +1065,10 @@ fn map(arm: &Arm, reference: &Arm, (a, g): (Vec<C>, M2), carrier: bool) -> Resul
     let to_grid = inverse(g);
     // Reference grid coordinates reach the arm grid through L = G⁻¹·P, with P
     // projecting along d onto the arm basis; frequencies map back through Lᵀ.
-    let linear = product(to_grid, [[dot(u0, u), dot(v0, u)], [dot(u0, v), dot(v0, v)]]);
+    let linear = product(
+        to_grid,
+        [[dot(u0, u), dot(v0, u)], [dot(u0, v), dot(v0, v)]],
+    );
     if k != 0. {
         let carrier = [u0, v0].map(|b| k * dot(b, d) * reference.grid.pitch / TAU);
         let scale_pitch = arm.grid.pitch / reference.grid.pitch;
@@ -961,7 +1119,10 @@ fn resample(a: &[C], grid: Grid, linear: M2, offset: [f64; 2]) -> Vec<C> {
         if fraction != [0.; 2] {
             fft2(&mut shifted, grid.n, false);
             for (i, value) in shifted.iter_mut().enumerate() {
-                let f = [signed(i % nx, nx) / nx as f64, signed(i / nx, ny) / ny as f64];
+                let f = [
+                    signed(i % nx, nx) / nx as f64,
+                    signed(i / nx, ny) / ny as f64,
+                ];
                 *value = *value * C::cis(TAU * (f[0] * fraction[0] + f[1] * fraction[1]));
             }
             fft2(&mut shifted, grid.n, true);
@@ -983,7 +1144,12 @@ fn resample(a: &[C], grid: Grid, linear: M2, offset: [f64; 2]) -> Vec<C> {
     let [[a0, b0], [c0, d0]] = linear;
     let (source, [sx, sy], [[la, lb], [lc, ld]], [o1, o2]) = if b0.abs() > d0.abs() {
         let transposed: Vec<C> = (0..grid.len()).map(|i| a[(i % ny) * nx + i / ny]).collect();
-        (transposed, [ny, nx], [[c0, d0], [a0, b0]], [steps[1], steps[0]])
+        (
+            transposed,
+            [ny, nx],
+            [[c0, d0], [a0, b0]],
+            [steps[1], steps[0]],
+        )
     } else {
         (a.to_vec(), [nx, ny], linear, steps)
     };
@@ -995,15 +1161,25 @@ fn resample(a: &[C], grid: Grid, linear: M2, offset: [f64; 2]) -> Vec<C> {
     let mut column = vec![C::ZERO; sy];
     let mut padded = vec![C::ZERO; fine];
     for x in 0..sx {
-        column.iter_mut().enumerate().for_each(|(y, c)| *c = source[y * sx + x]);
+        column
+            .iter_mut()
+            .enumerate()
+            .for_each(|(y, c)| *c = source[y * sx + x]);
         fft(&mut column, false);
         padded.fill(C::ZERO);
         for (bin, value) in column.iter().enumerate() {
             let k = signed(bin, sy);
-            padded[if k < 0. { (fine as f64 + k) as usize } else { bin }] = value.scale(2.);
+            padded[if k < 0. {
+                (fine as f64 + k) as usize
+            } else {
+                bin
+            }] = value.scale(2.);
         }
         fft(&mut padded, true);
-        padded.iter().enumerate().for_each(|(r, c)| upsampled[r * sx + x] = *c);
+        padded
+            .iter()
+            .enumerate()
+            .for_each(|(r, c)| upsampled[r * sx + x] = *c);
     }
     // Row pass: B(X, y) = A(αX + βy + γ, y), with Y eliminated through s₂ = y.
     let det = la * ld - lb * lc;
@@ -1023,7 +1199,10 @@ fn resample(a: &[C], grid: Grid, linear: M2, offset: [f64; 2]) -> Vec<C> {
     let mut out = vec![C::ZERO; grid.len()];
     let mut column = vec![C::ZERO; fine];
     for x in 0..nx {
-        column.iter_mut().enumerate().for_each(|(r, c)| *c = sheared[r * nx + x]);
+        column
+            .iter_mut()
+            .enumerate()
+            .for_each(|(r, c)| *c = sheared[r * nx + x]);
         fft(&mut column, false);
         let cx = lc * (x as f64 - ox) + o2 + hy;
         for y in 0..ny {
@@ -1064,7 +1243,9 @@ fn coherence(a: &Arm, b: &Arm) -> f64 {
     fn group(s: &Source) -> Option<&str> {
         s.coherence.as_ref().map(|c| c.group.as_str())
     }
-    if a.source.id != b.source.id && (group(a.source).is_none() || group(a.source) != group(b.source)) {
+    if a.source.id != b.source.id
+        && (group(a.source).is_none() || group(a.source) != group(b.source))
+    {
         return 0.;
     }
     // Validation gives every source of a group one length, so γ is a Gaussian
@@ -1089,10 +1270,19 @@ fn intensity(fields: &[Vec<C>], weights: &[Vec<C>], out: &mut [f64]) {
     }
 }
 
-fn select<'t>(bench: &Bench, trace: &'t Trace, request: &FieldRequest) -> Result<Vec<(String, &'t BranchPath)>, String> {
+fn select<'t>(
+    bench: &Bench,
+    trace: &'t Trace,
+    request: &FieldRequest,
+) -> Result<Vec<(String, &'t BranchPath)>, String> {
     let ids: Vec<&str> = match (&request.branch, &request.port) {
         (Some(id), None) => vec![id.as_str()],
-        (None, Some(port)) => bench.branches.iter().filter(|b| b.to == *port).map(|b| b.id.as_str()).collect(),
+        (None, Some(port)) => bench
+            .branches
+            .iter()
+            .filter(|b| b.to == *port)
+            .map(|b| b.id.as_str())
+            .collect(),
         _ => return Err("Give exactly one of branch or port".into()),
     };
     if ids.is_empty() {
@@ -1105,12 +1295,21 @@ fn select<'t>(bench: &Bench, trace: &'t Trace, request: &FieldRequest) -> Result
             .iter()
             .find(|r| r.id == id)
             .ok_or_else(|| format!("Unknown branch {id}"))?;
-        if let Some(b) = report.interruption.as_ref().or_else(|| report.paths.iter().find_map(|p| p.interruption.as_ref())) {
-            return Err(format!("Branch {id} is interrupted at {}/{}: {}", b.element, b.port, b.reason));
+        if let Some(b) = report
+            .interruption
+            .as_ref()
+            .or_else(|| report.paths.iter().find_map(|p| p.interruption.as_ref()))
+        {
+            return Err(format!(
+                "Branch {id} is interrupted at {}/{}: {}",
+                b.element, b.port, b.reason
+            ));
         }
         let many = report.paths.len() > 1;
         for (i, path) in report.paths.iter().enumerate() {
-            if request.wavelength.is_some_and(|w| (path.wavelength_nm - w).abs() > 1e-6)
+            if request
+                .wavelength
+                .is_some_and(|w| (path.wavelength_nm - w).abs() > 1e-6)
                 || paths.iter().any(|(_, p)| p.end_segment == path.end_segment)
             {
                 continue;
@@ -1121,8 +1320,13 @@ fn select<'t>(bench: &Bench, trace: &'t Trace, request: &FieldRequest) -> Result
     if paths.is_empty() {
         return Err("No traced path matches the requested target and wavelength".into());
     }
-    if paths.iter().any(|(_, p)| (p.wavelength_nm - paths[0].1.wavelength_nm).abs() > 1e-6) {
-        return Err("Arms at the target carry several wavelengths; choose one with wavelength".into());
+    if paths
+        .iter()
+        .any(|(_, p)| (p.wavelength_nm - paths[0].1.wavelength_nm).abs() > 1e-6)
+    {
+        return Err(
+            "Arms at the target carry several wavelengths; choose one with wavelength".into(),
+        );
     }
     Ok(paths)
 }
@@ -1167,9 +1371,17 @@ fn couple_on(arms: &[Arm], reference: &Arm) -> Result<Coupling, String> {
         return Err("Arms at the target need sources with the same field grid and pitch".into());
     }
     let n = arms.len();
-    let gamma: Vec<Vec<f64>> = (0..n).map(|a| (0..n).map(|b| coherence(&arms[a], &arms[b])).collect()).collect();
+    let gamma: Vec<Vec<f64>> = (0..n)
+        .map(|a| (0..n).map(|b| coherence(&arms[a], &arms[b])).collect())
+        .collect();
     let weights: Vec<Vec<C>> = (0..n)
-        .map(|a| (0..n).map(|b| flux(arms[a].wave(), arms[b].wave(), reference.end.direction).scale(gamma[a][b])).collect())
+        .map(|a| {
+            (0..n)
+                .map(|b| {
+                    flux(arms[a].wave(), arms[b].wave(), reference.end.direction).scale(gamma[a][b])
+                })
+                .collect()
+        })
         .collect();
     // The mapping carrier must advance less than π per sample. An arm that
     // couples to no other may drop it: its intensity does not depend on it.
@@ -1192,7 +1404,12 @@ fn couple_on(arms: &[Arm], reference: &Arm) -> Result<Coupling, String> {
         carriers[a] = false;
         uncarried.push(arm.label.clone());
     }
-    Ok(Coupling { gamma, weights, carriers, uncarried })
+    Ok(Coupling {
+        gamma,
+        weights,
+        carriers,
+        uncarried,
+    })
 }
 
 /// Every arm's field for one realization, resampled onto the first arm's plane.
@@ -1206,11 +1423,22 @@ fn realize(
 ) -> Result<Vec<Vec<C>>, String> {
     arms.iter()
         .zip(carriers)
-        .map(|(arm, &carrier)| map(arm, &arms[0], compute(trace, arm, realization, screens, band)?, carrier))
+        .map(|(arm, &carrier)| {
+            map(
+                arm,
+                &arms[0],
+                compute(trace, arm, realization, screens, band)?,
+                carrier,
+            )
+        })
         .collect()
 }
 
-pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> Result<FieldReading, String> {
+pub(crate) fn field(
+    bench: &Bench,
+    system: &System,
+    request: &FieldRequest,
+) -> Result<FieldReading, String> {
     let scene = bench.resolved_stages()?;
     let bench = scene.as_ref();
     bench.validate()?;
@@ -1225,13 +1453,23 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
         .collect::<Result<Vec<_>, _>>()?;
     let reference = &arms[0];
     let grid = reference.grid;
-    let random = arms
-        .iter()
-        .any(|a| a.events.iter().any(|e| matches!(e.element.action, Some(Action::Rgg { .. }))));
+    let random = arms.iter().any(|a| {
+        a.events
+            .iter()
+            .any(|e| matches!(e.element.action, Some(Action::Rgg { .. })))
+    });
     let runs = if random { realizations } else { 1 };
     let n = arms.len();
-    let Coupling { gamma, weights, carriers, uncarried } = couple(&arms)?;
-    let projection: Vec<C> = arms.iter().map(|a| inner(a.vector, reference.vector)).collect();
+    let Coupling {
+        gamma,
+        weights,
+        carriers,
+        uncarried,
+    } = couple(&arms)?;
+    let projection: Vec<C> = arms
+        .iter()
+        .map(|a| inner(a.vector, reference.vector))
+        .collect();
     let mut near = vec![0.; grid.len()];
     let mut far = vec![0.; grid.len()];
     let mut cross = vec![vec![C::ZERO; n]; n];
@@ -1239,9 +1477,19 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
     let mut arm_near = vec![vec![0.; grid.len()]; n];
     let mut arm_phase = vec![C::ZERO; n];
     let mut screens = Screens::new();
-    let mut band = Band { sin: 1., dropped: 0. };
+    let mut band = Band {
+        sin: 1.,
+        dropped: 0.,
+    };
     for realization in 0..runs {
-        let fields = realize(&trace, &arms, &carriers, realization, &mut screens, &mut band)?;
+        let fields = realize(
+            &trace,
+            &arms,
+            &carriers,
+            realization,
+            &mut screens,
+            &mut band,
+        )?;
         intensity(&fields, &weights, &mut near);
         let spectra: Vec<Vec<C>> = fields
             .iter()
@@ -1254,7 +1502,10 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
         intensity(&spectra, &weights, &mut far);
         for a in 0..n {
             for b in 0..n {
-                cross[a][b] += fields[a].iter().zip(&fields[b]).fold(C::ZERO, |s, (x, y)| s + *x * y.conj())
+                cross[a][b] += fields[a]
+                    .iter()
+                    .zip(&fields[b])
+                    .fold(C::ZERO, |s, (x, y)| s + *x * y.conj())
                     * flux(arms[a].wave(), arms[b].wave(), reference.end.direction);
             }
         }
@@ -1303,7 +1554,13 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
                 c[1] += f[1] * v;
             }
         }
-        c.map(|x| if sum > 0. { x / sum * wavelength_medium * 1e3 } else { 0. })
+        c.map(|x| {
+            if sum > 0. {
+                x / sum * wavelength_medium * 1e3
+            } else {
+                0.
+            }
+        })
     };
     let peak = near.iter().copied().fold(0., f64::max);
     let lit: Vec<f64> = near.iter().copied().filter(|v| *v > 1e-6 * peak).collect();
@@ -1354,7 +1611,10 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
             opl_mm: arm.opl_mm,
             geometric_tilt_mrad: arm.geometric_tilt.map(|[gu, gv]| {
                 let world = add(scale(arm.end.basis[0], gu), scale(arm.end.basis[1], gv));
-                [dot(world, reference.end.basis[0]), dot(world, reference.end.basis[1])]
+                [
+                    dot(world, reference.end.basis[0]),
+                    dot(world, reference.end.basis[1]),
+                ]
             }),
         })
         .collect();
@@ -1365,19 +1625,35 @@ pub(crate) fn field(bench: &Bench, system: &System, request: &FieldRequest) -> R
             PairReading {
                 arms: [a, b],
                 coherence: gamma[a][b],
-                correlation: if norm > 0. { cross[a][b].norm2().sqrt() / norm } else { 0. },
+                correlation: if norm > 0. {
+                    cross[a][b].norm2().sqrt() / norm
+                } else {
+                    0.
+                },
             }
         })
         .collect();
-    let mean_phase = coherent.iter().fold(C::ZERO, |s, c| s + c.scale(c.norm2().sqrt())).arg();
+    let mean_phase = coherent
+        .iter()
+        .fold(C::ZERO, |s, c| s + c.scale(c.norm2().sqrt()))
+        .arg();
     let block = grid.n[0].max(grid.n[1]).div_ceil(64).max(1);
     let (intensity_rows, phase_rows) = if request.arrays {
         let rows = downsample(grid, |i| C::new(near[i], 0.), block);
         let phases = downsample(grid, |i| coherent[i], block);
         let cells = (block * block) as f64;
         (
-            Some(rows.iter().map(|r| r.iter().map(|c| c.re / cells).collect()).collect()),
-            Some(phases.iter().map(|r| r.iter().map(|c| c.arg()).collect()).collect()),
+            Some(
+                rows.iter()
+                    .map(|r| r.iter().map(|c| c.re / cells).collect())
+                    .collect(),
+            ),
+            Some(
+                phases
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.arg()).collect())
+                    .collect(),
+            ),
         )
     } else {
         (None, None)
@@ -1419,11 +1695,23 @@ mod tests {
     use crate::optics::bench::{Branch, Connection, FieldSampling, PhasePlate};
 
     fn sampling(grid: usize, pitch_um: f64, profile: FieldProfile, waist_um: f64) -> FieldSampling {
-        FieldSampling { grid: [grid; 2], pitch_um, profile, waist_um, polarization: Some([[1., 0.], [0., 0.]]) }
+        FieldSampling {
+            grid: [grid; 2],
+            pitch_um,
+            profile,
+            waist_um,
+            polarization: Some([[1., 0.], [0., 0.]]),
+        }
     }
 
     fn request(branch: Option<&str>, port: Option<Port>, realizations: usize) -> FieldRequest {
-        FieldRequest { branch: branch.map(Into::into), port, wavelength: None, realizations: Some(realizations), arrays: false }
+        FieldRequest {
+            branch: branch.map(Into::into),
+            port,
+            wavelength: None,
+            realizations: Some(realizations),
+            arrays: false,
+        }
     }
 
     /// Source S1 at (100, 200) heading +x, a fold mirror M at x = 200 sending
@@ -1434,11 +1722,24 @@ mod tests {
         bench.sources[0].field = Some(field);
         let mut mirror = mount_element("M", MIRROR, [200., 200., 75.], [-1., 1., 0.]);
         mirror.action = action;
-        bench.elements = vec![mirror, mount_element("D", DETECTOR, [200., 200. + length, 75.], [0., 1., 0.])];
+        bench.elements = vec![
+            mirror,
+            mount_element("D", DETECTOR, [200., 200. + length, 75.], [0., 1., 0.]),
+        ];
         bench.connections = [("S1", "out", "M"), ("M", "reflected", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
-        bench.branches = vec![Branch { id: "beam".into(), from: Port::new("S1", "out"), to: Port::new("D", "in"), via: vec![], style: None }];
+        bench.branches = vec![Branch {
+            id: "beam".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+            style: None,
+        }];
         bench
     }
 
@@ -1449,17 +1750,29 @@ mod tests {
         bench.assertions.clear();
         bench.sources[0].field = Some(field);
         for port in ["transmitted", "reflected"] {
-            bench.connections.push(Connection { from: "BS2".into(), port: port.into(), to: detector.into() });
+            bench.connections.push(Connection {
+                from: "BS2".into(),
+                port: port.into(),
+                to: detector.into(),
+            });
         }
         if glass.is_some() {
             let mut g = mount_element("G", MASK, [175., 200., 75.], [1., 0., 0.]);
             g.action = glass;
             bench.elements.push(g);
             bench.connections[0].to = "G".into();
-            bench.connections.push(Connection { from: "G".into(), port: "out".into(), to: "BS1".into() });
+            bench.connections.push(Connection {
+                from: "G".into(),
+                port: "out".into(),
+                to: "BS1".into(),
+            });
         }
         // At D1 arm a leaves BS2 transmitted and arm b reflected; at D2 the reverse.
-        let ends = if detector == "D1" { ["transmitted", "reflected"] } else { ["reflected", "transmitted"] };
+        let ends = if detector == "D1" {
+            ["transmitted", "reflected"]
+        } else {
+            ["reflected", "transmitted"]
+        };
         bench.branches = [("a", "reflected", ends[0]), ("b", "transmitted", ends[1])]
             .map(|(id, start, end)| Branch {
                 id: id.into(),
@@ -1474,14 +1787,32 @@ mod tests {
 
     #[test]
     fn fft_round_trip_and_screen_statistics() {
-        let grid = Grid { n: [16, 8], pitch: 0.01 };
-        let data: Vec<C> = (0..grid.len()).map(|i| C::new((i as f64).sin(), (i as f64 * 0.3).cos())).collect();
+        let grid = Grid {
+            n: [16, 8],
+            pitch: 0.01,
+        };
+        let data: Vec<C> = (0..grid.len())
+            .map(|i| C::new((i as f64).sin(), (i as f64 * 0.3).cos()))
+            .collect();
         let mut work = data.clone();
         fft2(&mut work, grid.n, false);
         fft2(&mut work, grid.n, true);
-        assert!(data.iter().zip(&work).all(|(a, b)| (*a - *b).norm2() < 1e-20));
-        let screen = Screen::new(Grid { n: [64; 2], pitch: 0.01 }, 0.04, 2., 7);
-        let rms = (screen.phase.iter().map(|p| p * p).sum::<f64>() / screen.phase.len() as f64).sqrt();
+        assert!(
+            data.iter()
+                .zip(&work)
+                .all(|(a, b)| (*a - *b).norm2() < 1e-20)
+        );
+        let screen = Screen::new(
+            Grid {
+                n: [64; 2],
+                pitch: 0.01,
+            },
+            0.04,
+            2.,
+            7,
+        );
+        let rms =
+            (screen.phase.iter().map(|p| p * p).sum::<f64>() / screen.phase.len() as f64).sqrt();
         assert!((rms - 2.).abs() < 1e-9);
     }
 
@@ -1494,12 +1825,22 @@ mod tests {
         let power = |bench: &Bench| {
             let trace = bench.trace(&system).unwrap();
             let traced = trace.segments[trace.branches[0].paths[0].end_segment.unwrap()].power;
-            (traced, super::field(bench, &system, &request(Some("beam"), None, 1)).unwrap().power)
+            (
+                traced,
+                super::field(bench, &system, &request(Some("beam"), None, 1))
+                    .unwrap()
+                    .power,
+            )
         };
         let ((t0, f0), (t1, f1)) = (power(&plain), power(&dimmed));
         assert!((t1 / t0 - 0.1).abs() < 1e-12, "{t0} {t1}");
         assert!((f1 / f0 - 0.1).abs() < 1e-9, "{f0} {f1}");
-        assert!(dimmed.elements[0].action.as_ref().is_some_and(Action::valid));
+        assert!(
+            dimmed.elements[0]
+                .action
+                .as_ref()
+                .is_some_and(Action::valid)
+        );
         let mut bad = plain.clone();
         bad.elements[1].action = Some(Action::Nd { od: 1. });
         assert!(bad.validate().unwrap_err().contains("Invalid action on D"));
@@ -1510,10 +1851,19 @@ mod tests {
         let system = System::default();
         let [ty, tz] = [0.8, -0.5];
         let read = |action| {
-            let bench = fold(action, 100., sampling(128, 20., FieldProfile::Gaussian, 300.));
+            let bench = fold(
+                action,
+                100.,
+                sampling(128, 20., FieldProfile::Gaussian, 300.),
+            );
             super::field(&bench, &system, &request(Some("beam"), None, 1)).unwrap()
         };
-        let (flat, reading) = (read(None), read(Some(Action::TipTilt { tilt_mrad: [ty, tz] })));
+        let (flat, reading) = (
+            read(None),
+            read(Some(Action::TipTilt {
+                tilt_mrad: [ty, tz],
+            })),
+        );
         // M folds +x into +y with normal (−1, 1, 0)/√2, local y = (−1, −1, 0)/√2 and
         // local z = +z. The exit ray keeps the in-plane phase gradient t and stays
         // transverse: δ = t + n·ty = (−√2·ty, 0, tz).
@@ -1521,14 +1871,28 @@ mod tests {
         let expected = reading.basis.map(|b| dot(world, b));
         let geometric = reading.arms[0].geometric_tilt_mrad.unwrap();
         for axis in 0..2 {
-            assert!((geometric[axis] - expected[axis]).abs() < 1e-9, "{geometric:?} {expected:?}");
+            assert!(
+                (geometric[axis] - expected[axis]).abs() < 1e-9,
+                "{geometric:?} {expected:?}"
+            );
             let moved = reading.far_field_centroid_mrad[axis] - flat.far_field_centroid_mrad[axis];
-            assert!((moved - expected[axis]).abs() < 0.01, "{:?} vs {expected:?}", reading.far_field_centroid_mrad);
+            assert!(
+                (moved - expected[axis]).abs() < 0.01,
+                "{:?} vs {expected:?}",
+                reading.far_field_centroid_mrad
+            );
             // The near-field spot walks by the deflection over the 100 mm flight.
             let walk = reading.centroid_mm[axis] - flat.centroid_mm[axis];
-            assert!((walk - expected[axis] * 0.1).abs() < 2e-3, "{walk} {expected:?}");
+            assert!(
+                (walk - expected[axis] * 0.1).abs() < 2e-3,
+                "{walk} {expected:?}"
+            );
         }
-        assert!(reading.sampling.warnings.is_empty(), "{:?}", reading.sampling.warnings);
+        assert!(
+            reading.sampling.warnings.is_empty(),
+            "{:?}",
+            reading.sampling.warnings
+        );
     }
 
     #[test]
@@ -1540,8 +1904,17 @@ mod tests {
         let read = |plate: f64, detector: &str| {
             let mut bench = interferometer(field.clone(), None, detector);
             let wavelength = bench.sources[0].wavelength;
-            bench.elements[0].phase = Some(PhasePlate { radians: Some(plate), waves: None, at_wavelength_nm: wavelength });
-            let reading = super::field(&bench, &system, &request(None, Some(Port::new(detector, "in")), 1)).unwrap();
+            bench.elements[0].phase = Some(PhasePlate {
+                radians: Some(plate),
+                waves: None,
+                at_wavelength_nm: wavelength,
+            });
+            let reading = super::field(
+                &bench,
+                &system,
+                &request(None, Some(Port::new(detector, "in")), 1),
+            )
+            .unwrap();
             assert_eq!(reading.arms.len(), 2);
             reading.power
         };
@@ -1550,12 +1923,19 @@ mod tests {
         // BS1 transmitted arm swaps the outputs.
         for (plate, bright, dark) in [(0., "D1", "D2"), (PI, "D2", "D1")] {
             let (b, d) = (read(plate, bright), read(plate, dark));
-            assert!((b - delivered).abs() < 1e-3 * delivered, "{plate}: {b} {delivered}");
+            assert!(
+                (b - delivered).abs() < 1e-3 * delivered,
+                "{plate}: {b} {delivered}"
+            );
             assert!(d < 1e-3 * delivered, "{plate}: {d}");
         }
         // Quadrature splits the power evenly.
         let (q1, q2) = (read(PI / 2., "D1"), read(PI / 2., "D2"));
-        assert!((q1 - delivered / 2.).abs() < 1e-3 * delivered && (q2 - delivered / 2.).abs() < 1e-3 * delivered, "{q1} {q2}");
+        assert!(
+            (q1 - delivered / 2.).abs() < 1e-3 * delivered
+                && (q2 - delivered / 2.).abs() < 1e-3 * delivered,
+            "{q1} {q2}"
+        );
     }
 
     #[test]
@@ -1572,7 +1952,10 @@ mod tests {
         second.direction = [c, s, 0.];
         bench.sources.push(second);
         for (i, source) in bench.sources.iter_mut().enumerate() {
-            source.coherence = Some(crate::optics::bench::Coherence { group: "laser".into(), length_mm: None });
+            source.coherence = Some(crate::optics::bench::Coherence {
+                group: "laser".into(),
+                length_mm: None,
+            });
             let mut field = sampling(128, 20., FieldProfile::Gaussian, 200.);
             if i == 1 {
                 field.polarization = Some([[0., 0.], [1., 0.]]);
@@ -1580,42 +1963,93 @@ mod tests {
             source.field = Some(field);
         }
         let delivered: f64 = bench.sources.iter().map(|s| s.power).sum();
-        bench.elements = vec![mount_element("D", DETECTOR, [200., 200., 75.], [1. + c, s, 0.])];
+        bench.elements = vec![mount_element(
+            "D",
+            DETECTOR,
+            [200., 200., 75.],
+            [1. + c, s, 0.],
+        )];
         bench.connections = [("S1", "out", "D"), ("S2", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![], style: None })
+            .map(|s| Branch {
+                id: s.into(),
+                from: Port::new(s, "out"),
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            })
             .into();
-        let reading = super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1)).unwrap();
+        let reading = super::field(
+            &bench,
+            &system,
+            &request(None, Some(Port::new("D", "in")), 1),
+        )
+        .unwrap();
         assert_eq!(reading.pairs[0].coherence, 1.);
         assert!(reading.pairs[0].correlation < 1e-9);
         // S2's footprint on S1's plane is twice as long; without the obliquity it
         // would count double.
-        assert!((reading.power - delivered).abs() < 1e-3 * delivered, "{} {delivered}", reading.power);
+        assert!(
+            (reading.power - delivered).abs() < 1e-3 * delivered,
+            "{} {delivered}",
+            reading.power
+        );
         // Its 60° carrier cannot be sampled; with no coupling it is dropped, and said so.
-        assert!(reading.sampling.warnings.iter().any(|w| w.contains("Branch S2 crosses")), "{:?}", reading.sampling.warnings);
+        assert!(
+            reading
+                .sampling
+                .warnings
+                .iter()
+                .any(|w| w.contains("Branch S2 crosses")),
+            "{:?}",
+            reading.sampling.warnings
+        );
         // Same polarization would couple the arms, so the unsampled carrier is an error.
         bench.sources[1].field.as_mut().unwrap().polarization = Some([[1., 0.], [0., 0.]]);
-        let err = super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1)).unwrap_err();
+        let err = super::field(
+            &bench,
+            &system,
+            &request(None, Some(Port::new("D", "in")), 1),
+        )
+        .unwrap_err();
         assert!(err.contains("too steeply"), "{err}");
         // One group, one coherence length: otherwise γ need not be positive semidefinite.
         bench.sources[1].coherence.as_mut().unwrap().length_mm = Some(0.1);
-        assert!(bench.validate().unwrap_err().contains("different length_mm"));
+        assert!(
+            bench
+                .validate()
+                .unwrap_err()
+                .contains("different length_mm")
+        );
     }
 
     #[test]
     fn oblique_plate_propagates_tangential_and_sagittal_axes_differently() {
         let system = System::default();
         let (thickness, w0) = (20., 0.05);
-        let mut bench = fold(None, 100., sampling(256, 6., FieldProfile::Gaussian, w0 * 1e3));
+        let mut bench = fold(
+            None,
+            100.,
+            sampling(256, 6., FieldProfile::Gaussian, w0 * 1e3),
+        );
         let wavelength = bench.sources[0].wavelength;
         let n = system.material_index("N-BK7_SCHOTT", wavelength).unwrap();
         // A plate at 45° in the table plane. Its front face holds the element
         // position and the beam enters the back face at its centre, x = 130.
         let h = std::f64::consts::FRAC_1_SQRT_2;
         let entry = 130.;
-        let mut plate = mount_element("P", MASK, [entry + thickness * h, 200. + thickness * h, 75.], [h, h, 0.]);
+        let mut plate = mount_element(
+            "P",
+            MASK,
+            [entry + thickness * h, 200. + thickness * h, 75.],
+            [h, h, 0.],
+        );
         plate.substrate = Some(crate::optics::bench::Substrate {
             material: "N-BK7_SCHOTT".into(),
             thickness_mm: thickness,
@@ -1626,11 +2060,21 @@ mod tests {
         let cos_t = (1. - sin_t * sin_t).sqrt();
         let inside = thickness / cos_t;
         // The refracted chief ray is cos θt·n + sin θt·(1, −1)/√2, then +x to D.
-        let exit = [entry + inside * (cos_t + sin_t) * h, 200. + inside * (cos_t - sin_t) * h];
+        let exit = [
+            entry + inside * (cos_t + sin_t) * h,
+            200. + inside * (cos_t - sin_t) * h,
+        ];
         let detector_x = 190.;
-        bench.elements = vec![plate, mount_element("D", DETECTOR, [detector_x, exit[1], 75.], [1., 0., 0.])];
+        bench.elements = vec![
+            plate,
+            mount_element("D", DETECTOR, [detector_x, exit[1], 75.], [1., 0., 0.]),
+        ];
         bench.connections = [("S1", "out", "P"), ("P", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         let mut req = request(Some("beam"), None, 1);
         req.arrays = true;
@@ -1648,17 +2092,44 @@ mod tests {
         let mut m = [0.; 5];
         for (j, row) in rows.iter().enumerate() {
             for (i, &p) in row.iter().enumerate() {
-                let (x, y) = ((i as f64 - nx as f64 / 2.) * pitch, (j as f64 - ny as f64 / 2.) * pitch);
-                m = [m[0] + p, m[1] + p * x, m[2] + p * y, m[3] + p * x * x, m[4] + p * y * y];
+                let (x, y) = (
+                    (i as f64 - nx as f64 / 2.) * pitch,
+                    (j as f64 - ny as f64 / 2.) * pitch,
+                );
+                m = [
+                    m[0] + p,
+                    m[1] + p * x,
+                    m[2] + p * y,
+                    m[3] + p * x * x,
+                    m[4] + p * y * y,
+                ];
             }
         }
         let radius = |s1: f64, s2: f64| 2. * (s2 / m[0] - (s1 / m[0]).powi(2)).sqrt();
         let (ru, rv) = (radius(m[1], m[3]), radius(m[2], m[4]));
         // u = z × d lies in the plane of incidence (table), v = d × u is vertical.
-        assert!(reading.basis[0][2].abs() < 1e-9 && reading.basis[1][2].abs() > 1. - 1e-9, "{:?}", reading.basis);
-        assert!((ru - width(tangential)).abs() < 0.01 * width(tangential), "u {ru} vs {} (s {})", width(tangential), width(sagittal));
-        assert!((rv - width(sagittal)).abs() < 0.01 * width(sagittal), "v {rv} vs {}", width(sagittal));
-        assert!((reading.power - bench.sources[0].power * reading.arms[0].power / bench.sources[0].power).abs() < 1e-3 * reading.power);
+        assert!(
+            reading.basis[0][2].abs() < 1e-9 && reading.basis[1][2].abs() > 1. - 1e-9,
+            "{:?}",
+            reading.basis
+        );
+        assert!(
+            (ru - width(tangential)).abs() < 0.01 * width(tangential),
+            "u {ru} vs {} (s {})",
+            width(tangential),
+            width(sagittal)
+        );
+        assert!(
+            (rv - width(sagittal)).abs() < 0.01 * width(sagittal),
+            "v {rv} vs {}",
+            width(sagittal)
+        );
+        assert!(
+            (reading.power
+                - bench.sources[0].power * reading.arms[0].power / bench.sources[0].power)
+                .abs()
+                < 1e-3 * reading.power
+        );
     }
 
     #[test]
@@ -1685,7 +2156,11 @@ mod tests {
         let crossed = flux((real([0., 1., 0.]), n), (real([0., 0., 1.]), [c, s, 0.]), n);
         assert!(crossed.norm2() < 1e-24);
         // A single arm couples to itself with unit weight.
-        let own = flux((real([0., 0., 1.]), [c, s, 0.]), (real([0., 0., 1.]), [c, s, 0.]), n);
+        let own = flux(
+            (real([0., 0., 1.]), [c, s, 0.]),
+            (real([0., 0., 1.]), [c, s, 0.]),
+            n,
+        );
         assert!((own.re - 1.).abs() < 1e-12 && own.im.abs() < 1e-12);
     }
 
@@ -1702,16 +2177,34 @@ mod tests {
         bench.sources[0].position = [195., 200., 75.];
         bench.sources.push(second);
         for source in &mut bench.sources {
-            source.coherence = Some(crate::optics::bench::Coherence { group: "laser".into(), length_mm: None });
+            source.coherence = Some(crate::optics::bench::Coherence {
+                group: "laser".into(),
+                length_mm: None,
+            });
             source.field = Some(sampling(64, 2., FieldProfile::Gaussian, 25.));
         }
         let wavelength = bench.sources[0].wavelength * 1e-6;
-        bench.elements = vec![mount_element("D", DETECTOR, [200., 200., 75.], [1., 0., 0.])];
+        bench.elements = vec![mount_element(
+            "D",
+            DETECTOR,
+            [200., 200., 75.],
+            [1., 0., 0.],
+        )];
         bench.connections = [("S1", "out", "D"), ("S2", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![], style: None })
+            .map(|s| Branch {
+                id: s.into(),
+                from: Port::new(s, "out"),
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            })
             .into();
         let mut req = request(None, Some(Port::new("D", "in")), 1);
         req.arrays = true;
@@ -1723,7 +2216,9 @@ mod tests {
         let row = &rows[rows.len() / 2];
         let component = |period: f64| {
             let total: f64 = row.iter().sum();
-            let sum = row.iter().enumerate().fold(C::ZERO, |s, (i, &p)| s + C::cis(TAU * i as f64 * pitch / period).scale(p));
+            let sum = row.iter().enumerate().fold(C::ZERO, |s, (i, &p)| {
+                s + C::cis(TAU * i as f64 * pitch / period).scale(p)
+            });
             2. * sum.norm2().sqrt() / total
         };
         let period = wavelength / angle.sin();
@@ -1736,7 +2231,13 @@ mod tests {
     fn rejects_phase_ramps_the_grid_would_alias() {
         let system = System::default();
         // λ/p = 13.3 mrad at 40 µm: every sample would get the same phase.
-        let bench = fold(Some(Action::TipTilt { tilt_mrad: [13.3, 0.] }), 100., sampling(64, 40., FieldProfile::Gaussian, 300.));
+        let bench = fold(
+            Some(Action::TipTilt {
+                tilt_mrad: [13.3, 0.],
+            }),
+            100.,
+            sampling(64, 40., FieldProfile::Gaussian, 300.),
+        );
         let err = super::field(&bench, &system, &request(Some("beam"), None, 1)).unwrap_err();
         assert!(err.contains("would alias"), "{err}");
         // Two apertures each tilting 0.3125 cycles per sample at normal incidence pass
@@ -1744,24 +2245,42 @@ mod tests {
         let tilt = 0.532 / 40. * 1e3 * 0.3125;
         let mut bench = fold(None, 1., sampling(64, 40., FieldProfile::Gaussian, 300.));
         let mut first = mount_element("T1", MASK, [101., 200., 75.], [1., 0., 0.]);
-        first.action = Some(Action::TipTilt { tilt_mrad: [tilt, 0.] });
+        first.action = Some(Action::TipTilt {
+            tilt_mrad: [tilt, 0.],
+        });
         let mut second = first.clone();
         second.id = "T2".into();
         second.position = [102., 200., 75.];
         bench.sources[0].position = [100., 200., 75.];
-        bench.elements = vec![first, second, mount_element("D", DETECTOR, [103., 200., 75.], [1., 0., 0.])];
+        bench.elements = vec![
+            first,
+            second,
+            mount_element("D", DETECTOR, [103., 200., 75.], [1., 0., 0.]),
+        ];
         bench.connections = [("S1", "out", "T1"), ("T1", "out", "T2"), ("T2", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         let err = super::field(&bench, &system, &request(Some("beam"), None, 1)).unwrap_err();
         assert!(err.contains("T2 phase ramp"), "{err}");
         // One of them alone is fine and deflects by its own tilt.
         bench.elements.remove(1);
         bench.connections = [("S1", "out", "T1"), ("T1", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         let reading = super::field(&bench, &system, &request(Some("beam"), None, 1)).unwrap();
-        assert!((reading.far_field_centroid_mrad[0].abs() - tilt).abs() < 0.05 * tilt, "{:?}", reading.far_field_centroid_mrad);
+        assert!(
+            (reading.far_field_centroid_mrad[0].abs() - tilt).abs() < 0.05 * tilt,
+            "{:?}",
+            reading.far_field_centroid_mrad
+        );
     }
 
     #[test]
@@ -1785,34 +2304,66 @@ mod tests {
             bench.sources.push(second);
             for source in &mut bench.sources {
                 source.wavelength = wavelength * 1e6;
-                source.coherence = Some(crate::optics::bench::Coherence { group: "laser".into(), length_mm: None });
+                source.coherence = Some(crate::optics::bench::Coherence {
+                    group: "laser".into(),
+                    length_mm: None,
+                });
                 source.field = Some(sampling(64, 40., FieldProfile::Gaussian, 300.));
             }
             let mut tilt = mount_element("T", MASK, tilt_at, d_in);
             // Equal to the crossing angle, so the arm's own frequency is ±q.
-            tilt.action = Some(Action::TipTilt { tilt_mrad: [sign * theta * 1e3, 0.] });
+            tilt.action = Some(Action::TipTilt {
+                tilt_mrad: [sign * theta * 1e3, 0.],
+            });
             bench.elements = vec![
                 mount_element("BS", SPLITTER, splitter, [-1., 1., 0.]),
                 tilt,
                 mount_element("D", DETECTOR, [200., 200., 75.], [1., 0., 0.]),
             ];
-            bench.connections = [("S1", "out", "BS"), ("S2", "out", "T"), ("T", "out", "BS"), ("BS", "transmitted", "D"), ("BS", "reflected", "D")]
-                .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
-                .into();
+            bench.connections = [
+                ("S1", "out", "BS"),
+                ("S2", "out", "T"),
+                ("T", "out", "BS"),
+                ("BS", "transmitted", "D"),
+                ("BS", "reflected", "D"),
+            ]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
             bench.branches = [("S1", "transmitted"), ("S2", "reflected")]
-                .map(|(s, port)| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("BS", port)], style: None })
+                .map(|(s, port)| Branch {
+                    id: s.into(),
+                    from: Port::new(s, "out"),
+                    to: Port::new("D", "in"),
+                    via: vec![Port::new("BS", port)],
+                    style: None,
+                })
                 .into();
-            super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1))
+            super::field(
+                &bench,
+                &system,
+                &request(None, Some(Port::new("D", "in")), 1),
+            )
         };
         let results = [run(1.), run(-1.)];
         // One sign adds the tilt to the carrier (0.625 cycles per sample, rejected),
         // the other cancels it; comparing axes without the mirror flip would pick wrongly.
         let (ok, err): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
         assert_eq!((ok.len(), err.len()), (1, 1), "{err:?}");
-        assert!(err[0].as_ref().unwrap_err().contains("cycles per sample"), "{err:?}");
+        assert!(
+            err[0].as_ref().unwrap_err().contains("cycles per sample"),
+            "{err:?}"
+        );
         let reading = ok.into_iter().next().unwrap().unwrap();
         // The accepted arm lands on the reference axis: both far fields sit at zero.
-        assert!(reading.far_field_centroid_mrad[0].abs() < 0.2 * theta * 1e3, "{:?}", reading.far_field_centroid_mrad);
+        assert!(
+            reading.far_field_centroid_mrad[0].abs() < 0.2 * theta * 1e3,
+            "{:?}",
+            reading.far_field_centroid_mrad
+        );
     }
 
     #[test]
@@ -1820,11 +2371,20 @@ mod tests {
         // Kernel weights at a half-sample offset scale a frequency q by less than
         // one: bilinear keeps cos²(0.3125π) = 0.31 of a tilted beam, Lanczos-3
         // 0.58 of a ±0.375 cycles-per-sample pair.
-        let grid = Grid { n: [64, 64], pitch: 0.04 };
+        let grid = Grid {
+            n: [64, 64],
+            pitch: 0.04,
+        };
         let w = 0.3;
         let envelope = |[x, y]: [f64; 2]| (-(x * x + y * y) / (w * w)).exp();
-        let tilted = move |p: [f64; 2]| C::cis(TAU * (0.3125 * p[0] - 0.2 * p[1]) / 0.04).scale(envelope(p));
-        let broadband = move |p: [f64; 2]| C::new(envelope(p) * (1. + (TAU * 0.375 * p[0] / 0.04).cos()) / 2., 0.);
+        let tilted =
+            move |p: [f64; 2]| C::cis(TAU * (0.3125 * p[0] - 0.2 * p[1]) / 0.04).scale(envelope(p));
+        let broadband = move |p: [f64; 2]| {
+            C::new(
+                envelope(p) * (1. + (TAU * 0.375 * p[0] / 0.04).cos()) / 2.,
+                0.,
+            )
+        };
         let power = |f: &[C]| f.iter().map(|v| v.norm2()).sum::<f64>();
         let (c, s) = (0.3f64.cos(), 0.3f64.sin());
         let maps: [(M2, [f64; 2]); 5] = [
@@ -1843,7 +2403,9 @@ mod tests {
                 let worst = (0..grid.len())
                     .map(|i| {
                         let p = apply(linear, grid.coords(i));
-                        (mapped[i] - field([p[0] + offset[0], p[1] + offset[1]])).norm2().sqrt()
+                        (mapped[i] - field([p[0] + offset[0], p[1] + offset[1]]))
+                            .norm2()
+                            .sqrt()
                     })
                     .fold(0., f64::max);
                 assert!(worst < 1e-3, "{linear:?} {worst}");
@@ -1868,40 +2430,91 @@ mod tests {
         second.position = [100., 200.02, 75.02];
         bench.sources.push(second);
         let mut plate = mount_element("T", MASK, [101., 200.02, 75.02], [1., 0., 0.]);
-        plate.action = Some(Action::TipTilt { tilt_mrad: [tilt, tilt] });
-        bench.elements = vec![plate, mount_element("D", DETECTOR, [102., 200., 75.], [1., 0., 0.])];
+        plate.action = Some(Action::TipTilt {
+            tilt_mrad: [tilt, tilt],
+        });
+        bench.elements = vec![
+            plate,
+            mount_element("D", DETECTOR, [102., 200., 75.], [1., 0., 0.]),
+        ];
         // Both beams cross the plate; S2's field is the one resampled onto S1's grid.
         bench.connections = [("S1", "out", "T"), ("S2", "out", "T"), ("T", "out", "D")]
-            .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("T", "out")], style: None })
+            .map(|s| Branch {
+                id: s.into(),
+                from: Port::new(s, "out"),
+                to: Port::new("D", "in"),
+                via: vec![Port::new("T", "out")],
+                style: None,
+            })
             .into();
         let alone = super::field(&bench, &system, &request(Some("S2"), None, 1)).unwrap();
-        let joint = super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1)).unwrap();
+        let joint = super::field(
+            &bench,
+            &system,
+            &request(None, Some(Port::new("D", "in")), 1),
+        )
+        .unwrap();
         let mapped = joint.arms.iter().find(|a| a.branch == "S2").unwrap().power;
-        assert!((mapped / alone.power - 1.).abs() < 1e-3, "{mapped} {}", alone.power);
+        assert!(
+            (mapped / alone.power - 1.).abs() < 1e-3,
+            "{mapped} {}",
+            alone.power
+        );
     }
 
     #[test]
     fn ground_glass_speckle_averages_down_and_stays_mutually_coherent() {
         let system = System::default();
-        let glass = Action::Rgg { correlation_um: 40., roughness_waves: 1., seed: 3 };
+        let glass = Action::Rgg {
+            correlation_um: 40.,
+            roughness_waves: 1.,
+            seed: 3,
+        };
         let mut bench = fold(None, 20., sampling(64, 20., FieldProfile::Flat, 5000.));
-        bench.elements.insert(0, mount_element("G", MASK, [150., 200., 75.], [1., 0., 0.]));
+        bench
+            .elements
+            .insert(0, mount_element("G", MASK, [150., 200., 75.], [1., 0., 0.]));
         bench.elements[0].action = Some(glass.clone());
         bench.elements[1].position = [160., 200., 75.];
         bench.elements[2].position = [160., 220., 75.];
         bench.connections[0].to = "G".into();
-        bench.connections.push(Connection { from: "G".into(), port: "out".into(), to: "M".into() });
-        let contrast = |runs| super::field(&bench, &system, &request(Some("beam"), None, runs)).unwrap().contrast;
+        bench.connections.push(Connection {
+            from: "G".into(),
+            port: "out".into(),
+            to: "M".into(),
+        });
+        let contrast = |runs| {
+            super::field(&bench, &system, &request(Some("beam"), None, runs))
+                .unwrap()
+                .contrast
+        };
         let (one, many) = (contrast(1), contrast(16));
         assert!(one > 0.7, "{one}");
         assert!((3. ..5.3).contains(&(one / many)), "{one} {many}");
-        let shared = interferometer(sampling(32, 40., FieldProfile::Gaussian, 300.), Some(glass), "D1");
-        let reading = super::field(&shared, &system, &request(None, Some(Port::new("D1", "in")), 4)).unwrap();
+        let shared = interferometer(
+            sampling(32, 40., FieldProfile::Gaussian, 300.),
+            Some(glass),
+            "D1",
+        );
+        let reading = super::field(
+            &shared,
+            &system,
+            &request(None, Some(Port::new("D1", "in")), 4),
+        )
+        .unwrap();
         assert_eq!(reading.realizations, 4);
-        assert!(reading.pairs[0].correlation > 0.99, "{}", reading.pairs[0].correlation);
+        assert!(
+            reading.pairs[0].correlation > 0.99,
+            "{}",
+            reading.pairs[0].correlation
+        );
     }
 
     #[test]
@@ -1917,18 +2530,39 @@ mod tests {
             (traced, super::field(&bench, &system, &request).unwrap())
         };
         let (t0, plain) = read(None);
-        let half = Action::Mask { shape: None, matrix: Some(vec![vec![1., 0.]]), pitch_um: Some(5000.), inside: 1., outside: 0. };
+        let half = Action::Mask {
+            shape: None,
+            matrix: Some(vec![vec![1., 0.]]),
+            pitch_um: Some(5000.),
+            inside: 1.,
+            outside: 0.,
+        };
         let (t1, masked) = read(Some(half));
         assert_eq!(t0, t1);
         // The centre sample column lies on the mask edge and is blocked: 0.5 − pitch/(2·w·√(π/2)).
         let expected = 0.5 - 0.04 / (2. * 0.5 * (PI / 2.).sqrt());
-        assert!((masked.power / plain.power - expected).abs() < 0.005, "{} {}", masked.power, plain.power);
+        assert!(
+            (masked.power / plain.power - expected).abs() < 0.005,
+            "{} {}",
+            masked.power,
+            plain.power
+        );
         // Opposite pistons on the two SLM halves cancel the axial field.
-        let slm = Action::Slm { segments: [2, 1], size_mm: [10., 10.], phases_rad: vec![0., PI], tilts_mrad: vec![] };
+        let slm = Action::Slm {
+            segments: [2, 1],
+            size_mm: [10., 10.],
+            phases_rad: vec![0., PI],
+            tilts_mrad: vec![],
+        };
         let (_, split) = read(Some(slm));
         assert!((split.power / plain.power - 1.).abs() < 1e-3);
         let centre = |r: &FieldReading| r.intensity.as_ref().unwrap()[32][32];
-        assert!(centre(&split) < 0.2 * centre(&plain), "{} {}", centre(&split), centre(&plain));
+        assert!(
+            centre(&split) < 0.2 * centre(&plain),
+            "{} {}",
+            centre(&split),
+            centre(&plain)
+        );
         assert_eq!(plain.array_pitch_um, Some(40.));
     }
 
@@ -1936,9 +2570,21 @@ mod tests {
     fn rejects_unsampled_and_ambiguous_requests() {
         let system = System::default();
         let mut bench = fold(None, 100., sampling(64, 40., FieldProfile::Gaussian, 500.));
-        assert!(super::field(&bench, &system, &request(None, None, 1)).unwrap_err().contains("exactly one"));
-        assert!(super::field(&bench, &system, &request(Some("beam"), None, 0)).unwrap_err().contains("realizations"));
+        assert!(
+            super::field(&bench, &system, &request(None, None, 1))
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        assert!(
+            super::field(&bench, &system, &request(Some("beam"), None, 0))
+                .unwrap_err()
+                .contains("realizations")
+        );
         bench.sources[0].field = None;
-        assert!(super::field(&bench, &system, &request(Some("beam"), None, 1)).unwrap_err().contains("no field sampling"));
+        assert!(
+            super::field(&bench, &system, &request(Some("beam"), None, 1))
+                .unwrap_err()
+                .contains("no field sampling")
+        );
     }
 }

@@ -135,9 +135,14 @@ pub fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), 
             }
         }
         for (key, v) in object {
-            let child = schema["properties"].get(key).or_else(|| {
-                schema.get("additionalProperties").filter(|extra| **extra != false)
-            }).ok_or_else(|| format!("Unknown argument {path}.{key}"))?;
+            let child = schema["properties"]
+                .get(key)
+                .or_else(|| {
+                    schema
+                        .get("additionalProperties")
+                        .filter(|extra| **extra != false)
+                })
+                .ok_or_else(|| format!("Unknown argument {path}.{key}"))?;
             validate_schema(v, child, &format!("{path}.{key}"))?;
         }
     }

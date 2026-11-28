@@ -80,7 +80,11 @@ pub fn dispersion_real<T: Real>(formula: u8, c: &[f64], l: T) -> Result<T, Strin
         12 => (schott() + l.powi(4) * c[6] + l.powi(6) * c[7]).sqrt(),
         // Hikari's nine-term polynomial: A0 + A1*l² + A2*l⁴ + A3/l² ... A8/l¹².
         // The source implementation repeats l^-8; the manufacturer equation is used here.
-        13 => (l2 * c[1] + c[0] + l.powi(4) * c[2] + sum(3..9, &|i| l.powi(-2 * (i as i32 - 2)) * c[i])).sqrt(),
+        13 => (l2 * c[1]
+            + c[0]
+            + l.powi(4) * c[2]
+            + sum(3..9, &|i| l.powi(-2 * (i as i32 - 2)) * c[i]))
+        .sqrt(),
         _ => unreachable!(),
     };
     if n.positive() {

@@ -75,7 +75,10 @@ impl Iv {
         if lo.is_nan() || hi.is_nan() {
             return Self::undefined();
         }
-        Self { lo: lo.next_down(), hi: hi.next_up() }
+        Self {
+            lo: lo.next_down(),
+            hi: hi.next_up(),
+        }
     }
     fn square(self) -> Self {
         if self.lo >= 0. {
@@ -88,7 +91,10 @@ impl Iv {
         }
     }
     fn undefined() -> Self {
-        Self { lo: f64::NEG_INFINITY, hi: f64::INFINITY }
+        Self {
+            lo: f64::NEG_INFINITY,
+            hi: f64::INFINITY,
+        }
     }
     fn hull(values: [f64; 4]) -> Self {
         let lo = values.iter().copied().fold(f64::INFINITY, f64::min);
@@ -115,7 +121,12 @@ impl Sub for Iv {
 impl Mul for Iv {
     type Output = Self;
     fn mul(self, o: Self) -> Self {
-        Self::hull([self.lo * o.lo, self.lo * o.hi, self.hi * o.lo, self.hi * o.hi])
+        Self::hull([
+            self.lo * o.lo,
+            self.lo * o.hi,
+            self.hi * o.lo,
+            self.hi * o.hi,
+        ])
     }
 }
 impl Div for Iv {
@@ -124,7 +135,12 @@ impl Div for Iv {
         if !(o.lo > 0. || o.hi < 0.) {
             return Self::undefined();
         }
-        Self::hull([self.lo / o.lo, self.lo / o.hi, self.hi / o.lo, self.hi / o.hi])
+        Self::hull([
+            self.lo / o.lo,
+            self.lo / o.hi,
+            self.hi / o.lo,
+            self.hi / o.hi,
+        ])
     }
 }
 impl Add<f64> for Iv {
@@ -154,7 +170,10 @@ impl Div<f64> for Iv {
 
 impl Real for Iv {
     fn cst(value: f64) -> Self {
-        Self { lo: value, hi: value }
+        Self {
+            lo: value,
+            hi: value,
+        }
     }
     fn sqrt(self) -> Self {
         if self.lo < 0. {
@@ -209,68 +228,104 @@ impl<T: Real> Dual<T> {
 impl<T: Real> Add for Dual<T> {
     type Output = Self;
     fn add(self, o: Self) -> Self {
-        Self { v: self.v + o.v, d: self.d + o.d }
+        Self {
+            v: self.v + o.v,
+            d: self.d + o.d,
+        }
     }
 }
 impl<T: Real> Sub for Dual<T> {
     type Output = Self;
     fn sub(self, o: Self) -> Self {
-        Self { v: self.v - o.v, d: self.d - o.d }
+        Self {
+            v: self.v - o.v,
+            d: self.d - o.d,
+        }
     }
 }
 impl<T: Real> Mul for Dual<T> {
     type Output = Self;
     fn mul(self, o: Self) -> Self {
-        Self { v: self.v * o.v, d: self.v * o.d + self.d * o.v }
+        Self {
+            v: self.v * o.v,
+            d: self.v * o.d + self.d * o.v,
+        }
     }
 }
 impl<T: Real> Div for Dual<T> {
     type Output = Self;
     fn div(self, o: Self) -> Self {
-        Self { v: self.v / o.v, d: (self.d * o.v - self.v * o.d) / (o.v * o.v) }
+        Self {
+            v: self.v / o.v,
+            d: (self.d * o.v - self.v * o.d) / (o.v * o.v),
+        }
     }
 }
 impl<T: Real> Add<f64> for Dual<T> {
     type Output = Self;
     fn add(self, o: f64) -> Self {
-        Self { v: self.v + o, d: self.d }
+        Self {
+            v: self.v + o,
+            d: self.d,
+        }
     }
 }
 impl<T: Real> Sub<f64> for Dual<T> {
     type Output = Self;
     fn sub(self, o: f64) -> Self {
-        Self { v: self.v - o, d: self.d }
+        Self {
+            v: self.v - o,
+            d: self.d,
+        }
     }
 }
 impl<T: Real> Mul<f64> for Dual<T> {
     type Output = Self;
     fn mul(self, o: f64) -> Self {
-        Self { v: self.v * o, d: self.d * o }
+        Self {
+            v: self.v * o,
+            d: self.d * o,
+        }
     }
 }
 impl<T: Real> Div<f64> for Dual<T> {
     type Output = Self;
     fn div(self, o: f64) -> Self {
-        Self { v: self.v / o, d: self.d / o }
+        Self {
+            v: self.v / o,
+            d: self.d / o,
+        }
     }
 }
 
 impl<T: Real> Real for Dual<T> {
     fn cst(value: f64) -> Self {
-        Self { v: T::cst(value), d: T::cst(0.) }
+        Self {
+            v: T::cst(value),
+            d: T::cst(0.),
+        }
     }
     fn sqrt(self) -> Self {
         let root = self.v.sqrt();
-        Self { v: root, d: self.d / (root * 2.) }
+        Self {
+            v: root,
+            d: self.d / (root * 2.),
+        }
     }
     fn powi(self, n: i32) -> Self {
         if n == 0 {
             return Self::cst(1.);
         }
-        Self { v: self.v.powi(n), d: self.v.powi(n - 1) * self.d * f64::from(n) }
+        Self {
+            v: self.v.powi(n),
+            d: self.v.powi(n - 1) * self.d * f64::from(n),
+        }
     }
     fn powf(self, p: f64) -> Self {
-        Self { v: self.v.powf(p), d: self.v.powf(p - 1.) * self.d * p }
+        Self {
+            v: self.v.powf(p),
+            d: self.v.powf(p - 1.) * self.d * p,
+        }
     }
     fn lo(&self) -> f64 {
         self.v.lo()
@@ -289,7 +344,8 @@ mod tests {
 
     #[test]
     fn interval_encloses_point_samples_and_derivative() {
-        let f = |x: Dual<Iv>| (x * x * 0.3 + 1.).sqrt() / (x - 0.1) + x.powf(3.5) - x.powi(-2) * 0.01;
+        let f =
+            |x: Dual<Iv>| (x * x * 0.3 + 1.).sqrt() / (x - 0.1) + x.powf(3.5) - x.powi(-2) * 0.01;
         let g = |x: f64| (0.3 * x * x + 1.).sqrt() / (x - 0.1) + x.powf(3.5) - 0.01 * x.powi(-2);
         let h = 1e-6;
         let (a, b) = (0.4, 0.7);
@@ -313,7 +369,10 @@ mod tests {
         let h = s * s;
         let l = s.mul_add(s, -h) + 2. * s * e + e * e;
         // h − bound is exact (Sterbenz), so these signs are those of exact − bound.
-        assert!((h - x4.lo) + l > 0. && (x4.hi - h) - l > 0., "{x4:?} vs {h} + {l}");
+        assert!(
+            (h - x4.lo) + l > 0. && (x4.hi - h) - l > 0.,
+            "{x4:?} vs {h} + {l}"
+        );
         assert!(!(Iv::new(-1., 1.).sqrt()).finite());
         assert!(!(Iv::cst(1.) / Iv::new(-1., 1.)).finite());
     }

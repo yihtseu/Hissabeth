@@ -246,7 +246,10 @@ impl Engine {
             &next,
             projects,
             projects != &self.projects,
-            self.batch.as_mut().filter(|b| b.rollback).map(|b| &mut b.journal),
+            self.batch
+                .as_mut()
+                .filter(|b| b.rollback)
+                .map(|b| &mut b.journal),
         )?;
         self.system = next;
         self.revision = revision;
@@ -376,29 +379,60 @@ mod tests {
     fn bench_drawing_feeds_the_svg_blueprint_and_the_gui_alike() {
         let (_dir, workspace) = shared_workspace();
         let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None);
-        let mut bench = call("bench_template", json!({"name":"delay_line"})).unwrap()["bench"].clone();
+        let mut bench =
+            call("bench_template", json!({"name":"delay_line"})).unwrap()["bench"].clone();
         bench["annotations"] = json!([{"target":{"element":"M3"},"text":"Lock the stage"}]);
         let plan = call("bench_drawing", json!({"bench":bench})).unwrap();
         assert_eq!(plan["saved"], false);
-        let svg = call("bench_export_blueprint", json!({"bench":bench,"format":"svg"})).unwrap();
+        let svg = call(
+            "bench_export_blueprint",
+            json!({"bench":bench,"format":"svg"}),
+        )
+        .unwrap();
         let svg = svg["content"].as_str().unwrap();
         for symbol in plan["symbols"].as_array().unwrap() {
-            assert!(svg.contains(&format!(r#"data-element="{}" data-symbol="{}""#, symbol["id"].as_str().unwrap(), symbol["kind"].as_str().unwrap())));
+            assert!(svg.contains(&format!(
+                r#"data-element="{}" data-symbol="{}""#,
+                symbol["id"].as_str().unwrap(),
+                symbol["kind"].as_str().unwrap()
+            )));
         }
         for label in plan["labels"].as_array().unwrap() {
             let text = label["text"].as_str().unwrap();
-            assert!(svg.contains(&format!(r#"data-label="{}" data-target="{}""#, label["kind"].as_str().unwrap(), label["target"].as_str().unwrap())));
+            assert!(svg.contains(&format!(
+                r#"data-label="{}" data-target="{}""#,
+                label["kind"].as_str().unwrap(),
+                label["target"].as_str().unwrap()
+            )));
             assert!(svg.contains(text), "{text}");
         }
-        for entry in plan["legend"].as_array().unwrap().iter().filter(|e| e["kind"] == "branch") {
-            assert!(svg.contains(&format!(r#"data-branch="{}" stroke="{}""#, entry["key"].as_str().unwrap(), entry["color"].as_str().unwrap())));
+        for entry in plan["legend"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "branch")
+        {
+            assert!(svg.contains(&format!(
+                r#"data-branch="{}" stroke="{}""#,
+                entry["key"].as_str().unwrap(),
+                entry["color"].as_str().unwrap()
+            )));
         }
         let check = call("bench_lab_check", json!({"bench":bench})).unwrap();
         for branch in check["branches"].as_array().unwrap() {
-            assert!(plan["legend"].as_array().unwrap().iter().any(|e| e["key"] == branch["id"] && e["color"] == branch["color"]));
+            assert!(
+                plan["legend"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["key"] == branch["id"] && e["color"] == branch["color"])
+            );
         }
         let big = call("bench_drawing", json!({"bench":bench,"text_mm":12.})).unwrap();
-        assert!(big["labels"][0]["size"][1].as_f64().unwrap() > plan["labels"][0]["size"][1].as_f64().unwrap());
+        assert!(
+            big["labels"][0]["size"][1].as_f64().unwrap()
+                > plan["labels"][0]["size"][1].as_f64().unwrap()
+        );
         assert!(call("bench_drawing", json!({"bench":bench,"text_mm":0.5})).is_err());
     }
 
@@ -470,15 +504,26 @@ mod tests {
         let mut bad = aim["bench"].clone();
         bad["sources"][0]["polarization"] = json!({"kind":"horizontal","angle_deg":45.});
         assert!(call("bench_lab_check", json!({"bench":bad})).is_err());
-        let mut mz = call("bench_template", json!({"name":"mach_zehnder"})).unwrap()["bench"].clone();
-        mz["sources"][0]["field"] =
-            json!({"grid":[32,32],"pitch_um":50.,"profile":"gaussian","waist_um":400.,"polarization":[[1.,0.],[0.,0.]]});
-        let field = call("bench_field", json!({"bench":mz,"branch":"arm_a","arrays":true})).unwrap();
+        let mut mz =
+            call("bench_template", json!({"name":"mach_zehnder"})).unwrap()["bench"].clone();
+        mz["sources"][0]["field"] = json!({"grid":[32,32],"pitch_um":50.,"profile":"gaussian","waist_um":400.,"polarization":[[1.,0.],[0.,0.]]});
+        let field = call(
+            "bench_field",
+            json!({"bench":mz,"branch":"arm_a","arrays":true}),
+        )
+        .unwrap();
         assert_eq!(field["saved"], false);
         assert_eq!(field["arms"][0]["branch"], "arm_a");
         assert_eq!(field["intensity"].as_array().unwrap().len(), 32);
-        assert!(call("bench_field", json!({"bench":mz,"branch":"arm_a","port":{"element":"BS2","port":"in_a"}})).is_err());
-        let hybrid = call("bench_template", json!({"name":"modal_hybrid"})).unwrap()["bench"].clone();
+        assert!(
+            call(
+                "bench_field",
+                json!({"bench":mz,"branch":"arm_a","port":{"element":"BS2","port":"in_a"}})
+            )
+            .is_err()
+        );
+        let hybrid =
+            call("bench_template", json!({"name":"modal_hybrid"})).unwrap()["bench"].clone();
         let readout = call("bench_readout", json!({"bench":hybrid,"detector":"CAM"})).unwrap();
         assert_eq!(readout["saved"], false);
         assert_eq!(readout["ports"].as_array().unwrap().len(), 4);
@@ -487,7 +532,13 @@ mod tests {
         assert_eq!(readout["signals"][0]["pair"], "iq");
         assert!(readout["revision"].is_u64());
         assert!(call("bench_readout", json!({"bench":hybrid,"detector":"KI+"})).is_err());
-        assert!(call("bench_readout", json!({"bench":hybrid,"detector":"CAM","realizations":0})).is_err());
+        assert!(
+            call(
+                "bench_readout",
+                json!({"bench":hybrid,"detector":"CAM","realizations":0})
+            )
+            .is_err()
+        );
     }
 
     fn shared_workspace() -> (tempfile::TempDir, SharedWorkspace) {
@@ -504,7 +555,9 @@ mod tests {
             .as_f64()
             .unwrap();
         let height = 3.0;
-        let result = dispatch(&Caller::Gui, &workspace,
+        let result = dispatch(
+            &Caller::Gui,
+            &workspace,
             "surface_sag",
             json!({"surface":0,"height":height}),
             None,
@@ -538,7 +591,14 @@ mod tests {
                 observed.lock().unwrap().push(revision);
             })
         };
-        let preview = dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        let preview = dispatch(
+            &Caller::Gui,
+            &workspace,
+            "optimize",
+            args.clone(),
+            Some(&notifier),
+        )
+        .unwrap();
         assert_eq!(preview["applied"], false);
         assert_eq!(preview["revision"], revision);
         assert!(
@@ -548,9 +608,25 @@ mod tests {
         assert!(observed.lock().unwrap().is_empty());
 
         args["apply"] = json!(true);
-        assert!(dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).is_err());
+        assert!(
+            dispatch(
+                &Caller::Gui,
+                &workspace,
+                "optimize",
+                args.clone(),
+                Some(&notifier)
+            )
+            .is_err()
+        );
         args["revision"] = json!(revision);
-        let applied = dispatch(&Caller::Gui, &workspace, "optimize", args.clone(), Some(&notifier)).unwrap();
+        let applied = dispatch(
+            &Caller::Gui,
+            &workspace,
+            "optimize",
+            args.clone(),
+            Some(&notifier),
+        )
+        .unwrap();
         assert_eq!(applied["applied"], true);
         assert_eq!(applied["revision"], revision + 1);
         assert_eq!(applied["system"], preview["system"]);
@@ -742,7 +818,9 @@ mod tests {
             json!({"path":"import.ZMX","revision":status["revision"]}),
         );
         assert_eq!(imported["linked"], false);
-        let save_zmx = dispatch(&Caller::Gui, &workspace,
+        let save_zmx = dispatch(
+            &Caller::Gui,
+            &workspace,
             "project_save_as",
             json!({"path":"import.ZMX","revision":imported["revision"]}),
             None,
@@ -765,26 +843,39 @@ mod tests {
     fn bench_ports_and_poses_validate_through_the_registered_tools() {
         let mut e = engine("bench-ports-poses");
         let revision = e.revision;
-        let template = e.call("bench_template", json!({"name":"mach_zehnder"})).unwrap();
+        let template = e
+            .call("bench_template", json!({"name":"mach_zehnder"}))
+            .unwrap();
         let mut draft = template["bench"].clone();
         draft["elements"][1] = json!({"id":"M1", "kind":"mirror", "position":[250,400,75]});
         draft["elements"][2]["rotation"] = Value::Null;
         draft["elements"][0]["rotation"][0] = json!(31.);
         draft["sources"][0]["direction"] = json!([2., 0., 0.]);
-        let unresolved = e.call("bench_set", json!({"bench":draft,"revision":revision})).unwrap_err();
-        assert!(unresolved.contains("Unresolved bench rotations: M1, M2"), "{unresolved}");
+        let unresolved = e
+            .call("bench_set", json!({"bench":draft,"revision":revision}))
+            .unwrap_err();
+        assert!(
+            unresolved.contains("Unresolved bench rotations: M1, M2"),
+            "{unresolved}"
+        );
         let unsaved = e.call("bench_trace", json!({"bench":draft})).unwrap_err();
         assert!(unsaved.contains("M1, M2"), "{unsaved}");
 
         let solved = e.call("bench_auto_aim", json!({"bench":draft})).unwrap();
-        assert_eq!(solved["adjusted_elements"], json!(["M1","M2"]));
+        assert_eq!(solved["adjusted_elements"], json!(["M1", "M2"]));
         let mut scene = solved["bench"].clone();
         assert_eq!(scene["elements"][1]["label"], "M1");
         assert_eq!(scene["elements"][1]["focal_length"], 0.);
         assert_eq!(scene["elements"][1]["reflectance"], 1.);
         assert_eq!(scene["elements"][1]["transmittance"], 0.);
-        assert_eq!(scene["elements"][0]["rotation"], draft["elements"][0]["rotation"]);
-        assert_eq!(scene["sources"][0]["direction"], draft["sources"][0]["direction"]);
+        assert_eq!(
+            scene["elements"][0]["rotation"],
+            draft["elements"][0]["rotation"]
+        );
+        assert_eq!(
+            scene["sources"][0]["direction"],
+            draft["sources"][0]["direction"]
+        );
         scene["assertions"].as_array_mut().unwrap().push(json!({
             "id":"align", "kind":"colinear", "branches":["arm_a","arm_b"], "target":0., "unit":"mrad", "tolerance":0.1
         }));
@@ -793,15 +884,22 @@ mod tests {
         invalid["connections"].as_array_mut().unwrap().push(json!({
             "from":"BS1", "port":"reflected", "to":"D1"
         }));
-        assert!(e.call("bench_set", json!({"bench":invalid,"revision":revision})).unwrap_err().contains("BS1 / reflected"));
+        assert!(
+            e.call("bench_set", json!({"bench":invalid,"revision":revision}))
+                .unwrap_err()
+                .contains("BS1 / reflected")
+        );
         assert_eq!(e.revision, revision);
 
-        e.call("bench_set", json!({"bench":scene,"revision":revision})).unwrap();
+        e.call("bench_set", json!({"bench":scene,"revision":revision}))
+            .unwrap();
         let first = &e.call("bench_trace", json!({})).unwrap()["segments"][0];
         assert_eq!(first["from_element"], "S1");
         assert_eq!(first["to_element"], "BS1");
         assert!((first["opl_mm"].as_f64().unwrap() - 150.).abs() <= 1e-9);
-        let check = e.call("bench_lab_check", json!({"require_pass":true})).unwrap();
+        let check = e
+            .call("bench_lab_check", json!({"require_pass":true}))
+            .unwrap();
         assert_eq!(check["assertions"].as_array().unwrap().len(), 2);
         assert_eq!(check["assertions"][0]["status"], "pass");
         assert_eq!(check["assertions"][1]["status"], "pass");
@@ -819,9 +917,14 @@ mod tests {
     fn combiner_tools_measure_correct_and_reject_locked_mirror_error() {
         let mut e = engine("bench-combiner-aim");
         let revision = e.revision;
-        let saved = e.call("bench_template", json!({
-            "name":"mach_zehnder", "apply":true, "revision":revision
-        })).unwrap();
+        let saved = e
+            .call(
+                "bench_template",
+                json!({
+                    "name":"mach_zehnder", "apply":true, "revision":revision
+                }),
+            )
+            .unwrap();
         let mut draft = saved["bench"].clone();
         let revision = saved["revision"].clone();
         let yaw = draft["elements"][1]["rotation"][2].as_f64().unwrap();
@@ -839,14 +942,22 @@ mod tests {
         assert!((overlap["value"]["position_mm"].as_f64().unwrap() - position).abs() < 1e-9);
         assert!((overlap["value"]["angle_mrad"].as_f64().unwrap() - angle).abs() < 1e-9);
 
-        let locked = e.call("bench_auto_aim", json!({
-            "bench":draft, "apply":true, "revision":revision
-        })).unwrap();
+        let locked = e
+            .call(
+                "bench_auto_aim",
+                json!({
+                    "bench":draft, "apply":true, "revision":revision
+                }),
+            )
+            .unwrap();
         assert_eq!(locked["ok"], false);
         assert_eq!(locked["applied"], false);
-        assert_eq!(locked["conflicts"], json!([
-            {"element":"BS2","port":"in_a"}, {"element":"BS2","port":"in_b"}
-        ]));
+        assert_eq!(
+            locked["conflicts"],
+            json!([
+                {"element":"BS2","port":"in_a"}, {"element":"BS2","port":"in_b"}
+            ])
+        );
         assert_eq!(locked["adjusted_elements"], json!([]));
         assert_eq!(locked["bench"], draft);
         assert_eq!(locked["revision"], revision);
@@ -856,14 +967,24 @@ mod tests {
         assert!((locked["residuals"][1]["position_mm"].as_f64().unwrap() - position).abs() < 1e-9);
 
         draft["elements"][1]["aim_rotation"] = json!(true);
-        let solved = e.call("bench_auto_aim", json!({
-            "bench":draft, "apply":true, "revision":revision
-        })).unwrap();
+        let solved = e
+            .call(
+                "bench_auto_aim",
+                json!({
+                    "bench":draft, "apply":true, "revision":revision
+                }),
+            )
+            .unwrap();
         assert_eq!(solved["ok"], true);
         assert_eq!(solved["applied"], true);
         assert_eq!(solved["conflicts"], json!([]));
         assert_eq!(solved["adjusted_elements"], json!(["M1"]));
-        for (index, element) in solved["bench"]["elements"].as_array().unwrap().iter().enumerate() {
+        for (index, element) in solved["bench"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             if index != 1 {
                 assert_eq!(*element, draft["elements"][index]);
             }
@@ -872,14 +993,19 @@ mod tests {
             assert!(residual["position_mm"].as_f64().unwrap() < 1e-6);
             assert!(residual["angle_mrad"].as_f64().unwrap() < 1e-6);
         }
-        let check = e.call("bench_lab_check", json!({"require_pass":true})).unwrap();
+        let check = e
+            .call("bench_lab_check", json!({"require_pass":true}))
+            .unwrap();
         assert_eq!(check["assertions"][1]["status"], "pass");
     }
 
     #[test]
     fn bench_stage_drafts_and_saves_use_reference_poses_and_reject_invalid_travel() {
         let mut e = engine("bench-stage");
-        let mut scene = e.call("bench_template", json!({"name":"delay_line"})).unwrap()["bench"].clone();
+        let mut scene = e
+            .call("bench_template", json!({"name":"delay_line"}))
+            .unwrap()["bench"]
+            .clone();
         let revision = e.revision;
         scene["stages"][0]["position_mm"] = json!(2.5);
         scene["stages"][0]["pzt"]["value_um"] = json!(1.);
@@ -897,26 +1023,45 @@ mod tests {
         let check = e.call("bench_lab_check", json!({"bench":scene})).unwrap();
         assert_eq!(check["revision"], revision);
         assert_eq!(check["saved"], false);
-        assert_eq!(check["stages"], json!([{"id":"delay", "position_mm":2.5, "pzt_um":1.}]));
+        assert_eq!(
+            check["stages"],
+            json!([{"id":"delay", "position_mm":2.5, "pzt_um":1.}])
+        );
         assert_eq!(check["branches"][1]["stage_ids"], json!(["delay"]));
-        assert_eq!(check["branches"][1]["paths"][0]["opl_mm"], delayed["opl_mm"]);
+        assert_eq!(
+            check["branches"][1]["paths"][0]["opl_mm"],
+            delayed["opl_mm"]
+        );
         assert_eq!(check["assertions"][0]["status"], "fail");
         assert!((check["assertions"][0]["value"].as_f64().unwrap() - 605.002).abs() <= 1e-9);
         assert_eq!(check["assertions"][1]["status"], "pass");
         assert_eq!(check["assertions"][2]["status"], "pass");
 
         let assembly = e.call("bench_assembly", json!({"bench":scene})).unwrap();
-        assert_eq!(assembly["items"][1]["position"], positions["M3"]["position"]);
-        let saved = e.call("bench_set", json!({"bench":scene,"revision":revision})).unwrap();
+        assert_eq!(
+            assembly["items"][1]["position"],
+            positions["M3"]["position"]
+        );
+        let saved = e
+            .call("bench_set", json!({"bench":scene,"revision":revision}))
+            .unwrap();
         assert_eq!(saved["trace"]["stage_poses"], *positions);
         assert_eq!(&saved["trace"]["branches"][1]["paths"][0], delayed);
         let persisted = e.call("bench_get", json!({})).unwrap();
-        assert_eq!(persisted["bench"]["elements"][1]["position"], positions["M3"]["position"]);
-        assert_eq!(persisted["bench"]["elements"][1]["rotation"], positions["M3"]["rotation"]);
+        assert_eq!(
+            persisted["bench"]["elements"][1]["position"],
+            positions["M3"]["position"]
+        );
+        assert_eq!(
+            persisted["bench"]["elements"][1]["rotation"],
+            positions["M3"]["rotation"]
+        );
         assert_eq!(persisted["bench"]["stages"], scene["stages"]);
         let mut project = serde_json::to_value(&e.system).unwrap();
         project["bench"] = scene.clone();
-        let validated = e.call("system_validate", json!({"system":project})).unwrap();
+        let validated = e
+            .call("system_validate", json!({"system":project}))
+            .unwrap();
         assert_eq!(validated["system"]["bench"], persisted["bench"]);
 
         for (dof, value, allowed) in [
@@ -929,15 +1074,27 @@ mod tests {
             } else {
                 invalid["stages"][0]["pzt"]["value_um"] = json!(value);
             }
-            let error = e.call("bench_set", json!({"bench":invalid,"revision":e.revision})).unwrap_err();
-            let detail: Value = serde_json::from_str(error.strip_prefix("Stage travel exceeded: ").unwrap()).unwrap();
-            assert_eq!(detail, json!({"stage":"delay","dof":dof,"value":value,"allowed":allowed}));
+            let error = e
+                .call("bench_set", json!({"bench":invalid,"revision":e.revision}))
+                .unwrap_err();
+            let detail: Value =
+                serde_json::from_str(error.strip_prefix("Stage travel exceeded: ").unwrap())
+                    .unwrap();
+            assert_eq!(
+                detail,
+                json!({"stage":"delay","dof":dof,"value":value,"allowed":allowed})
+            );
         }
         let mut second = scene["stages"][0].clone();
         second["id"] = json!("second");
         scene["stages"].as_array_mut().unwrap().push(second);
-        let error = e.call("bench_set", json!({"bench":scene,"revision":e.revision})).unwrap_err();
-        assert_eq!(error, "Stage \"second\": \"M3\" belongs to more than one stage");
+        let error = e
+            .call("bench_set", json!({"bench":scene,"revision":e.revision}))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Stage \"second\": \"M3\" belongs to more than one stage"
+        );
         assert_eq!(e.call("bench_get", json!({})).unwrap(), persisted);
     }
 

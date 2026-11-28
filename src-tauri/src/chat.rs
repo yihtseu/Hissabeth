@@ -158,7 +158,10 @@ fn store_images(dir: &std::path::Path, images: &[Image]) -> Result<Vec<(Value, V
                 "image/webp" => "webp",
                 "image/gif" => "gif",
                 _ => {
-                    return Err(format!("Attach PNG, JPEG, WebP or GIF images, not {:?}", image.mime));
+                    return Err(format!(
+                        "Attach PNG, JPEG, WebP or GIF images, not {:?}",
+                        image.mime
+                    ));
                 }
             };
             let name: String = image
@@ -168,7 +171,10 @@ fn store_images(dir: &std::path::Path, images: &[Image]) -> Result<Vec<(Value, V
                 .take(128)
                 .collect();
             if image.data.len() > IMAGE_BYTES.div_ceil(3) * 4 {
-                return Err(format!("Image {name} is larger than {} MB", IMAGE_BYTES >> 20));
+                return Err(format!(
+                    "Image {name} is larger than {} MB",
+                    IMAGE_BYTES >> 20
+                ));
             }
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&image.data)
@@ -189,7 +195,13 @@ fn store_images(dir: &std::path::Path, images: &[Image]) -> Result<Vec<(Value, V
                 ));
             }
             let hash = sha2::Sha256::digest(&bytes);
-            let file = format!("{}.{ext}", hash[..16].iter().map(|b| format!("{b:02x}")).collect::<String>());
+            let file = format!(
+                "{}.{ext}",
+                hash[..16]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
             std::fs::create_dir_all(dir).map_err(|e| format!("Store image {name}: {e}"))?;
             let path = dir.join(&file);
             std::fs::write(&path, &bytes).map_err(|e| format!("Store image {name}: {e}"))?;
@@ -217,7 +229,8 @@ fn read_figure(dir: &std::path::Path, file: &str) -> Result<String, String> {
     if !valid {
         return Err(format!("Invalid chat figure name {file:?}"));
     }
-    let bytes = std::fs::read(dir.join(file)).map_err(|e| format!("Read chat figure {file}: {e}"))?;
+    let bytes =
+        std::fs::read(dir.join(file)).map_err(|e| format!("Read chat figure {file}: {e}"))?;
     Ok(crate::optics::blueprint_render::base64(&bytes))
 }
 pub fn runtime() -> Value {
@@ -318,11 +331,15 @@ pub fn start(
     request: Request,
     channel: Channel<Value>,
 ) -> Result<(), String> {
-    if (request.prompt.trim().is_empty() && request.images.is_empty()) || request.prompt.len() > 65536 {
+    if (request.prompt.trim().is_empty() && request.images.is_empty())
+        || request.prompt.len() > 65536
+    {
         return Err("Enter a message of at most 65536 bytes".into());
     }
     if request.provider == Provider::Chatgpt && !request.images.is_empty() {
-        return Err("ChatGPT chat takes text only; use Codex or Claude to read a reference image".into());
+        return Err(
+            "ChatGPT chat takes text only; use Codex or Claude to read a reference image".into(),
+        );
     }
     if request.id.is_empty() || request.id.len() > 128 || request.model.len() > 256 {
         return Err("Invalid chat request".into());
@@ -361,9 +378,10 @@ pub fn start(
         return Err("Start a new conversation to change agent or model".into());
     }
     let session = previous.as_ref().and_then(|record| record.session.clone());
-    let (images, inputs): (Vec<_>, Vec<_>) = store_images(&workspace.join("chat-figures"), &request.images)?
-        .into_iter()
-        .unzip();
+    let (images, inputs): (Vec<_>, Vec<_>) =
+        store_images(&workspace.join("chat-figures"), &request.images)?
+            .into_iter()
+            .unzip();
     let payload = if request.provider == Provider::Chatgpt {
         if chat.account_changing {
             return Err("Finish the ChatGPT account change first".into());
@@ -672,26 +690,58 @@ mod tests {
         let stored = store_images(dir.path(), &[image("image/png", png)]).unwrap();
         let (record, input) = &stored[0];
         let file = record["file"].as_str().unwrap();
-        assert_eq!(record, &json!({"mime":"image/png","filename":"ref.png","bytes":png.len(),"file":file}));
+        assert_eq!(
+            record,
+            &json!({"mime":"image/png","filename":"ref.png","bytes":png.len(),"file":file})
+        );
         assert_eq!(input["path"], json!(dir.path().join(file)));
         // The stored copy is what the chat panel reads back.
-        assert_eq!(read_figure(dir.path(), file).unwrap(), crate::optics::blueprint_render::base64(png));
+        assert_eq!(
+            read_figure(dir.path(), file).unwrap(),
+            crate::optics::blueprint_render::base64(png)
+        );
         let webp = b"RIFF\0\0\0\0WEBPVP8 ";
-        assert!(store_images(dir.path(), &[image("image/webp", webp)]).unwrap()[0].0["file"].as_str().unwrap().ends_with(".webp"));
+        assert!(
+            store_images(dir.path(), &[image("image/webp", webp)]).unwrap()[0].0["file"]
+                .as_str()
+                .unwrap()
+                .ends_with(".webp")
+        );
         let gif = b"GIF89a\x01\0\x01\0";
-        assert!(store_images(dir.path(), &[image("image/gif", gif)]).unwrap()[0].0["file"].as_str().unwrap().ends_with(".gif"));
+        assert!(
+            store_images(dir.path(), &[image("image/gif", gif)]).unwrap()[0].0["file"]
+                .as_str()
+                .unwrap()
+                .ends_with(".gif")
+        );
         for (bad, why) in [
             (image("image/svg+xml", b"<svg/>"), "Attach PNG"),
             (image("image/jpeg", png), "not a JPG"),
             (image("image/gif", b"GIF90a"), "not a GIF"),
             (image("image/png", b""), "not a PNG"),
-            (Image { data: "@@".into(), ..image("image/png", png) }, "not valid base64"),
-            (image("image/png", &[png.as_slice(), &vec![0; 5 << 20]].concat()), "larger than 5 MB"),
+            (
+                Image {
+                    data: "@@".into(),
+                    ..image("image/png", png)
+                },
+                "not valid base64",
+            ),
+            (
+                image("image/png", &[png.as_slice(), &vec![0; 5 << 20]].concat()),
+                "larger than 5 MB",
+            ),
         ] {
-            assert!(store_images(dir.path(), &[bad]).unwrap_err().contains(why), "{why}");
+            assert!(
+                store_images(dir.path(), &[bad]).unwrap_err().contains(why),
+                "{why}"
+            );
         }
         let many: Vec<_> = (0..7).map(|_| image("image/png", png)).collect();
-        assert!(store_images(dir.path(), &many).unwrap_err().contains("at most 6"));
+        assert!(
+            store_images(dir.path(), &many)
+                .unwrap_err()
+                .contains("at most 6")
+        );
     }
 
     #[test]
@@ -701,9 +751,19 @@ mod tests {
         std::fs::write(dir.path().join(&name), b"<svg/>").unwrap();
         assert_eq!(read_figure(dir.path(), &name).unwrap(), "PHN2Zy8+");
         std::fs::write(dir.path().join("secret.txt"), b"x").unwrap();
-        for bad in ["../secret.txt", "secret.txt", "0123456789ABCDEF0123456789ABCDEF.svg",
-            "0123456789abcdef0123456789abcdef.svg/../../x", "0123456789abcdef0123456789abcdef.html"] {
-            assert!(read_figure(dir.path(), bad).unwrap_err().starts_with("Invalid"), "{bad}");
+        for bad in [
+            "../secret.txt",
+            "secret.txt",
+            "0123456789ABCDEF0123456789ABCDEF.svg",
+            "0123456789abcdef0123456789abcdef.svg/../../x",
+            "0123456789abcdef0123456789abcdef.html",
+        ] {
+            assert!(
+                read_figure(dir.path(), bad)
+                    .unwrap_err()
+                    .starts_with("Invalid"),
+                "{bad}"
+            );
         }
         assert!(read_figure(dir.path(), &name.replace(".svg", ".png")).is_err());
     }

@@ -143,16 +143,25 @@ impl ProjectFiles {
     pub fn reserved(workspace_file: &Path, target: &Path) -> bool {
         let dir = workspace_dir(workspace_file);
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let target = match (target.parent().and_then(|p| p.canonicalize().ok()), target.file_name()) {
+        let target = match (
+            target.parent().and_then(|p| p.canonicalize().ok()),
+            target.file_name(),
+        ) {
             (Some(parent), Some(name)) => parent.join(name),
             _ => target.to_path_buf(),
         };
         let file = dir.join(workspace_file.file_name().unwrap_or_default());
         // File identity also catches another spelling of an existing file
         // (case on a case-insensitive volume, a link).
-        [dir.join(PROJECT_META), file.with_extension("lock"), file.with_extension("pending")]
-            .iter()
-            .any(|reserved| reserved == &target || same_file::is_same_file(reserved, &target).unwrap_or(false))
+        [
+            dir.join(PROJECT_META),
+            file.with_extension("lock"),
+            file.with_extension("pending"),
+        ]
+        .iter()
+        .any(|reserved| {
+            reserved == &target || same_file::is_same_file(reserved, &target).unwrap_or(false)
+        })
     }
 
     pub fn select(&mut self, path: &Path, linked: bool) {
@@ -667,7 +676,12 @@ impl Workspace {
     }
 
     /// Like `call`, but holds file paths to an agent scope first.
-    pub fn call_scoped(&mut self, scope: &super::Scope, name: &str, args: Value) -> Result<Value, String> {
+    pub fn call_scoped(
+        &mut self,
+        scope: &super::Scope,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, String> {
         registry::validate_args(name, &args)?;
         scope.check(&self.path, &self.session, name, &args)?;
         self.call(name, args)

@@ -2,7 +2,9 @@
 
 use super::super::{
     System,
-    bench::{Bench, BranchPath, BranchReport, Kind, PathBreak, Port, Relay, RelayCheckKind, Trace, cross},
+    bench::{
+        Bench, BranchPath, BranchReport, Kind, PathBreak, Port, Relay, RelayCheckKind, Trace, cross,
+    },
     math::{Matrix, V3, dot, scale, sub, unit},
 };
 use super::{AssumptionCode, Basis};
@@ -21,7 +23,11 @@ pub(crate) struct Frame {
 impl Frame {
     /// +1 for a right-handed (u, v, d) triple, −1 for a mirrored one.
     pub fn handedness(&self) -> i8 {
-        if dot(cross(self.basis[0], self.basis[1]), self.direction) >= 0. { 1 } else { -1 }
+        if dot(cross(self.basis[0], self.basis[1]), self.direction) >= 0. {
+            1
+        } else {
+            -1
+        }
     }
 }
 
@@ -66,7 +72,9 @@ fn carry(a: V3, b: V3, x: V3) -> V3 {
 /// of the element's surface normals.
 fn is_reflection(d: V3, next: V3, normals: &[V3]) -> bool {
     let flips = |n: &V3| dot(d, *n) * dot(next, *n) < 0.;
-    let Ok(turn) = unit(sub(next, d)) else { return false };
+    let Ok(turn) = unit(sub(next, d)) else {
+        return false;
+    };
     match normals.iter().find(|n| dot(turn, **n).abs() > 1. - 1e-9) {
         Some(n) => flips(n),
         None => normals.iter().any(flips),
@@ -84,15 +92,26 @@ pub(crate) fn frame(bench: &Bench, trace: &Trace, path: &BranchPath) -> Option<F
 }
 
 /// The frame on every segment of `indices`, starting from incoming direction `d`.
-pub(crate) fn frames_along(bench: &Bench, trace: &Trace, mut d: V3, indices: &[usize]) -> Option<Vec<Frame>> {
-    let mut u = unit(cross([0., 0., 1.], d)).or_else(|_| unit(cross([1., 0., 0.], d))).ok()?;
+pub(crate) fn frames_along(
+    bench: &Bench,
+    trace: &Trace,
+    mut d: V3,
+    indices: &[usize],
+) -> Option<Vec<Frame>> {
+    let mut u = unit(cross([0., 0., 1.], d))
+        .or_else(|_| unit(cross([1., 0., 0.], d)))
+        .ok()?;
     let mut v = cross(d, u);
     let mut reflections = 0;
     let mut frames = Vec::with_capacity(indices.len());
     for &index in indices {
         let Some(next) = direction(trace, index) else {
             // A zero-length flight keeps the frame, so frames stay aligned with `indices`.
-            frames.push(Frame { reflections, direction: d, basis: [u, v] });
+            frames.push(Frame {
+                reflections,
+                direction: d,
+                basis: [u, v],
+            });
             continue;
         };
         let flight = trace.segments[index].flight.as_ref()?;
@@ -116,7 +135,11 @@ pub(crate) fn frames_along(bench: &Bench, trace: &Trace, mut d: V3, indices: &[u
         u = unit(sub(u, scale(d, dot(u, d)))).ok()?;
         let w = cross(d, u);
         v = if dot(v, w) >= 0. { w } else { scale(w, -1.) };
-        frames.push(Frame { reflections, direction: d, basis: [u, v] });
+        frames.push(Frame {
+            reflections,
+            direction: d,
+            basis: [u, v],
+        });
     }
     Some(frames)
 }
@@ -146,7 +169,12 @@ pub(crate) fn handedness(bench: &Bench, trace: &Trace) -> Vec<HandednessReading>
         .collect()
 }
 
-fn frames(bench: &Bench, trace: &Trace, paths: [&BranchPath; 2], at: &Port) -> Result<[Frame; 2], PathBreak> {
+fn frames(
+    bench: &Bench,
+    trace: &Trace,
+    paths: [&BranchPath; 2],
+    at: &Port,
+) -> Result<[Frame; 2], PathBreak> {
     let [a, b] = paths.map(|path| frame(bench, trace, path));
     a.zip(b)
         .map(|(a, b)| [a, b])
@@ -154,7 +182,12 @@ fn frames(bench: &Bench, trace: &Trace, paths: [&BranchPath; 2], at: &Port) -> R
 }
 
 /// Reflection counts of both branches and their parity difference.
-pub(crate) fn parity(bench: &Bench, trace: &Trace, paths: [&BranchPath; 2], at: &Port) -> Result<[u32; 2], PathBreak> {
+pub(crate) fn parity(
+    bench: &Bench,
+    trace: &Trace,
+    paths: [&BranchPath; 2],
+    at: &Port,
+) -> Result<[u32; 2], PathBreak> {
     let [a, b] = frames(bench, trace, paths, at)?;
     Ok([a.reflections, b.reflections])
 }
@@ -162,10 +195,19 @@ pub(crate) fn parity(bench: &Bench, trace: &Trace, paths: [&BranchPath; 2], at: 
 /// Signed rotation (rad, in (−π, π]) taking the second branch's exit basis to
 /// the first's about their shared exit direction. Undefined between mirrored
 /// images or diverging exits.
-pub(crate) fn rotation(bench: &Bench, trace: &Trace, paths: [&BranchPath; 2], at: &Port) -> Result<f64, PathBreak> {
+pub(crate) fn rotation(
+    bench: &Bench,
+    trace: &Trace,
+    paths: [&BranchPath; 2],
+    at: &Port,
+) -> Result<f64, PathBreak> {
     let [a, b] = frames(bench, trace, paths, at)?;
     if dot(a.direction, b.direction) < 1. - 1e-9 {
-        return Err(PathBreak::new(&at.element, &at.port, "different_exit_direction"));
+        return Err(PathBreak::new(
+            &at.element,
+            &at.port,
+            "different_exit_direction",
+        ));
     }
     if a.handedness() != b.handedness() {
         return Err(PathBreak::new(&at.element, &at.port, "opposite_handedness"));
@@ -257,7 +299,13 @@ struct Unfolded {
 /// applied once, when the path reaches it (start and end elements included); flights inside a lens group are
 /// replaced by the prescription matrix, and substrate passes count their
 /// reduced thickness.
-fn unfold(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, path: &BranchPath) -> Result<Unfolded, String> {
+fn unfold(
+    bench: &Bench,
+    system: &System,
+    trace: &Trace,
+    relay: &Relay,
+    path: &BranchPath,
+) -> Result<Unfolded, String> {
     let mut total = Matrix::identity();
     let mut planes = Vec::new();
     let mut powered = Vec::new();
@@ -282,7 +330,11 @@ fn unfold(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, path: &B
             };
             if let Some((m, focal)) = lens {
                 *total = compose(m, *total);
-                powered.push(PoweredElement { element: e.id.clone(), focal_mm: focal, distance_mm: *gap });
+                powered.push(PoweredElement {
+                    element: e.id.clone(),
+                    focal_mm: focal,
+                    distance_mm: *gap,
+                });
                 *gap = 0.;
             }
         }
@@ -292,8 +344,14 @@ fn unfold(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, path: &B
     total.transfer(relay.object_distance_mm, 1.);
     let mut previous: Option<&str> = None;
     for &index in &path.segment_indices {
-        let flight = trace.segments[index].flight.as_ref().ok_or("segment without flight")?;
-        let group = bench.elements.iter().any(|e| e.id == flight.from_element && e.kind == Kind::LensGroup);
+        let flight = trace.segments[index]
+            .flight
+            .as_ref()
+            .ok_or("segment without flight")?;
+        let group = bench
+            .elements
+            .iter()
+            .any(|e| e.id == flight.from_element && e.kind == Kind::LensGroup);
         if group && flight.to_element == flight.from_element {
             continue;
         }
@@ -305,12 +363,21 @@ fn unfold(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, path: &B
         gap += flight.length_mm / flight.index;
     }
     if let Some(&last) = path.segment_indices.last() {
-        let flight = trace.segments[last].flight.as_ref().ok_or("segment without flight")?;
+        let flight = trace.segments[last]
+            .flight
+            .as_ref()
+            .ok_or("segment without flight")?;
         arrive(&flight.to_element, &mut total, &mut gap)?;
     }
     total.transfer(relay.image_distance_mm, 1.);
     gap += relay.image_distance_mm;
-    Ok(Unfolded { total, planes, powered, gap, thick })
+    Ok(Unfolded {
+        total,
+        planes,
+        powered,
+        gap,
+        thick,
+    })
 }
 
 /// Conjugate image of the stop plane, measured from the target plane (mm of
@@ -318,10 +385,22 @@ fn unfold(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, path: &B
 fn pupil(u: &Unfolded, relay: &Relay) -> Result<(String, String, Option<f64>), String> {
     let stop = match &relay.pupil_stop {
         Some(id) => id.clone(),
-        None => u.powered.first().ok_or("no powered element for the default pupil stop")?.element.clone(),
+        None => u
+            .powered
+            .first()
+            .ok_or("no powered element for the default pupil stop")?
+            .element
+            .clone(),
     };
-    let target = relay.pupil_target.clone().unwrap_or_else(|| u.planes.last().map(|p| p.0.clone()).unwrap_or_default());
-    let s = u.planes.iter().position(|p| p.0 == stop).ok_or_else(|| format!("pupil stop {stop} is not on the branch"))?;
+    let target = relay
+        .pupil_target
+        .clone()
+        .unwrap_or_else(|| u.planes.last().map(|p| p.0.clone()).unwrap_or_default());
+    let s = u
+        .planes
+        .iter()
+        .position(|p| p.0 == stop)
+        .ok_or_else(|| format!("pupil stop {stop} is not on the branch"))?;
     let t = u.planes[s..]
         .iter()
         .position(|p| p.0 == target)
@@ -329,21 +408,45 @@ fn pupil(u: &Unfolded, relay: &Relay) -> Result<(String, String, Option<f64>), S
     let (ms, mt) = (u.planes[s].1, u.planes[s + t].1);
     // Stop plane to target plane: mt · ms⁻¹.
     let det = ms.a * ms.d - ms.b * ms.c;
-    let inverse = Matrix { a: ms.d / det, b: -ms.b / det, c: -ms.c / det, d: ms.a / det };
+    let inverse = Matrix {
+        a: ms.d / det,
+        b: -ms.b / det,
+        c: -ms.c / det,
+        d: ms.a / det,
+    };
     let m = compose(mt, inverse);
     Ok((stop, target, (m.d.abs() > 1e-12).then(|| -m.b / m.d)))
 }
 
 pub(crate) fn relays(bench: &Bench, system: &System, trace: &Trace) -> Vec<RelayReading> {
     let reports: HashMap<_, _> = trace.branches.iter().map(|r| (r.id.as_str(), r)).collect();
-    bench.relays.iter().map(|relay| reading(bench, system, trace, relay, reports.get(relay.branch.as_str()).copied())).collect()
+    bench
+        .relays
+        .iter()
+        .map(|relay| {
+            reading(
+                bench,
+                system,
+                trace,
+                relay,
+                reports.get(relay.branch.as_str()).copied(),
+            )
+        })
+        .collect()
 }
 
-fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report: Option<&BranchReport>) -> RelayReading {
+fn reading(
+    bench: &Bench,
+    system: &System,
+    trace: &Trace,
+    relay: &Relay,
+    report: Option<&BranchReport>,
+) -> RelayReading {
     let path = report.and_then(single);
     let unfolded = match (report, path) {
-        (_, Some(path)) => unfold(bench, system, trace, relay, path)
-            .map_err(|detail| PathBreak::new(&relay.branch, "", "relay_unresolved").with_detail(detail)),
+        (_, Some(path)) => unfold(bench, system, trace, relay, path).map_err(|detail| {
+            PathBreak::new(&relay.branch, "", "relay_unresolved").with_detail(detail)
+        }),
         (Some(r), None) => Err(r
             .interruption
             .clone()
@@ -387,14 +490,25 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
     let m = u.total;
     let (pupil_stop, pupil_target, pupil_image_mm, pupil_break) = match pupil(&u, relay) {
         Ok((stop, target, z)) => (Some(stop), Some(target), z, None),
-        Err(detail) => (None, None, None, Some(PathBreak::new(&relay.branch, "", "pupil_undefined").with_detail(detail))),
+        Err(detail) => (
+            None,
+            None,
+            None,
+            Some(PathBreak::new(&relay.branch, "", "pupil_undefined").with_detail(detail)),
+        ),
     };
     let mut basis = Basis::default();
     basis.assume(AssumptionCode::Paraxial, vec![]);
     basis.assume(
         AssumptionCode::ThinLens,
-        u.powered.iter()
-            .filter(|p| bench.elements.iter().any(|e| e.id == p.element && e.kind == Kind::Lens))
+        u.powered
+            .iter()
+            .filter(|p| {
+                bench
+                    .elements
+                    .iter()
+                    .any(|e| e.id == p.element && e.kind == Kind::Lens)
+            })
             .map(|p| p.element.clone())
             .collect(),
     );
@@ -409,10 +523,26 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
                 RelayCheckKind::Strict4f => match u.powered.as_slice() {
                     [first, second] if !u.thick => {
                         let (f1, f2) = (first.focal_mm, second.focal_mm);
-                        let d = [first.distance_mm - f1, second.distance_mm - (f1 + f2), u.gap - f2];
-                        (Some(d.iter().fold(0f64, |acc, x| acc.max(x.abs()))), Some(d), None)
+                        let d = [
+                            first.distance_mm - f1,
+                            second.distance_mm - (f1 + f2),
+                            u.gap - f2,
+                        ];
+                        (
+                            Some(d.iter().fold(0f64, |acc, x| acc.max(x.abs()))),
+                            Some(d),
+                            None,
+                        )
                     }
-                    _ => (None, None, Some(PathBreak::new(&relay.branch, "", "strict_4f_needs_two_thin_elements"))),
+                    _ => (
+                        None,
+                        None,
+                        Some(PathBreak::new(
+                            &relay.branch,
+                            "",
+                            "strict_4f_needs_two_thin_elements",
+                        )),
+                    ),
                 },
             };
             let residual = value.map(|v| v - check.target);
@@ -424,7 +554,11 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
                 residual,
                 passed: residual.is_some_and(|r| r.abs() <= check.tolerance),
                 deviations_mm: deviations,
-                basis: if value.is_some() { basis.clone() } else { Basis::default() },
+                basis: if value.is_some() {
+                    basis.clone()
+                } else {
+                    Basis::default()
+                },
                 interruption,
             }
         })
@@ -442,6 +576,7 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
         checks,
         basis,
         // A missing default stop (no powered element) only leaves the pupil unset.
-        interruption: pupil_break.filter(|_| relay.pupil_stop.is_some() || relay.pupil_target.is_some()),
+        interruption: pupil_break
+            .filter(|_| relay.pupil_stop.is_some() || relay.pupil_target.is_some()),
     }
 }
