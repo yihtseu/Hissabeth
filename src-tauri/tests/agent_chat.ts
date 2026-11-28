@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTurn, type BridgeRequest } from '../../scripts/agent-bridge';
-import { CHECK_ITEMS, FIGURE_LIMIT, FIGURE_MAX, checksOf, figureOf, storeFigure, toolName } from '../../scripts/chat-figures';
+import { CHECK_ITEMS, READING_ITEMS, FIGURE_LIMIT, FIGURE_MAX, checksOf, figureOf, storeFigure, toolName } from '../../scripts/chat-figures';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +205,9 @@ test('large drawings are stored, not inlined, and lab checks become an assertion
             { assertion: 'parity', kind: 'parity', branches: ['arm_a', 'arm_a'], at: { element: 'cam', port: 'in' }, unit: 'count', target: 0, tolerance: 0, residual: 0, status: 'pass' },
         ],
         branches: [{ id: 'arm_b', stage_ids: [], color: '#000', paths: [], break: { element: 'm3', port: 'in', reason: 'clipped' } }, { id: 'arm_a', stage_ids: [], color: '#111', paths: [] }],
+        zones: [{ id: 'arms', label: 'Interferometer arms', area_mm2: 75000, bounds_mm: [[200, 150], [500, 400]], members: ['bs1', 'm1'], out_of_bounds: ['m1'] }],
+        folds: [{ id: 'far', from: 'm2', to: 'cam', paths: [{ source: 's1', wavelength_nm: 1064, length_mm: 3000.0000004, opl_mm: 3000.8 }] }],
+        relays: [{ id: '4f', branch: 'arm_a', abcd: [-2, 1e-13, 0, -0.5], powered: [], pupil_stop: 's1', pupil_target: 'cam', pupil_image_mm: 0, checks: [{ kind: 'strict_4f', value: 0, passed: true }, { kind: 'magnification', value: -2, passed: true }] }],
         issues: [
             { severity: 'error', code: 'assertion_failed', element_id: 'bs2', branch: null, message: 'equal_arms: residual 0.42 exceeds tolerance 0.01' },
             { severity: 'warning', code: 'assertion_indeterminate', element_id: 'bs2', branch: null, message: 'lens_arms: cannot prove the target' },
@@ -214,7 +217,25 @@ test('large drawings are stored, not inlined, and lab checks become an assertion
         ],
     };
     const checks = checksOf({ content: [{ type: 'text', text: JSON.stringify(report) }] })!;
-    assert.deepEqual({ ...checks, items: undefined }, { passed: false, readiness: 60, assertions: { pass: 1, fail: 1, indeterminate: 1, unreachable: 1 }, errors: 3, warnings: 1, items: undefined, more: 0, revision: 7, saved: false });
+    assert.deepEqual({ ...checks, items: undefined, readings: undefined }, { passed: false, readiness: 60, assertions: { pass: 1, fail: 1, indeterminate: 1, unreachable: 1 }, errors: 3, warnings: 1, items: undefined, more: 0, readings: undefined, readingsMore: 0, revision: 7, saved: false });
+    // Zones, folds and relays are listed with their values whether they pass or not.
+    assert.deepEqual(checks.readings, [
+        { kind: 'zone', label: 'arms', detail: 'Interferometer arms · 75000 mm² (300 × 250 mm) · 2 members · outside: m1', ok: false, element: 'm1' },
+        { kind: 'fold', label: 'far', detail: '3000 mm (OPL 3000.8 mm)', ok: true, element: 'm2' },
+        { kind: 'relay', label: '4f', detail: 'ABCD [-2 1e-13 mm; 0 /mm -0.5] · pupil s1 → 0 mm from cam · strict_4f 0 ✓ · magnification -2 ✓', ok: true, branch: 'arm_a' },
+    ]);
+    // A zone with every member inside is located at its first member.
+    const inside = checksOf(JSON.stringify({ ...report, zones: [{ ...report.zones[0], out_of_bounds: [] }] }))!;
+    assert.deepEqual(inside.readings![0], { kind: 'zone', label: 'arms', detail: 'Interferometer arms · 75000 mm² (300 × 250 mm) · 2 members', ok: true, element: 'bs1' });
+    // An interrupted fold is located where it stopped.
+    const stopped = checksOf(JSON.stringify({ ...report, folds: [{ ...report.folds[0], break: { element: 'm5', port: 'in', reason: 'blocked' } }] }))!;
+    assert.equal(stopped.readings![1]!.element, 'm5');
+    assert.equal(stopped.readings![1]!.ok, false);
+    const plain = checksOf(JSON.stringify({ ...report, zones: undefined, folds: undefined, relays: undefined }))!;
+    assert.equal(plain.readings, undefined);
+    const crowded = checksOf(JSON.stringify({ ...report, zones: Array.from({ length: 15 }, (_, i) => ({ ...report.zones[0], id: 'z' + i })) }))!;
+    assert.equal(crowded.readings!.length, READING_ITEMS);
+    assert.equal(crowded.readingsMore, 17 - READING_ITEMS);
     assert.deepEqual(checks.items.map(item => [item.kind, item.label, item.severity, item.element, item.branch]), [
         ['assertion', 'equal_arms', 'error', 'bs2', 'arm_a'],
         ['assertion', 'combiner_angle', 'error', 'm3', 'arm_a'],

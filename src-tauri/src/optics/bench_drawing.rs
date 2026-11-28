@@ -86,10 +86,13 @@ pub(crate) struct PartPosition {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct Card {
-    /// stage, branch or assertion.
+    /// stage, branch, assertion, zone, fold or relay.
     pub kind: &'static str,
     pub id: String,
-    /// Frame and text colour: the branch colour, or green/red for a passing/failing assertion.
+    /// Frame and text colour: the branch colour, green/red/amber for a passing,
+    /// failing or undecided check (a relay with every check passed is green), red
+    /// for a zone with members outside or an interrupted fold, slate otherwise
+    /// (a relay without checks included).
     pub color: String,
     pub lines: Vec<String>,
 }

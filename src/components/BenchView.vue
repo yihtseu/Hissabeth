@@ -222,6 +222,7 @@ const TEMPLATES = [
     'polarized_beam_combiner',
     'beam_expander_focus',
     'periscope_routing',
+    'modal_hybrid',
 ] as const;
 
 const canCommit = computed(

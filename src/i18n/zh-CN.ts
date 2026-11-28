@@ -113,6 +113,9 @@ export default {
             '断言：{pass} 通过，{fail} 失败，{indeterminate} 无法判定，{unreachable} 不可达 · {errors} 个错误，{warnings} 个警告 · 就绪度 {readiness}',
         checksLocate: '在工作台定位 {name}',
         checksMore: '另有 {count} 项，见原始结果',
+        checksReadings: '读数',
+        checksReading: { zone: '分区', fold: '折叠段', relay: '中继' },
+        checksReadingsMore: '另有 {count} 项读数，见原始结果',
         figureOmitted: '图纸 {name}（{size}）过大，未保存在对话中；请在工作台导出。',
         history: '历史会话',
         noHistory: '暂无历史会话。',
@@ -2201,6 +2204,7 @@ export default {
             polarized_beam_combiner: 'PBS + 半波片双臂分光',
             beam_expander_focus: '扩束准直 + 折转聚焦',
             periscope_routing: '双镜潜望镜变高光路',
+            modal_hybrid: '四端口 × 四模态相干读出',
         },
     },
 };

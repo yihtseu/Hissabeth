@@ -48,6 +48,16 @@ export interface ChatCheckItem {
     element?: string;
     branch?: string;
 }
+/** A zone footprint, fold length or relay matrix read off a lab check. */
+export interface ChatReading {
+    kind: 'zone' | 'fold' | 'relay';
+    label: string;
+    detail: string;
+    /** In bounds, unbroken, and every relay check passed. */
+    ok: boolean;
+    element?: string;
+    branch?: string;
+}
 /** The summary of a bench_lab_check result. */
 export interface ChatChecks {
     passed: boolean;
@@ -58,6 +68,9 @@ export interface ChatChecks {
     warnings: number;
     items: ChatCheckItem[];
     more: number;
+    /** Absent when the bench declares no zones, folds or relays. */
+    readings?: ChatReading[];
+    readingsMore?: number;
     revision?: number;
     saved?: boolean;
 }

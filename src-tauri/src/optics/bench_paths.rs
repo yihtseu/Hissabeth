@@ -171,7 +171,9 @@ pub struct Relay {
     /// measured from. Defaults to the branch's end element.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pupil_target: Option<String>,
-    #[schemars(length(min = 1, max = 8))]
+    /// Checks on the matrix. Without any, the relay only reports its readings.
+    #[serde(default)]
+    #[schemars(length(max = 8))]
     pub checks: Vec<RelayCheck>,
 }
 
@@ -368,7 +370,7 @@ impl Bench {
                 || !by_id.contains_key(&relay.branch)
                 || !finite(relay.object_distance_mm)
                 || !finite(relay.image_distance_mm)
-                || !(1..=8).contains(&relay.checks.len())
+                || relay.checks.len() > 8
                 || relay
                     .checks
                     .iter()

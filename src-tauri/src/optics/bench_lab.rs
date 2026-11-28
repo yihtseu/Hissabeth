@@ -5,7 +5,7 @@ use super::{
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
         BalancedPair, Connection, LensForm, DispersionQuantity, Element, FieldProfile, FieldSampling, GlassPass, Kind, ModeBasis, ModeFamily,
-        ModeNormalization, Mount, PathBreak, PhasePlate, Polarization, Port, Quadrature, Readout, ReadoutPort, Region, RegionShape,
+        ModeNormalization, Mount, PathBreak, PhasePlate, Polarization, Port, Quadrature, Readout, ReadoutPort, Region, RegionShape, RelayCheckKind,
         Stage, StagePose, StagePzt, Trace, next_beam,
     },
     interval::{Dual, Iv, Real},
@@ -2270,7 +2270,7 @@ fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
         assertions: check_assertions(bench, system, trace),
         periscopes: periscope_readings(bench, system, trace),
         zones: layout::zones(bench),
-        folds: layout::folds(trace),
+        folds: layout::folds(bench, trace),
         handedness: relay::handedness(bench, trace),
         relays: relay::relays(bench, system, trace),
     }
@@ -2876,15 +2876,120 @@ fn reading_cards(readings: &LabReadings) -> Vec<drawing::Card> {
             kind: "assertion",
             id: result.assertion.clone(),
             color: match result.status {
-                AssertionStatus::Pass => "#26734d",
+                AssertionStatus::Pass => PASS_COLOR,
                 AssertionStatus::Indeterminate => INDETERMINATE_COLOR,
-                _ => "#b42318",
+                _ => FAIL_COLOR,
             }.into(),
             lines,
         }
     });
-    stages.chain(branches).chain(assertions).collect()
+    let zones = readings.zones.iter().map(|zone| {
+        let [[x0, y0], [x1, y1]] = zone.bounds_mm;
+        let mut lines = vec![
+            if zone.label.is_empty() { format!("Zone {}", zone.id) } else { format!("Zone {} · {}", zone.id, zone.label) },
+            format!("Area {} mm² · {} × {} mm", reading_number(zone.area_mm2), reading_number(x1 - x0), reading_number(y1 - y0)),
+        ];
+        if !zone.members.is_empty() {
+            lines.push(format!("Members {}", zone.members.join(", ")));
+        }
+        if !zone.out_of_bounds.is_empty() {
+            lines.push(format!("Out of zone {}", zone.out_of_bounds.join(", ")));
+        }
+        let color = if zone.out_of_bounds.is_empty() { ZONE_COLOR } else { FAIL_COLOR };
+        drawing::Card { kind: "zone", id: zone.id.clone(), color: color.into(), lines }
+    });
+    let folds = readings.folds.iter().map(|fold| {
+        let mut lines = vec![format!("Fold {}", fold.id)];
+        if let Some(at) = &fold.interruption {
+            lines.push(format!("Length unavailable · {}", interruption_text(at)));
+        }
+        for path in &fold.paths {
+            if fold.paths.len() > 1 {
+                lines.push(format!("{} · {} nm", path.source, reading_number(path.wavelength_nm)));
+            }
+            let (length, opl) = (reading_number(path.length_mm), reading_number(path.opl_mm));
+            lines.push(match &path.interruption {
+                Some(at) => format!("Partial length {length} mm · OPL {opl} mm · {}", interruption_text(at)),
+                None => format!("Length {length} mm · OPL {opl} mm"),
+            });
+        }
+        let color = if fold.interruption.is_some() || fold.paths.iter().any(|p| p.interruption.is_some()) { FAIL_COLOR } else { FOLD_COLOR };
+        drawing::Card { kind: "fold", id: fold.id.clone(), color: color.into(), lines }
+    });
+    let relays = readings.relays.iter().map(|relay| {
+        let mut title = format!("Relay {} · {}", relay.id, relay.branch);
+        if let Some(nm) = relay.wavelength_nm {
+            title += &format!(" · {} nm", reading_number(nm));
+        }
+        let mut lines = vec![title];
+        // With a matrix, only the conjugate pupil can be undefined.
+        let (matrix_break, pupil_break) = match (&relay.interruption, relay.abcd) {
+            (Some(at), None) => (Some(at), None),
+            (at, _) => (None, at.as_ref()),
+        };
+        if let Some(at) = matrix_break {
+            lines.push(format!("ABCD unavailable · {}", interruption_text(at)));
+        }
+        if let Some([a, b, c, d]) = relay.abcd {
+            lines.push(format!(
+                "ABCD [{} {} mm; {} /mm {}]", reading_number(a), reading_number(b), reading_number(c), reading_number(d),
+            ));
+        }
+        if !relay.powered.is_empty() {
+            let powered: Vec<String> = relay.powered.iter()
+                .map(|p| format!("{} f {} @ {}", p.element, reading_number(p.focal_mm), reading_number(p.distance_mm)))
+                .collect();
+            let gap = relay.image_gap_mm.map_or_else(String::new, |g| format!(" · image +{} mm", reading_number(g)));
+            lines.push(format!("{} mm{gap}", powered.join(" → ")));
+        }
+        if let Some(stop) = &relay.pupil_stop {
+            let target = relay.pupil_target.as_deref().unwrap_or("—");
+            lines.push(match relay.pupil_image_mm {
+                Some(z) => format!("Pupil {stop} → {} mm from {target}", reading_number(z)),
+                None => format!("Pupil {stop} → at infinity from {target}"),
+            });
+        }
+        if let Some(at) = pupil_break {
+            let why = at.detail.as_deref().unwrap_or(&at.reason);
+            lines.push(format!("Pupil unavailable · {why}"));
+        }
+        for check in &relay.checks {
+            let kind = match check.kind {
+                RelayCheckKind::Conjugate => "Conjugate B",
+                RelayCheckKind::Magnification => "Magnification A",
+                RelayCheckKind::Afocal => "Afocal C",
+                RelayCheckKind::Strict4f => "Strict 4f",
+            };
+            let value = check.value.map_or_else(|| "—".into(), reading_number);
+            lines.push(format!(
+                "{kind} {value} · target {} ±{} · {}",
+                reading_number(check.target), reading_number(check.tolerance), if check.passed { "pass" } else { "fail" },
+            ));
+            if let Some(at) = &check.interruption {
+                lines.push(interruption_text(at));
+            }
+        }
+        if !relay.basis.is_plain() {
+            lines.push(format!("Basis {}", relay.basis.summary()));
+        }
+        let failed = relay.interruption.is_some() || relay.checks.iter().any(|c| !c.passed);
+        let color = if failed {
+            FAIL_COLOR
+        } else if relay.checks.is_empty() {
+            FOLD_COLOR
+        } else {
+            PASS_COLOR
+        };
+        drawing::Card { kind: "relay", id: relay.id.clone(), color: color.into(), lines }
+    });
+    stages.chain(branches).chain(assertions).chain(zones).chain(folds).chain(relays).collect()
 }
+
+const PASS_COLOR: &str = "#26734d";
+const FAIL_COLOR: &str = "#b42318";
+/// Slate for a zone's footprint card and a fold's or check-free relay's readings.
+const ZONE_COLOR: &str = "#52606d";
+const FOLD_COLOR: &str = "#334e68";
 
 /// Amber for an undecided assertion, apart from the pass green and fail red.
 const INDETERMINATE_COLOR: &str = "#b54708";
@@ -3647,8 +3752,16 @@ pub(crate) fn blueprint_drawing(bench: &Bench, system: &System, text_mm: f64) ->
     let scene = bench.resolved_stages()?;
     let bench = scene.as_ref();
     let trace = center_trace(bench, system)?;
-    let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
+    let physical = physical_trace(bench, system)?;
     Ok(plan(bench, system, &Grid::new(bench)?, physical.as_ref().unwrap_or(&trace), &trace, text_mm))
+}
+
+/// The full sampled trace that branch, assertion, fold and relay readings
+/// need, when the bench declares any of them; drawings fall back to the
+/// centre-ray trace otherwise.
+fn physical_trace(bench: &Bench, system: &System) -> Result<Option<Trace>, String> {
+    let needed = !bench.branches.is_empty() || !bench.folds.is_empty();
+    needed.then(|| bench.trace_resolved(system)).transpose()
 }
 
 /// The shared drawing with the breadboard holes and the result cards of `readings_trace`.
@@ -3750,7 +3863,7 @@ pub(crate) fn export_blueprint_file(
         let gaussian = envelope(bench, system, &trace)?;
         match format {
             "svg" => {
-                let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
+                let physical = physical_trace(bench, system)?;
                 let content = svg(
                     bench, system, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), &trace, version,
                 )?;
@@ -3802,6 +3915,29 @@ mod tests {
             "{}",
             check["issues"]
         );
+    }
+    #[test]
+    fn folds_alone_are_drawn_from_the_full_trace() {
+        // Every three-arm hole is lit only by the sampled rings, not the centre ray.
+        let system = System::default();
+        let mut bench = template("three_arm").unwrap();
+        bench.folds = std::mem::take(&mut bench.branches);
+        bench.assertions.clear();
+        bench.relays.clear();
+        let check = lab_check(&bench, &system).unwrap();
+        let folds = check["folds"].as_array().unwrap();
+        assert_eq!(folds.len(), 3, "{check}");
+        let svg = export_blueprint_report(&bench, &system, "svg", None).unwrap().content;
+        for fold in folds {
+            let id = fold["id"].as_str().unwrap();
+            assert!(fold.get("break").is_none() && fold["paths"][0].get("break").is_none(), "{fold}");
+            let shown = card(&bench, &system, "fold", id);
+            assert_eq!(shown.color, FOLD_COLOR, "{id}: {:?}", shown.lines);
+            assert!(!shown.lines.iter().any(|l| l.starts_with("Partial")), "{:?}", shown.lines);
+            let at = svg.find(&format!(r#"data-kind="fold" data-id="{id}""#)).unwrap();
+            let tag = &svg[at..at + svg[at..].find('>').unwrap()];
+            assert!(tag.contains(&format!(r#"fill="{FOLD_COLOR}""#)), "{tag}");
+        }
     }
     #[test]
     fn sub_aperture_keeps_wavefront_curvature_and_truncates_only_wider_beams() {
@@ -5455,8 +5591,12 @@ mod tests {
         assert_eq!(reading["powered"].as_array().unwrap().len(), 1);
         assert!((reading["powered"][0]["focal_mm"].as_f64().unwrap() + 1. / group_matrix.c).abs() < 1e-9);
         assert_eq!(reading["checks"][0]["break"]["reason"], "strict_4f_needs_two_thin_elements");
-        // No value, so no basis.
+        // No value, so no basis on the check, while the matrix keeps its own.
         assert!(reading["checks"][0].get("basis").is_none(), "{reading}");
+        assert_eq!(reading["basis"], json!({"kind": "model", "assumptions": [{"code": "paraxial"}]}), "{reading}");
+        let card = card(&bench, &system, "relay", "group");
+        assert_eq!(card.lines.last().unwrap(), "Basis model · paraxial", "{:?}", card.lines);
+        assert_eq!(card.color, FAIL_COLOR);
     }
 
     #[test]
@@ -5517,6 +5657,9 @@ mod tests {
         let v = 1. / (1. / 200. - 1. / 301.);
         assert!((lab["relays"][0]["pupil_image_mm"].as_f64().unwrap() - (v - 199.)).abs() < 1e-9);
         assert!(lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_check"));
+        let failed = card(&bench, &system, "relay", "4f");
+        assert_eq!(failed.color, FAIL_COLOR);
+        assert!(failed.lines.iter().any(|l| l.starts_with("Strict 4f 1 · ") && l.ends_with(" · fail")), "{:?}", failed.lines);
         bench.elements[1].position[0] -= 1.;
         // An aperture at the object plane (the source, 100 mm before L1) is
         // imaged onto D: matrix [−2, 0; 0, −0.5] from it, so 0 mm past D.
@@ -5526,6 +5669,32 @@ mod tests {
         assert_eq!(reading["pupil_stop"], "S1");
         assert_eq!(reading["pupil_target"], "D");
         assert!(reading["pupil_image_mm"].as_f64().unwrap().abs() < 1e-9, "{reading}");
+        // The drawing card carries the matrix, spacings, conjugate pupil and checks.
+        let shown = card(&bench, &system, "relay", "4f");
+        assert_eq!(shown.color, PASS_COLOR);
+        assert_eq!(shown.lines, [
+            "Relay 4f · relay · 532 nm",
+            "ABCD [-2 0 mm; 0 /mm -0.5]",
+            "L1 f 100 @ 100 → L2 f 200 @ 300 mm · image +200 mm",
+            "Pupil S1 → 0 mm from D",
+            "Conjugate B 0 · target 0 ±1.000000e-9 · pass",
+            "Magnification A -2 · target -2 ±1.000000e-9 · pass",
+            "Afocal C 0 · target 0 ±1.000000e-9 · pass",
+            "Strict 4f 0 · target 0 ±1.000000e-9 · pass",
+            "Basis model · paraxial · thin_lens L1, L2",
+        ]);
+        // Without checks the relay only reports its readings, in slate.
+        let mut unchecked = bench.clone();
+        unchecked.relays[0].checks.clear();
+        let lab = lab_check(&unchecked, &system).unwrap();
+        assert_eq!(lab["relays"][0]["checks"], json!([]));
+        assert!(!lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_check"), "{}", lab["issues"]);
+        let quiet = card(&unchecked, &system, "relay", "4f");
+        assert_eq!(quiet.color, FOLD_COLOR);
+        assert_eq!(quiet.lines.len(), 5, "{:?}", quiet.lines);
+        assert_eq!(quiet.lines[1], "ABCD [-2 0 mm; 0 /mm -0.5]");
+        unchecked.relays[0].checks = vec![check(RelayCheckKind::Afocal, 0.); 9];
+        assert!(lab_check(&unchecked, &system).is_err());
         // Measured from L2 instead: its image lies f2 = 200 mm past L2.
         bench.relays[0].pupil_target = Some("L2".into());
         let lab = lab_check(&bench, &system).unwrap();
@@ -5536,6 +5705,13 @@ mod tests {
         let lab = lab_check(&bench, &system).unwrap();
         assert_eq!(lab["relays"][0]["break"]["reason"], "pupil_undefined");
         assert!(lab["relays"][0]["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true));
+        // The matrix is still read; only the pupil is missing.
+        let undefined = card(&bench, &system, "relay", "4f");
+        assert_eq!(undefined.color, FAIL_COLOR);
+        let detail = lab["relays"][0]["break"]["detail"].as_str().unwrap();
+        assert_eq!(undefined.lines[1], "ABCD [-2 0 mm; 0 /mm -0.5]", "{:?}", undefined.lines);
+        assert_eq!(undefined.lines[3], format!("Pupil unavailable · {detail}"), "{:?}", undefined.lines);
+        assert!(!undefined.lines.iter().any(|l| l.contains("ABCD unavailable")), "{:?}", undefined.lines);
         assert_eq!(lab["passed"], false);
         assert!(lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_pupil"));
         assert!(super::check(&bench, &system).unwrap().require_pass().is_err());
@@ -5958,6 +6134,13 @@ mod tests {
         let fold = &check["folds"][0];
         assert_eq!(fold["id"], "delay");
         assert!((fold["paths"][0]["length_mm"].as_f64().unwrap() - expected).abs() < 1e-9);
+        // 120 + 120 + 120 + 180 mm through air: the length and OPL are both 540 mm.
+        assert!((expected - 540.).abs() < 1e-9);
+        let card = card(&result.bench, &system, "fold", "delay");
+        assert_eq!(card.lines, ["Fold delay", "Length 540 mm · OPL 540 mm"]);
+        assert_eq!(check["folds"][0]["from"], "M1");
+        assert_eq!(check["folds"][0]["to"], "D");
+        assert_eq!(card.color, FOLD_COLOR);
         let mut repeated = result.bench.clone();
         repeated.folds.push(repeated.folds[0].clone());
         assert!(repeated.validate().unwrap_err().contains("repeated fold"));
@@ -5997,12 +6180,53 @@ mod tests {
         let issues = check["issues"].as_array().unwrap();
         assert!(issues.iter().any(|i| i["code"] == "zone_bounds" && i["element_id"] == "M1"));
         assert_eq!(check["zones"][1]["members"][0], "D1");
+        // Both zones get a footprint card on the drawing and the exported blueprint.
+        let arms = card(&bench, &system, "zone", "arms");
+        assert_eq!(arms.lines, [
+            "Zone arms · Interferometer arms",
+            "Area 75000 mm² · 300 × 250 mm",
+            "Members BS1, M1",
+            "Out of zone M1",
+        ]);
+        assert_eq!(arms.color, FAIL_COLOR);
+        let detect = card(&bench, &system, "zone", "detect");
+        assert_eq!(detect.lines, ["Zone detect", "Area 10000 mm² · 100 × 100 mm", "Members D1"]);
+        assert_eq!(detect.color, ZONE_COLOR);
+        let svg = export_blueprint(&bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(svg.contains(r#"data-kind="zone" data-id="arms""#) && svg.contains("Area 75000 mm²"));
         let mut crossed = bench.clone();
         crossed.zones[1].polygon_mm = Some(vec![[600., 350.], [700., 450.], [700., 350.], [600., 450.]]);
         assert!(crossed.validate().unwrap_err().contains("Invalid zone"));
         let mut unknown = bench.clone();
         unknown.zones[0].members.push("nope".into());
         assert!(unknown.validate().unwrap_err().contains("Invalid zone"));
+    }
+
+    #[test]
+    fn every_template_is_offered_by_the_bench_view_in_both_languages() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+        let view = read("src/components/BenchView.vue");
+        let list = view.split("const TEMPLATES = [").nth(1).unwrap().split("] as const").next().unwrap();
+        let offered: Vec<&str> = list.split(',').map(|n| n.trim().trim_matches('\'')).filter(|n| !n.is_empty()).collect();
+        let mut expected = TEMPLATES.to_vec();
+        let mut sorted = offered.clone();
+        expected.sort();
+        sorted.sort();
+        assert_eq!(sorted, expected);
+        for lang in ["src/i18n/zh-CN.ts", "src/i18n/en-US.ts"] {
+            let names = read(lang);
+            let names = names.split("        templates: {").nth(1).unwrap().split('}').next().unwrap();
+            for name in TEMPLATES {
+                assert!(names.contains(&format!("{name}: '")), "{lang} lacks {name}");
+            }
+        }
+    }
+
+    fn card(bench: &Bench, system: &System, kind: &str, id: &str) -> drawing::Card {
+        let mut plan = blueprint_drawing(bench, system, 4.).unwrap();
+        let i = plan.cards.iter().position(|c| c.kind == kind && c.id == id).unwrap_or_else(|| panic!("no {kind} card {id}"));
+        plan.cards.swap_remove(i)
     }
 
     fn on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {

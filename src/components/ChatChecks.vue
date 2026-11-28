@@ -74,6 +74,46 @@ const origin = computed(() => {
         <p v-if="checks.more" class="chat-checks-more">
             {{ tr('chat.checksMore', { count: checks.more }) }}
         </p>
+        <ul
+            v-if="checks.readings?.length"
+            class="chat-checks-readings"
+            :aria-label="tr('chat.checksReadings')"
+        >
+            <li
+                v-for="(reading, index) in checks.readings"
+                :key="index"
+                :class="reading.ok ? 'is-ok' : 'is-off'"
+                :data-kind="reading.kind"
+            >
+                <CircleCheck v-if="reading.ok" :size="11" aria-hidden="true" />
+                <CircleX v-else :size="11" aria-hidden="true" />
+                <span class="chat-checks-label"
+                    >{{ tr(`chat.checksReading.${reading.kind}`) }} {{ reading.label }}</span
+                >
+                <span class="chat-checks-detail">{{ reading.detail }}</span>
+                <button
+                    v-if="reading.element || reading.branch"
+                    type="button"
+                    class="small"
+                    :aria-label="
+                        tr('chat.checksLocate', {
+                            name: reading.element ?? reading.branch ?? '',
+                        })
+                    "
+                    :title="
+                        tr('chat.checksLocate', {
+                            name: reading.element ?? reading.branch ?? '',
+                        })
+                    "
+                    @click="emit('locate', target(reading))"
+                >
+                    <LocateFixed :size="12" />
+                </button>
+            </li>
+        </ul>
+        <p v-if="checks.readingsMore" class="chat-checks-more">
+            {{ tr('chat.checksReadingsMore', { count: checks.readingsMore }) }}
+        </p>
     </section>
 </template>
 
@@ -150,6 +190,26 @@ const origin = computed(() => {
 .chat-checks-detail {
     color: var(--muted);
     overflow-wrap: anywhere;
+}
+.chat-checks-readings {
+    list-style: none;
+    margin: 0;
+    padding: 4px 8px 6px;
+    border-top: 1px solid var(--border);
+    display: grid;
+    gap: 3px;
+}
+.chat-checks-readings li {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: baseline;
+    gap: 6px;
+}
+.chat-checks-readings li.is-ok > svg {
+    color: var(--positive);
+}
+.chat-checks-readings li.is-off > svg {
+    color: var(--danger);
 }
 .chat-checks-more {
     margin: 0;

@@ -226,6 +226,10 @@ pub(crate) struct RelayReading {
     /// infinity or when the stop is undefined.
     pub pupil_image_mm: Option<f64>,
     pub checks: Vec<RelayCheckResult>,
+    /// Basis of `abcd` and the values read from it: paraxial, with thin
+    /// lenses' principal planes at their element planes. Absent without a matrix.
+    #[serde(default, skip_serializing_if = "Basis::is_plain")]
+    pub basis: Basis,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     pub interruption: Option<PathBreak>,
 }
@@ -375,6 +379,7 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
                         interruption: Some(interruption.clone()),
                     })
                     .collect(),
+                basis: Basis::default(),
                 interruption: Some(interruption),
             };
         }
@@ -435,6 +440,7 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
         pupil_target,
         pupil_image_mm,
         checks,
+        basis,
         // A missing default stop (no powered element) only leaves the pupil unset.
         interruption: pupil_break.filter(|_| relay.pupil_stop.is_some() || relay.pupil_target.is_some()),
     }

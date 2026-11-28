@@ -97,6 +97,7 @@ try {
     });
     await page.goto(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
     if (process.argv.includes('--delay-stage')) {
+        await expect(page.getByLabel('Lab template').locator('option[value="modal_hybrid"]')).toHaveText('Four-port × four-mode coherent readout');
         await page.getByLabel('Lab template').selectOption('delay_line');
         await page.getByRole('button', { name: 'Load template', exact: true }).click();
         const stage = page.getByRole('group', { name: 'Delay stage delay' });

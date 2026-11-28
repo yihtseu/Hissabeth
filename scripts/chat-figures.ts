@@ -47,6 +47,17 @@ export interface ChatCheckItem {
     branch?: string;
 }
 
+/** A zone footprint, fold length or relay matrix read off a lab check. */
+export interface ChatReading {
+    kind: 'zone' | 'fold' | 'relay';
+    label: string;
+    detail: string;
+    /** In bounds, unbroken, and every relay check passed. */
+    ok: boolean;
+    element?: string;
+    branch?: string;
+}
+
 /** The summary of a bench_lab_check result. */
 export interface ChatChecks {
     passed: boolean;
@@ -57,6 +68,10 @@ export interface ChatChecks {
     items: ChatCheckItem[];
     /** Items beyond CHECK_ITEMS left out of the summary. */
     more: number;
+    /** Up to READING_ITEMS readings and how many more were left out; absent
+     * when the bench declares no zones, folds or relays. */
+    readings?: ChatReading[];
+    readingsMore?: number;
     revision?: number;
     saved?: boolean;
 }
@@ -71,6 +86,8 @@ export const FIGURE_LIMIT = 1_500_000;
 export const FIGURE_MAX = 64_000_000;
 /** Failure items kept in a check summary. */
 export const CHECK_ITEMS = 24;
+/** Zone, fold and relay readings listed in a chat check summary. */
+export const READING_ITEMS = 12;
 const EXTENSIONS: Record<string, string> = {
     'image/svg+xml': 'svg',
     'image/png': 'png',
@@ -210,6 +227,36 @@ interface LabReport {
         basis?: { kind?: unknown };
     }[];
     branches?: { id: string; break?: Located }[];
+    zones?: {
+        id: string;
+        label?: string;
+        area_mm2?: unknown;
+        bounds_mm?: [[number, number], [number, number]];
+        members?: string[];
+        out_of_bounds?: string[];
+    }[];
+    folds?: {
+        id: string;
+        from?: string;
+        break?: Located;
+        paths?: {
+            source?: string;
+            wavelength_nm?: unknown;
+            length_mm?: unknown;
+            opl_mm?: unknown;
+            break?: Located;
+        }[];
+    }[];
+    relays?: {
+        id: string;
+        branch?: string;
+        abcd?: number[] | null;
+        pupil_stop?: string | null;
+        pupil_target?: string | null;
+        pupil_image_mm?: number | null;
+        break?: Located;
+        checks?: { kind?: unknown; value?: unknown; passed?: unknown }[];
+    }[];
     issues?: {
         severity?: unknown;
         code?: unknown;
@@ -224,6 +271,79 @@ function located(at: Located | undefined): string {
 }
 const stopped = (stop: Located) =>
     `${located(stop)} ${stop.reason}${stop.detail ? ` (${stop.detail})` : ''}`;
+
+/** A reading for the summary: finite numbers to six significant digits. */
+const num = (value: unknown): string =>
+    typeof value === 'number' && Number.isFinite(value)
+        ? String(Number(value.toPrecision(6)))
+        : '—';
+
+/** Zone footprints, fold lengths and relay matrices, passing or not. */
+function readingsOf(report: LabReport): ChatReading[] {
+    const readings: ChatReading[] = [];
+    for (const z of report.zones ?? []) {
+        const [[x0, y0], [x1, y1]] = z.bounds_mm ?? [
+            [0, 0],
+            [0, 0],
+        ];
+        const out = z.out_of_bounds ?? [];
+        readings.push({
+            kind: 'zone',
+            label: String(z.id),
+            detail: [
+                z.label,
+                `${num(z.area_mm2)} mm² (${num(x1 - x0)} × ${num(y1 - y0)} mm)`,
+                `${z.members?.length ?? 0} members`,
+                out.length ? `outside: ${out.join(', ')}` : '',
+            ]
+                .filter(Boolean)
+                .join(' · '),
+            ok: !out.length,
+            // The first stray member, else the first member, locates the zone.
+            ...((out[0] ?? z.members?.[0]) ? { element: out[0] ?? z.members?.[0] } : {}),
+        });
+    }
+    for (const f of report.folds ?? []) {
+        const paths = f.paths ?? [];
+        const stop = f.break ?? paths.find((p) => p.break)?.break;
+        const lengths = paths.map(
+            (p) =>
+                `${paths.length > 1 ? `${p.source} ${num(p.wavelength_nm)} nm: ` : ''}${p.break ? 'partial ' : ''}${num(p.length_mm)} mm (OPL ${num(p.opl_mm)} mm)`,
+        );
+        readings.push({
+            kind: 'fold',
+            label: String(f.id),
+            detail: [...lengths, stop ? stopped(stop) : ''].filter(Boolean).join(' · '),
+            ok: !stop,
+            // Where the fold stopped, else where it starts.
+            ...(stop?.element || f.from ? { element: stop?.element || f.from } : {}),
+        });
+    }
+    for (const r of report.relays ?? []) {
+        const checks = r.checks ?? [];
+        const parts: string[] = [];
+        if (r.abcd?.length === 4) {
+            const [a, b, c, d] = r.abcd;
+            parts.push(`ABCD [${num(a)} ${num(b)} mm; ${num(c)} /mm ${num(d)}]`);
+        }
+        if (r.pupil_stop) {
+            parts.push(
+                `pupil ${r.pupil_stop} → ${r.pupil_image_mm == null ? '∞' : `${num(r.pupil_image_mm)} mm`} from ${r.pupil_target ?? '—'}`,
+            );
+        }
+        for (const c of checks) parts.push(`${c.kind} ${num(c.value)} ${c.passed ? '✓' : '✗'}`);
+        if (r.break) parts.push(stopped(r.break));
+        readings.push({
+            kind: 'relay',
+            label: String(r.id),
+            detail: parts.join(' · '),
+            ok: !r.break && checks.every((c) => c.passed),
+            ...(r.break?.element ? { element: r.break.element } : {}),
+            ...(r.branch ? { branch: r.branch } : {}),
+        });
+    }
+    return readings;
+}
 
 /** The assertion summary of a bench_lab_check result, recognised by its shape. */
 export function checksOf(result: unknown): ChatChecks | undefined {
@@ -301,6 +421,7 @@ export function checksOf(result: unknown): ChatChecks | undefined {
         });
     }
     items.sort((a, b) => Number(a.severity === 'warning') - Number(b.severity === 'warning'));
+    const readings = readingsOf(report);
     return {
         passed: !!report.passed,
         readiness: Number(report.readiness_score) || 0,
@@ -309,6 +430,12 @@ export function checksOf(result: unknown): ChatChecks | undefined {
         warnings: Number(report.counts?.warnings) || 0,
         items: items.slice(0, CHECK_ITEMS),
         more: Math.max(0, items.length - CHECK_ITEMS),
+        ...(readings.length
+            ? {
+                  readings: readings.slice(0, READING_ITEMS),
+                  readingsMore: Math.max(0, readings.length - READING_ITEMS),
+              }
+            : {}),
         ...(typeof report.revision === 'number' ? { revision: report.revision } : {}),
         ...(typeof report.saved === 'boolean' ? { saved: report.saved } : {}),
     };

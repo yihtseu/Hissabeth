@@ -653,6 +653,8 @@ export interface BenchRelayReading {
         basis?: BenchValueBasis;
         break?: BenchPathBreak;
     }[];
+    /** Basis of abcd and the values read from it; absent without a matrix. */
+    basis?: BenchValueBasis;
     break?: BenchPathBreak;
 }
 export interface BenchGlassPass {
@@ -700,6 +702,9 @@ export interface BenchZoneReading {
 }
 export interface BenchFoldReading {
     id: string;
+    /** Elements the fold starts and ends at. */
+    from: string;
+    to: string;
     paths: {
         source: string;
         wavelength_nm: number;
@@ -1208,7 +1213,12 @@ export interface BenchDrawing {
     }[];
     assertions: { id: string; passed: boolean; text: string; element: string | null }[];
     /** Result cards: stage positions, branch path lengths, assertion results. */
-    cards: { kind: 'stage' | 'branch' | 'assertion'; id: string; color: string; lines: string[] }[];
+    cards: {
+        kind: 'stage' | 'branch' | 'assertion' | 'zone' | 'fold' | 'relay';
+        id: string;
+        color: string;
+        lines: string[];
+    }[];
     /** Every part's position as drawn, after stage motion. */
     positions: { id: string; position: Vec3 }[];
 }

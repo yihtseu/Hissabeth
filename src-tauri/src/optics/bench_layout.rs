@@ -45,6 +45,9 @@ pub(crate) struct ZoneReading {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FoldReading {
     pub id: String,
+    /// The elements the fold starts and ends at.
+    pub from: String,
+    pub to: String,
     pub paths: Vec<FoldPath>,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     pub interruption: Option<PathBreak>,
@@ -61,13 +64,16 @@ pub(crate) struct FoldPath {
     pub interruption: Option<PathBreak>,
 }
 
-pub(crate) fn folds(trace: &Trace) -> Vec<FoldReading> {
-    trace.folds.iter().map(fold).collect()
+pub(crate) fn folds(bench: &Bench, trace: &Trace) -> Vec<FoldReading> {
+    trace.folds.iter().map(|report| fold(bench, report)).collect()
 }
 
-fn fold(report: &BranchReport) -> FoldReading {
+fn fold(bench: &Bench, report: &BranchReport) -> FoldReading {
+    let declared = bench.folds.iter().find(|f| f.id == report.id);
     FoldReading {
         id: report.id.clone(),
+        from: declared.map(|f| f.from.element.clone()).unwrap_or_default(),
+        to: declared.map(|f| f.to.element.clone()).unwrap_or_default(),
         paths: report.paths.iter().map(|p| FoldPath {
             source: p.source.clone(),
             wavelength_nm: p.wavelength_nm,

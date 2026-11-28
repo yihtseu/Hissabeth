@@ -118,6 +118,9 @@ export default {
             'Assertions: {pass} passed, {fail} failed, {indeterminate} indeterminate, {unreachable} unreachable · {errors} errors, {warnings} warnings · readiness {readiness}',
         checksLocate: 'Locate {name} on bench',
         checksMore: '{count} more in the raw result',
+        checksReadings: 'Readings',
+        checksReading: { zone: 'Zone', fold: 'Fold', relay: 'Relay' },
+        checksReadingsMore: '{count} more readings in the raw result',
         figureOmitted:
             'Drawing {name} ({size}) is too large to keep in the conversation; export it from the bench.',
         history: 'Conversations',
@@ -2279,6 +2282,7 @@ export default {
             polarized_beam_combiner: 'PBS + HWP Two-Arm',
             beam_expander_focus: 'Beam Expander + Focus',
             periscope_routing: 'Periscope Routing',
+            modal_hybrid: 'Four-port × four-mode coherent readout',
         },
     },
 };

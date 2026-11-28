@@ -133,6 +133,9 @@ try {
     const savedBench = (await optical('bench_get')).bench;
     const failing = structuredClone(savedBench);
     failing.assertions[0].target += 50;
+    // A zone its member lies outside: listed under the readings with locate.
+    const outside = failing.elements[0].id as string;
+    failing.zones = [{ id: 'corner', label: 'Corner', rect: { min: [0, 0], max: [10, 10] }, members: [outside] }];
     const hardwarePng = (await optical('bench_export_blueprint', { bench: savedBench, format: 'png', px_per_mm: 0.5 })).content as string;
     const wrap = (result: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
     const labReview = reviewOf(wrap(await optical('bench_lab_check', { bench: failing })), workspace);
@@ -294,6 +297,12 @@ try {
     assert(at.element && at.branch, 'the failing assertion names an element and branch');
     await failed.getByRole('button', { name: `Locate ${at.element} on bench` }).click();
     await expect(page.locator('.bench-element-list button[aria-pressed="true"]')).toContainText(at.element);
+    const zone = checksCard.locator('.chat-checks-readings li[data-kind="zone"]');
+    await expect(zone).toContainText('Zone corner');
+    await expect(zone).toContainText('100 mm² (10 × 10 mm)');
+    await expect(zone).toContainText(`outside: ${outside}`);
+    await zone.getByRole('button', { name: `Locate ${outside} on bench` }).click();
+    await expect(page.locator('.bench-element-list button[aria-pressed="true"]')).toContainText(outside);
     // Real hardware drawings: read back from their stored files, viewable and downloadable whole.
     for (const figure of hardware) {
         const big = page.locator(`.chat-figure[data-file="${figure.file}"]`);
