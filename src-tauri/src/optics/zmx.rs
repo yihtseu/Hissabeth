@@ -531,7 +531,17 @@ pub fn import(text: &str) -> Result<System, String> {
                 return Ok(glass.key());
             }
         }
-        material::find(name).map(|g| g.key())
+        material::find(name).map(|g| g.key()).map_err(|unknown| {
+            // Name the file's own catalog when it is the one not installed.
+            let library = material::library();
+            match catalogs.iter().find(|c| !library.has_catalog(c)) {
+                Some(catalog) => library
+                    .find(&format!("{}_{catalog}", name.to_uppercase()))
+                    .err()
+                    .unwrap_or(unknown),
+                None => unknown,
+            }
+        })
     };
     let endpoint = |surface: &ZmxSurface, index: usize| -> Result<EndpointSurface, String> {
         let (radius, conic, even, odd, toroid, zernike) = surface.profile(index)?;
@@ -1531,6 +1541,8 @@ mod tests {
             active_configuration: 1,
             ..Default::default()
         };
+        // GLSS operands name catalog glasses; the default lens uses a model glass.
+        s.surfaces[0].material = "N-BK7_SCHOTT".into();
         s.update().unwrap();
         let text = export(&s).unwrap();
         assert!(text.contains("CONF 2 0 0 0 0 0 0 0 0 0"));

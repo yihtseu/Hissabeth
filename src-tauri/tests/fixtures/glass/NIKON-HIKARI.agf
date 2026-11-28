@@ -1,0 +1,11 @@
+CC Test fixture: only the NIKON-HIKARI glasses the tests name; not a vendor catalog file.
+CC Values from the refractiveindex.info database (database/data/specs),
+CC public domain via CC0 1.0; nd and vd as published there.
+NM NICF-A 6 0 1.43384 95.2608 0 1
+CD 0.581797965 0.002477442 0.373232342 0.01032026 0.083677196 0.010323473 2.36293749 738.225998
+TD -3.16e-05 -2.05e-08 9.02e-13 4.32e-07 2.04e-10 0.115 22.5
+LD 0.18489 2.32542
+NM NIFS-A 6 0 1.45848 67.8264 0 1
+CD 0.565169763 0.003823156 0.422092787 0.011444418 0.11689465 0.015169704 0.883720207 96.4254081
+TD 2.15e-05 3.84e-08 -5.68e-13 3.33e-07 3.98e-10 0.184 22.5
+LD 0.18489 2.32542

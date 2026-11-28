@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-build", "dep:sha2", "dep:base64", "dep:tauri-plugin-opener", "dep:tauri-plugin-store", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:sha2", "dep:base64", "dep:tauri-plugin-opener", "dep:tauri-plugin-store", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:reqwest", "dep:zip"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
@@ -37,6 +37,10 @@ tauri-plugin-fs = { version = "2.7", optional = true }
 # Chat image attachments: decoded and stored under their content hash.
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+# Glass catalog downloads: fetched by the desktop app straight from each
+# manufacturer's site; several vendors ship the AGF inside a zip.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 
 [profile.release]
 codegen-units = 1

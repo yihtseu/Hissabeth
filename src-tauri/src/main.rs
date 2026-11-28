@@ -4,6 +4,10 @@ use serde_json::{Value, json};
 fn open_workspace() -> Result<Workspace, String> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A catalog that fails to load is reported and left out; the engine runs.
+    if let Err(error) = hissabeth_lib::service::glass_catalogs::reload(&dir) {
+        eprintln!("Glass catalogs: {error}");
+    }
     Workspace::open(dir.join("system.json"))
 }
 

@@ -498,7 +498,7 @@ fn parse_model_glass(s: &System, surface: usize) -> Result<(f64, f64), String> {
         .iter()
         .find(|g| g.key() == *mat || g.name == *mat)
         .cloned()
-        .or_else(|| material::find(mat).ok().cloned())
+        .or_else(|| material::find(mat).ok())
         .ok_or_else(|| {
             format!("Material {mat} on surface {surface} has no nd/vd for model glass")
         })?;

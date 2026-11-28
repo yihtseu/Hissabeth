@@ -247,7 +247,7 @@ struct GlassMatch {
 pub(super) struct Materials {
     total: usize,
     glasses: Vec<GlassMatch>,
-    warnings: Vec<&'static material::CatalogWarning>,
+    warnings: Vec<material::CatalogWarning>,
 }
 #[derive(Serialize, schemars::JsonSchema)]
 pub(super) struct Spherochromatism {
@@ -828,10 +828,19 @@ pub(super) fn history_restore(
     })
 }
 
+pub(super) fn catalog_list(
+    _: &Target<'_>,
+    _: p::Empty,
+) -> Result<super::glass_catalogs::Status, String> {
+    Ok(super::glass_catalogs::status(&super::data_dir()))
+}
+
 pub(super) fn materials_list(target: &Target<'_>, _: p::Empty) -> Result<Vec<String>, String> {
     target.read(|e| {
         let system = &e.system;
-        let mut names: Vec<String> = material::catalogs()
+        let library = material::library();
+        let mut names: Vec<String> = library
+            .glasses
             .iter()
             .chain(&system.custom_glasses)
             .map(|g| g.key())
@@ -852,7 +861,9 @@ pub(super) fn material_search(
         let catalog = args.catalog.as_deref().unwrap_or("").to_uppercase();
         let offset = args.offset.unwrap_or(0);
         let limit = args.limit.unwrap_or(50);
-        let matches: Vec<_> = material::catalogs()
+        let library = material::library();
+        let matches: Vec<_> = library
+            .glasses
             .iter()
             .chain(&system.custom_glasses)
             .filter(|g| {
@@ -874,9 +885,11 @@ pub(super) fn material_search(
                 wavelength_range: g.wavelength_range,
             })
             .collect();
-        let warnings = material::catalog_warnings()
+        let warnings = library
+            .warnings
             .iter()
             .filter(|w| catalog.is_empty() || w.catalog == catalog)
+            .cloned()
             .collect();
         Ok(Materials {
             total: matches.len(),

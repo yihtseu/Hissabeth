@@ -18,6 +18,11 @@ if "--workspace-recovery" in sys.argv:
     (DATA / "system.json").write_bytes(b"{ broken saved project\n")
 
 ENV = dict(os.environ, HISSABETH_DATA_DIR=str(DATA))
+# Vendor catalogs are not bundled: install only the SCHOTT test fixture, as the
+# Glass Catalogs window records a local import, so other vendors stay missing.
+(DATA / "glass").mkdir()
+(DATA / "glass/SCHOTT.agf").write_bytes((ROOT / "tests/fixtures/glass/SCHOTT.agf").read_bytes())
+(DATA / "glass/catalogs.json").write_text(json.dumps(dict(dismissed=True, catalogs=dict(SCHOTT=dict(origin=dict(file=dict(name="SCHOTT.agf")), installed_at=0, glasses=0)))))
 
 
 def start_engine():
@@ -1054,6 +1059,11 @@ try:
     tool("spot_diagram", dict(sampling=dict(kind="grid",count=2)), error=True)
     index = tool("material_index", dict(material="N-BK7_SCHOTT", wavelength=587.5618))
     assert abs(index["index"] - 1.5168) < 1e-5
+    missing = tool("material_index", dict(material="H-K9L_CDGM", wavelength=587.5618), error=True)
+    assert "H-K9L is in the CDGM glass catalog, which is not installed" in missing["content"][0]["text"], missing
+    vendors = {v["catalog"]: v for v in tool("catalog_list")["vendors"]}
+    assert vendors["SCHOTT"]["installed"] and not vendors["CDGM"]["installed"], vendors
+    assert "INFRARED" not in vendors and vendors["CDGM"]["page"].startswith("https://")
     spot = tool("spot_diagram", dict(sampling=dict(kind="grid",count=9), field_index=0))
     assert math.isfinite(spot["rms_radius"])
     psf = tool("diffraction_psf", dict(grid=16, field_index=0))

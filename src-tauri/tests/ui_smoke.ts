@@ -16,6 +16,10 @@ const workspace = resolve(target, 'ui-workspace');
 const executable = resolve(target, 'debug/hissabeth');
 await mkdir(workspace, { recursive: true });
 for (const filename of ['endpoint.json', 'system.json']) await unlink(resolve(workspace, filename)).catch(() => {});
+// Vendor catalogs are not bundled: install the SCHOTT test fixture the way the Glass Catalogs window records an import.
+await mkdir(resolve(workspace, 'glass'), { recursive: true });
+await writeFile(resolve(workspace, 'glass/SCHOTT.agf'), await readFile(resolve(root, 'src-tauri/tests/fixtures/glass/SCHOTT.agf')));
+await writeFile(resolve(workspace, 'glass/catalogs.json'), JSON.stringify({ dismissed: true, catalogs: { SCHOTT: { origin: { file: { name: 'SCHOTT.agf' } }, installed_at: 0, glasses: 0 } } }));
 if(process.argv.includes('--workspace-recovery')) await writeFile(resolve(workspace,'system.json'),'{ invalid startup project\n');
 let engine!: import('node:child_process').ChildProcess;
 async function startEngine() {

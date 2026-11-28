@@ -210,7 +210,7 @@ impl Default for System {
             name: "BK7 singlet".into(),
             note: String::new(),
             surfaces: vec![
-                Surface::sphere(50., 5., "N-BK7_SCHOTT", 12.5),
+                Surface::sphere(50., 5., "1.5168:64.17", 12.5),
                 Surface::sphere(-50., 46.64, "AIR", 12.5),
             ],
             wavelengths: vec![

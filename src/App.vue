@@ -368,6 +368,20 @@ async function openSettings(section: unknown = 'general'): Promise<void> {
         settingsError.value = errorMessage(error);
     }
 }
+async function openGlassCatalogs(): Promise<void> {
+    try {
+        await invoke('open_glass_catalogs');
+        settingsError.value = '';
+    } catch (error) {
+        settingsError.value = errorMessage(error);
+    }
+}
+/** Matches `material::MISSING_CATALOG` errors from the engine. */
+const missingCatalog = computed(() =>
+    [wb.actionError.value, wb.analysisError.value, ...wb.problems.value].some((text) =>
+        text?.includes('glass catalog, which is not installed'),
+    ),
+);
 function activate(view: Tab): void {
     tab.value = view;
     navDrawer.value = false;
@@ -569,6 +583,9 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                             ><MenubarContent class="menu-popup"
                                 ><MenubarItem @select="openSettings('agents')">{{
                                     tr('menu.agentConnections')
+                                }}</MenubarItem
+                                ><MenubarItem @select="openGlassCatalogs">{{
+                                    tr('menu.glassCatalogs')
                                 }}</MenubarItem
                                 ><MenubarItem @select="openSettings"
                                     >{{ tr('menu.settings') }}<kbd>Ctrl+,</kbd></MenubarItem
@@ -1032,6 +1049,13 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                                         class="banner error"
                                     >
                                         {{ wb.analysisError.value }}
+                                    </div>
+
+                                    <div v-if="missingCatalog" role="alert" class="banner warn">
+                                        {{ tr('banner.missingCatalog') }}
+                                        <button type="button" @click="openGlassCatalogs">
+                                            {{ tr('banner.openGlassCatalogs') }}
+                                        </button>
                                     </div>
 
                                     <ul

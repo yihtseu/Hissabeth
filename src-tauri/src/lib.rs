@@ -10,6 +10,7 @@ pub mod service;
 #[cfg(feature = "desktop")]
 mod desktop {
     use super::*;
+    use crate::service::glass_catalogs;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex, RwLock};
     use tauri::{Emitter, Manager};
@@ -40,6 +41,14 @@ mod desktop {
                     "Hissabeth — 设置"
                 } else {
                     "Hissabeth — Settings"
+                },
+            ),
+            (
+                "glass",
+                if chinese {
+                    "Hissabeth — 玻璃目录"
+                } else {
+                    "Hissabeth — Glass Catalogs"
                 },
             ),
         ] {
@@ -195,9 +204,123 @@ mod desktop {
         apply_window_preferences(&app, &snapshot.preferences);
         Ok(())
     }
+    #[tauri::command]
+    async fn glass_catalogs() -> Result<glass_catalogs::Status, String> {
+        tauri::async_runtime::spawn_blocking(|| glass_catalogs::status(&service::data_dir()))
+            .await
+            .map_err(|e| e.to_string())
+    }
+    /// Tells every window the library changed, so lists and results that name
+    /// glasses are fetched again.
+    fn glass_changed(app: &tauri::AppHandle) {
+        if let Err(error) = app.emit("glass-catalogs-changed", ()) {
+            eprintln!("Glass catalog notification: {error}");
+        }
+    }
+    #[tauri::command]
+    async fn glass_catalog_download(
+        app: tauri::AppHandle,
+        catalog: String,
+    ) -> Result<glass_catalogs::Installed, String> {
+        let vendor = glass_catalogs::vendor(&catalog)?;
+        let (bytes, url) = glass_catalogs::download(vendor).await?;
+        let installed = tauri::async_runtime::spawn_blocking(move || {
+            glass_catalogs::install(
+                &service::data_dir(),
+                vendor.catalog,
+                &bytes,
+                glass_catalogs::Origin::Download { url },
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        glass_changed(&app);
+        Ok(installed)
+    }
+    /// Installs a file the user picked in the open dialog.
+    #[tauri::command]
+    async fn glass_catalog_import(
+        app: tauri::AppHandle,
+        catalog: String,
+        path: std::path::PathBuf,
+    ) -> Result<glass_catalogs::Installed, String> {
+        let installed = tauri::async_runtime::spawn_blocking(move || {
+            let file =
+                std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut bytes = vec![];
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(file, glass_catalogs::MAX_BYTES as u64 + 1),
+                &mut bytes,
+            )
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+            if bytes.len() > glass_catalogs::MAX_BYTES {
+                return Err(format!(
+                    "{} is larger than {} MB",
+                    path.display(),
+                    glass_catalogs::MAX_BYTES >> 20
+                ));
+            }
+            let name = path
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            glass_catalogs::install(
+                &service::data_dir(),
+                &catalog,
+                &bytes,
+                glass_catalogs::Origin::File { name },
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        glass_changed(&app);
+        Ok(installed)
+    }
+    #[tauri::command]
+    async fn glass_catalog_remove(app: tauri::AppHandle, catalog: String) -> Result<(), String> {
+        tauri::async_runtime::spawn_blocking(move || {
+            glass_catalogs::remove(&service::data_dir(), &catalog)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        glass_changed(&app);
+        Ok(())
+    }
+    #[tauri::command]
+    fn glass_catalogs_dismiss() -> Result<(), String> {
+        glass_catalogs::dismiss(&service::data_dir())
+    }
+    fn show_glass_catalogs(app: &tauri::AppHandle) -> Result<(), String> {
+        if let Some(window) = app.get_webview_window("glass") {
+            window.unminimize().map_err(|e| e.to_string())?;
+            window.show().map_err(|e| e.to_string())?;
+            return window.set_focus().map_err(|e| e.to_string());
+        }
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "glass",
+            tauri::WebviewUrl::App("index.html?window=glass".into()),
+        )
+        .title("Hissabeth — Glass Catalogs")
+        .inner_size(820.0, 720.0)
+        .min_inner_size(520.0, 440.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+        let state = app.state::<Settings>();
+        let snapshot = state.snapshot.lock().map_err(|e| e.to_string())?;
+        apply_window_preferences(app, &snapshot.preferences);
+        Ok(())
+    }
+    #[tauri::command]
+    async fn open_glass_catalogs(app: tauri::AppHandle) -> Result<(), String> {
+        show_glass_catalogs(&app)
+    }
     pub fn run() {
         let dir = service::data_dir();
         std::fs::create_dir_all(&dir).expect("Create application data directory");
+        if let Err(error) = glass_catalogs::reload(&dir) {
+            eprintln!("Glass catalogs: {error}");
+        }
+        let glass_prompt = glass_catalogs::status(&dir).prompt;
         let engine = Arc::new(RwLock::new(
             service::Workspace::open(dir.join("system.json")).expect("Open application workspace"),
         ));
@@ -226,6 +349,9 @@ mod desktop {
                     snapshot: Mutex::new(snapshot),
                     store,
                 });
+                if glass_prompt && let Err(error) = show_glass_catalogs(app.handle()) {
+                    eprintln!("Glass catalog window: {error}");
+                }
                 let handle = app.handle().clone();
                 let notifier: service::ChangeNotifier = Arc::new(move |revision| {
                     if let Err(error) =
@@ -267,7 +393,13 @@ mod desktop {
                 configure_agents,
                 get_preferences,
                 set_preferences,
-                open_settings
+                open_settings,
+                glass_catalogs,
+                glass_catalog_download,
+                glass_catalog_import,
+                glass_catalog_remove,
+                glass_catalogs_dismiss,
+                open_glass_catalogs
             ])
             .build(tauri::generate_context!())
             .expect("Build Hissabeth")

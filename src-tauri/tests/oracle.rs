@@ -234,9 +234,52 @@ fn run_corpus(mut execute: impl FnMut(Value) -> Result<Value, String>) {
     assert_eq!(failed, 0, "{failed} unexpected oracle failures");
 }
 
+/// Installs the vendor catalogs that ship with the Geopter checkout into a
+/// fresh data directory, the way the Glass Catalogs window records an import,
+/// so the corpus reads the same glass data as the Geopter reference values.
+fn install_upstream_catalogs(data_dir: &Path) {
+    let source = Path::new(MANIFEST).join("../reference/upstream/data/AGF");
+    let glass = data_dir.join("glass");
+    fs::create_dir_all(&glass).unwrap();
+    let mut catalogs = Map::new();
+    for entry in
+        fs::read_dir(&source).unwrap_or_else(|error| panic!("{}: {error}", source.display()))
+    {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let Some(catalog) = name
+            .rsplit_once('.')
+            .filter(|(_, ext)| ext.eq_ignore_ascii_case("agf"))
+            .map(|(stem, _)| stem.to_uppercase())
+        else {
+            continue;
+        };
+        if hissabeth_lib::service::glass_catalogs::vendor(&catalog).is_err() {
+            continue;
+        }
+        fs::copy(&path, glass.join(format!("{catalog}.agf"))).unwrap();
+        catalogs.insert(
+            catalog,
+            json!({"origin": {"file": {"name": name}}, "installed_at": 0, "glasses": 0}),
+        );
+    }
+    assert!(
+        !catalogs.is_empty(),
+        "No vendor AGF in {}",
+        source.display()
+    );
+    fs::write(
+        glass.join("catalogs.json"),
+        json!({"dismissed": true, "catalogs": catalogs}).to_string(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn oracle_in_process() {
     let dir = tempfile::tempdir().unwrap();
+    install_upstream_catalogs(dir.path());
+    hissabeth_lib::service::glass_catalogs::reload(dir.path()).unwrap();
     let mut engine = Engine::open(dir.path().join("system.json")).unwrap();
     run_corpus(|batch| engine.call("batch", batch));
 }
@@ -245,6 +288,7 @@ fn oracle_in_process() {
 #[ignore = "run the same corpus through the headless executable"]
 fn oracle_headless() {
     let dir = tempfile::tempdir().unwrap();
+    install_upstream_catalogs(dir.path());
     let script = dir.path().join("oracle.json");
     run_corpus(|batch| {
         fs::write(&script, batch.to_string()).map_err(|error| error.to_string())?;

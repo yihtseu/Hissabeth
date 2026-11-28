@@ -635,8 +635,18 @@ mod tests {
         }
         collect(&root, &mut files);
         assert_eq!(files.len(), 10);
+        // The test glass fixture holds only what refractiveindex.info carries;
+        // these stand in for the newer OHARA glasses and the BaF₂ crystal.
+        let stand_ins = [
+            ("S-LAH98_OHARA", "S-LAH58_OHARA"),
+            ("S-LAH99_OHARA", "S-LAH58_OHARA"),
+            ("BAF2_INFRARED", "NICF-A_NIKON-HIKARI"),
+        ];
         for path in files {
-            let text = std::fs::read_to_string(&path).unwrap();
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            for (missing, stand_in) in stand_ins {
+                text = text.replace(&format!("\"{missing}\""), &format!("\"{stand_in}\""));
+            }
             let s = import(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let report = super::super::aperture::semi_diameters(&s).unwrap();
             assert!(

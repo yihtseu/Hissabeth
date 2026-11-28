@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { tr } from '../i18n';
-import { computed, onMounted, ref } from 'vue';
-import { callTool, errorMessage } from '../api';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { callTool, errorMessage, inDesktop } from '../api';
 import type { CatalogWarning, MaterialSearchResult, OpticalSystem } from '../types';
 import { selectedSurfaceIndex } from '../composables/useSurfaceSelection';
 import { fmt } from '../chart';
@@ -44,6 +46,33 @@ async function search(at = 0): Promise<void> {
     }
 }
 onMounted(() => void search());
+
+// Installing or removing a catalog changes what a search finds.
+let stopCatalogs: UnlistenFn | undefined;
+let unmounted = false;
+onMounted(async () => {
+    if (!inDesktop()) return;
+    try {
+        const stop = await listen('glass-catalogs-changed', () => void search(offset.value));
+        if (unmounted) stop();
+        else stopCatalogs = stop;
+    } catch {
+        // The list refreshes on the next search.
+    }
+});
+onBeforeUnmount(() => {
+    unmounted = true;
+    stopCatalogs?.();
+});
+const catalogsError = ref('');
+async function manageCatalogs(): Promise<void> {
+    try {
+        await invoke('open_glass_catalogs');
+        catalogsError.value = '';
+    } catch (e) {
+        catalogsError.value = errorMessage(e);
+    }
+}
 
 const lastPage = computed(() => (found.value ? offset.value + LIMIT >= found.value.total : true));
 const pageText = computed(() => {
@@ -146,7 +175,11 @@ async function evaluate(): Promise<void> {
         <div class="panel-head">
             <h3 id="mat-title">{{ tr('mats.title') }}</h3>
             <span>{{ tr('mats.subtitle') }}</span>
+            <button v-if="inDesktop()" type="button" @click="manageCatalogs">
+                {{ tr('mats.manageCatalogs') }}
+            </button>
         </div>
+        <div v-if="catalogsError" role="alert" class="banner error inset">{{ catalogsError }}</div>
 
         <form
             class="analysis-controls"

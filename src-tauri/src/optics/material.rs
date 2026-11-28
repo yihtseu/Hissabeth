@@ -2,7 +2,8 @@
 // Dispersion, air, and Buchdahl equations translated from Geopter (Hiiragi, 2021).
 use super::interval::Real;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 pub const D_LINE: f64 = 587.5618;
 pub const F_LINE: f64 = 486.1327;
@@ -230,6 +231,8 @@ pub struct CatalogWarning {
     pub message: String,
 }
 pub struct ParsedCatalog {
+    /// Upper-case catalog name every glass in it carries.
+    pub catalog: String,
     pub glasses: Vec<Glass>,
     pub warnings: Vec<CatalogWarning>,
 }
@@ -239,11 +242,23 @@ pub fn parse_agf(catalog: &str, text: &str) -> Result<ParsedCatalog, String> {
     }
     let mut glasses: Vec<Glass> = vec![];
     let mut warnings = vec![];
+    // Vendors wrap long CD and TD records: a line that starts with a number
+    // continues the record above it.
+    let mut records: Vec<(usize, Vec<&str>)> = vec![];
     for (line_no, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
+        let continues = parts
+            .first()
+            .is_some_and(|p| p.replace(['d', 'D'], "E").parse::<f64>().is_ok());
+        match records.last_mut() {
+            Some((_, record)) if continues => record.extend(parts),
+            _ if !parts.is_empty() => records.push((line_no, parts)),
+            _ => {}
         }
+    }
+    // Records of a repeated glass are dropped until the next NM.
+    let mut skipping = false;
+    for (line_no, parts) in records {
         let err = |m: &str| format!("AGF line {}: {m}", line_no + 1);
         let number = |i: usize| -> Result<f64, String> {
             let n = parts
@@ -268,8 +283,15 @@ pub fn parse_agf(catalog: &str, text: &str) -> Result<ParsedCatalog, String> {
                     return Err(err("Unknown dispersion formula"));
                 }
                 let name = parts[1].to_uppercase();
-                if glasses.iter().any(|g| g.name == name) {
-                    return Err(err("Duplicate glass name"));
+                skipping = glasses.iter().any(|g| g.name == name);
+                if skipping {
+                    warnings.push(CatalogWarning {
+                        catalog: catalog.to_uppercase(),
+                        glass: name,
+                        line: line_no + 1,
+                        message: "Repeated glass ignored; the first entry is kept".into(),
+                    });
+                    continue;
                 }
                 glasses.push(Glass {
                     name,
@@ -284,6 +306,7 @@ pub fn parse_agf(catalog: &str, text: &str) -> Result<ParsedCatalog, String> {
                     comment: String::new(),
                 });
             }
+            "CD" | "TD" | "LD" | "IT" | "GC" if skipping => {}
             "CD" | "TD" | "LD" | "IT" | "GC" => {
                 let g = glasses
                     .last_mut()
@@ -342,8 +365,13 @@ pub fn parse_agf(catalog: &str, text: &str) -> Result<ParsedCatalog, String> {
                 }
             }
             // AGF metadata records do not change the dispersion calculation.
-            "CC" | "ED" | "OD" | "LDATA" => {}
-            other => return Err(err(&format!("Unknown AGF record {other}"))),
+            "CC" | "ED" | "OD" | "MD" | "BD" | "LDATA" => {}
+            other => warnings.push(CatalogWarning {
+                catalog: catalog.to_uppercase(),
+                glass: glasses.last().map(|g| g.name.clone()).unwrap_or_default(),
+                line: line_no + 1,
+                message: format!("Unknown AGF record {other} ignored"),
+            }),
         }
     }
     if glasses.is_empty() {
@@ -352,58 +380,127 @@ pub fn parse_agf(catalog: &str, text: &str) -> Result<ParsedCatalog, String> {
     for g in &glasses {
         g.validate()?;
     }
-    Ok(ParsedCatalog { glasses, warnings })
-}
-
-fn library() -> &'static ParsedCatalog {
-    static GLASSES: OnceLock<ParsedCatalog> = OnceLock::new();
-    GLASSES.get_or_init(|| {
-        let sources = [
-            ("SCHOTT", include_str!("../../data/glass/SCHOTT.agf")),
-            ("HOYA", include_str!("../../data/glass/HOYA.agf")),
-            ("OHARA", include_str!("../../data/glass/OHARA.AGF")),
-            ("CDGM", include_str!("../../data/glass/CDGM.AGF")),
-            (
-                "NIKON-HIKARI",
-                include_str!("../../data/glass/NIKON-HIKARI.agf"),
-            ),
-            ("INFRARED", include_str!("../../data/glass/INFRARED.AGF")),
-        ];
-        let mut all = ParsedCatalog {
-            glasses: vec![],
-            warnings: vec![],
-        };
-        for (name, data) in sources {
-            let parsed = parse_agf(name, data).expect("Embedded AGF catalog must be valid");
-            all.glasses.extend(parsed.glasses);
-            all.warnings.extend(parsed.warnings);
-        }
-        all
+    Ok(ParsedCatalog {
+        catalog: catalog.to_uppercase(),
+        glasses,
+        warnings,
     })
 }
-pub fn catalogs() -> &'static [Glass] {
-    &library().glasses
+
+/// The catalogs unit tests start with, standing in for installed ones: only
+/// the glasses the tests name, with values from refractiveindex.info (CC0).
+#[cfg(test)]
+pub fn test_catalogs() -> Vec<ParsedCatalog> {
+    [
+        (
+            "SCHOTT",
+            include_str!("../../tests/fixtures/glass/SCHOTT.agf"),
+        ),
+        ("HOYA", include_str!("../../tests/fixtures/glass/HOYA.agf")),
+        (
+            "OHARA",
+            include_str!("../../tests/fixtures/glass/OHARA.agf"),
+        ),
+        (
+            "NIKON-HIKARI",
+            include_str!("../../tests/fixtures/glass/NIKON-HIKARI.agf"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, text)| parse_agf(name, text).expect("Test glass fixture must be valid"))
+    .collect()
 }
-pub fn catalog_warnings() -> &'static [CatalogWarning] {
-    &library().warnings
+
+/// The glasses `find` resolves: the catalogs installed in the data directory.
+/// The project ships no vendor data; each user installs the catalogs they use.
+pub struct Library {
+    pub glasses: Vec<Glass>,
+    pub warnings: Vec<CatalogWarning>,
+    /// Upper-case `PRODUCT_CATALOG` and bare product names; a bare name shared
+    /// by several catalogs maps to `None`.
+    lookup: HashMap<String, Option<usize>>,
 }
-pub fn find(name: &str) -> Result<&'static Glass, String> {
-    static LOOKUP: OnceLock<std::collections::HashMap<String, Option<usize>>> = OnceLock::new();
-    let map = LOOKUP.get_or_init(|| {
-        let mut map = std::collections::HashMap::new();
-        for (i, g) in catalogs().iter().enumerate() {
-            map.insert(g.key(), Some(i));
-            map.entry(g.name.clone())
+impl Library {
+    pub fn build(installed: &[ParsedCatalog]) -> Library {
+        let mut glasses = vec![];
+        let mut warnings = vec![];
+        for catalog in installed {
+            glasses.extend(catalog.glasses.iter().cloned());
+            warnings.extend(catalog.warnings.iter().cloned());
+        }
+        let mut lookup = HashMap::new();
+        for (i, g) in glasses.iter().enumerate() {
+            lookup.insert(g.key(), Some(i));
+            lookup
+                .entry(g.name.clone())
                 .and_modify(|v| *v = None)
                 .or_insert(Some(i));
         }
-        map
-    });
-    match map.get(&name.to_uppercase()) {
-        Some(Some(i)) => Ok(&catalogs()[*i]),
-        Some(None) => Err(format!("Ambiguous material {name}; use PRODUCT_CATALOG")),
-        None => Err(format!("Unknown material: {name}")),
+        Library {
+            glasses,
+            warnings,
+            lookup,
+        }
     }
+    pub fn find(&self, name: &str) -> Result<&Glass, String> {
+        match self.lookup.get(&name.to_uppercase()) {
+            Some(Some(i)) => Ok(&self.glasses[*i]),
+            Some(None) => Err(format!("Ambiguous material {name}; use PRODUCT_CATALOG")),
+            None => Err(self.missing(name)),
+        }
+    }
+    /// Why `name` does not resolve. A `PRODUCT_CATALOG` name whose catalog
+    /// has no glass loaded names the catalog to install.
+    fn missing(&self, name: &str) -> String {
+        if let Some((glass, catalog)) = name.rsplit_once('_')
+            && !glass.is_empty()
+            && !catalog.is_empty()
+            && !self.has_catalog(catalog)
+        {
+            let catalog = catalog.to_uppercase();
+            return format!("{glass} is in the {catalog} glass catalog, {MISSING_CATALOG}");
+        }
+        format!("Unknown material: {name}")
+    }
+    /// Whether any loaded glass belongs to this catalog.
+    pub fn has_catalog(&self, catalog: &str) -> bool {
+        self.glasses
+            .iter()
+            .any(|g| g.catalog.eq_ignore_ascii_case(catalog))
+    }
+}
+
+/// Ends the error for a glass whose catalog is not installed; the desktop
+/// app recognises it and offers to open the glass catalog window.
+pub const MISSING_CATALOG: &str = "which is not installed";
+
+static LIBRARY: RwLock<Option<Arc<Library>>> = RwLock::new(None);
+
+/// The current glass library. A caller holding it keeps a consistent view
+/// while catalogs are installed or removed.
+pub fn library() -> Arc<Library> {
+    if let Some(library) = LIBRARY.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return library.clone();
+    }
+    LIBRARY
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| {
+            #[cfg(test)]
+            let installed = test_catalogs();
+            #[cfg(not(test))]
+            let installed: Vec<ParsedCatalog> = vec![];
+            Arc::new(Library::build(&installed))
+        })
+        .clone()
+}
+/// Replaces the library with these installed catalogs.
+pub fn set_installed(installed: &[ParsedCatalog]) {
+    let library = Arc::new(Library::build(installed));
+    *LIBRARY.write().unwrap_or_else(|e| e.into_inner()) = Some(library);
+}
+pub fn find(name: &str) -> Result<Glass, String> {
+    library().find(name).cloned()
 }
 pub fn buchdahl(nd: f64, vd: f64, nm: f64) -> Result<f64, String> {
     buchdahl_real(nd, vd, nm)
@@ -472,14 +569,40 @@ pub fn refractive_index_real<T: Real>(
             nm / 1000.,
         );
     }
-    find(name)?.index_real(nm, environment)
+    library().find(name)?.index_real(nm, environment)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn all_catalogs_parse() {
-        assert_eq!(catalogs().len(), 1508);
+    fn tests_load_only_the_fixture() {
+        let library = library();
+        assert_eq!(library.glasses.len(), 38);
+        assert!(library.warnings.is_empty(), "{:?}", library.warnings);
+        assert!(!library.has_catalog("CDGM"));
+    }
+    #[test]
+    fn missing_catalog_is_named() {
+        let schott = test_catalogs().into_iter().find(|c| c.catalog == "SCHOTT");
+        let library = Library::build(&[schott.unwrap()]);
+        assert_eq!(library.find("n-sf6_schott").unwrap().name, "N-SF6");
+        assert_eq!(library.find("N-SF6").unwrap().catalog, "SCHOTT");
+        assert_eq!(
+            library.find("S-BSL7_OHARA").unwrap_err(),
+            "S-BSL7 is in the OHARA glass catalog, which is not installed"
+        );
+        assert_eq!(
+            library.find("N-FK5_SCHOTT").unwrap_err(),
+            "Unknown material: N-FK5_SCHOTT"
+        );
+        let empty = Library::build(&[]);
+        assert_eq!(empty.find("N-BK7").unwrap_err(), "Unknown material: N-BK7");
+        assert!(
+            empty
+                .find("N-BK7_SCHOTT")
+                .unwrap_err()
+                .ends_with(MISSING_CATALOG)
+        );
     }
     #[test]
     fn bk7_matches_datasheet() {
@@ -489,14 +612,13 @@ mod tests {
     }
     #[test]
     fn hikari_matches_catalog_index() {
-        let mut worst: f64 = 0.;
-        let mut count = 0;
-        for g in catalogs().iter().filter(|g| g.formula == 13) {
-            worst = worst.max((g.index(D_LINE, None).unwrap() - g.nd).abs());
-            count += 1;
-        }
-        assert_eq!(count, 173);
-        assert!(worst < 2e-5, "Hikari maximum index error {worst}");
+        // J-BK7A from refractiveindex.info (CC0), in Hikari's nine-term form.
+        let text = "NM J-BK7A 13 517642 1.5168 64.13 0 1\n\
+            CD 2.27110883 -0.00938988354 -0.000100277081 0.0109572221 \
+            0.000120210067 3.31079774e-06 -1.48235581e-08 0 0\nLD 0.365 2.058\n";
+        let g = &parse_agf("NIKON-HIKARI", text).unwrap().glasses[0];
+        let error = (g.index(D_LINE, None).unwrap() - g.nd).abs();
+        assert!(error < 2e-5, "Hikari index error {error}");
     }
     #[test]
     fn buchdahl_preserves_nd_and_vd() {
@@ -512,6 +634,22 @@ mod tests {
         assert!(parse_agf("BAD", "CD 1 2 3").is_err());
         assert!(parse_agf("BAD", "NM A 2 0 1.5 60\nCD x").is_err());
         assert!(parse_agf("BAD", "NM A 99 0 1.5 60").is_err());
+        assert!(parse_agf("BAD", "hello world\nE").is_err());
+    }
+
+    #[test]
+    fn vendor_layouts_parse() {
+        let text = "CC x\nNM A 2 0 1.5168 64.17 0 1\nMD 82 0.21 580 820 1.19\nBD note\n\
+            CD 1.03961212 0.231792344 1.01046945\n0.00600069867 0.0200179144 103.560653\n\
+            TD 1 2\n3 4 5 6 7\nLD 0.3 2.5\nE\nNM A 2 0 1.6 50\nCD 9\n";
+        let parsed = parse_agf("V", text).unwrap();
+        let g = &parsed.glasses[0];
+        assert_eq!(g.coefficients.len(), 6);
+        assert!(g.thermal.is_some());
+        assert_eq!(parsed.glasses.len(), 1);
+        assert_eq!(g.nd, 1.5168);
+        let lines: Vec<_> = parsed.warnings.iter().map(|w| w.line).collect();
+        assert_eq!(lines, [10, 11]);
     }
     #[test]
     fn air_pressure_and_thermal() {

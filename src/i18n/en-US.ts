@@ -352,6 +352,7 @@ export default {
         configQuick: 'Active configuration',
     },
     menu: {
+        glassCatalogs: 'Glass catalogs…',
         file: 'File',
         edit: 'Edit',
         view: 'View',
@@ -399,6 +400,9 @@ export default {
         'Agent connections': 'Agent connections',
     },
     banner: {
+        missingCatalog:
+            'A glass this design uses is in a vendor catalog that is not installed. Vendor catalogs are not bundled with Hissabeth.',
+        openGlassCatalogs: 'Open glass catalogs',
         offline:
             'Engine offline — {reason}. Retrying automatically; analysis results are cleared until the engine responds.',
         offlineNoReason: 'no response from the optical engine',
@@ -1302,6 +1306,7 @@ export default {
         hint: 'Advanced view of the same draft as the Prescription tab. Valid edits update the draft; apply them with “Apply changes”.',
     },
     mats: {
+        manageCatalogs: 'Glass catalogs…',
         title: 'Material catalogs',
         subtitle: 'Glasses are addressed as NAME_CATALOG',
         searchLabel: 'Search glasses',
@@ -1507,6 +1512,51 @@ export default {
         colColumn: 'Column',
         colMessage: 'Message',
         canonicalText: 'Canonical report text',
+    },
+    glass: {
+        title: 'Glass catalogs',
+        subtitle: 'Fetched from each vendor by this computer',
+        loadFailed: 'Could not read the installed catalogs: {message}',
+        manifestFailed:
+            'The catalog record could not be read, so installed catalogs are not loaded: {message}',
+        noticeTitle: 'Before you download',
+        noticeOwnership:
+            'Each glass catalog belongs to the vendor that publishes it. Hissabeth does not include, redistribute or license this data.',
+        noticeDirect:
+            'Downloads go straight from this computer to the vendor’s own site; no third party is involved.',
+        noticeTerms:
+            'Read each vendor’s terms before downloading; you are responsible for using the data as they allow.',
+        acknowledge:
+            'I understand that the catalogs belong to their vendors and that I am downloading them under the vendors’ terms.',
+        acknowledgeFirst: 'Acknowledge the notice above to download',
+        stateInstalled: '{n} glasses · installed {date}',
+        stateMissing: 'Not installed',
+        stateBroken: 'Could not load',
+        fromFile: 'From file {name}',
+        fromSite: 'Downloaded from {host}',
+        terms: 'Vendor terms',
+        noTerms: 'The vendor states no terms for this data',
+        download: 'Download',
+        redownload: 'Download again',
+        downloading: 'Downloading…',
+        downloadAll: 'Download all missing ({n})',
+        downloadingAll: 'Downloading {name} ({index}/{total})…',
+        nothingPending: 'Every catalog with a direct link is installed.',
+        allDone: 'Installed {n} catalogs.',
+        allSomeFailed:
+            '{done} installed, {failed} failed. For a failed vendor, open its download page and import the file you get there.',
+        openPage: 'Open download page',
+        import: 'Import local AGF…',
+        importing: 'Importing…',
+        importFilter: 'AGF catalog or zip',
+        remove: 'Remove',
+        noDirectLink:
+            'This vendor offers no stable direct link: download the file from its page, then import it here.',
+        installedNote: 'Installed {n} glasses with {warnings} warnings.',
+        warnings: '{n} parse warnings',
+        warningLine: 'line {line} · {glass}: {message}',
+        openFailed: 'Could not open {url}: {message}',
+        skip: 'Skip for now',
     },
     settings: {
         title: 'Settings',

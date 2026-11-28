@@ -1836,6 +1836,8 @@ mod spectral_tests {
             reference_wavelength: 0,
             ..Default::default()
         };
+        // Catalog N-BK7 has a wavelength range; the default model glass has none.
+        s.surfaces[0].material = "N-BK7_SCHOTT".into();
         s.update().unwrap();
         let a =
             diffraction_mtf(&s, &s.fields[0], Spectrum::Polychromatic {}, 16, Some(50.)).unwrap();

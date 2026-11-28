@@ -10,10 +10,13 @@ async function boot(): Promise<void> {
     const preferences = usePreferencesStore(pinia);
     await preferences.init();
     i18n.global.locale.value = preferences.preferences.locale;
+    const view = new URLSearchParams(location.search).get('window');
     const component =
-        new URLSearchParams(location.search).get('window') === 'settings'
+        view === 'settings'
             ? (await import('./SettingsApp.vue')).default
-            : (await import('./App.vue')).default;
+            : view === 'glass'
+              ? (await import('./GlassCatalogsApp.vue')).default
+              : (await import('./App.vue')).default;
     createApp(component).use(pinia).use(i18n).mount('#app');
 }
 void boot();

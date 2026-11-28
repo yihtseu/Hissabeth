@@ -515,7 +515,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 materials_list,
                 Read,
                 None,
-                "List qualified product_catalog keys for built-in and project glass catalogs"
+                "List qualified product_catalog keys for installed vendor and project glass catalogs"
+            ),
+            tool!(
+                catalog_list,
+                Read,
+                None,
+                "Report each vendor glass catalog with its install status, page and direct link. Vendor catalogs are not bundled; the user installs them in the desktop Glass Catalogs window. This engine cannot download them; catalog_import adds AGF text to the project instead"
             ),
             tool!(
                 material_search,

@@ -1392,7 +1392,9 @@ mod tests {
     }
     #[test]
     fn spectral_failure_is_local_to_cells_and_retains_reference_dispersion() {
-        let s = System::default();
+        let mut s = System::default();
+        // Catalog N-BK7 has a wavelength range; the default model glass has none.
+        s.surfaces[0].material = "N-BK7_SCHOTT".into();
         let r = generate(
             &s,
             0,

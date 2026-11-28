@@ -4719,7 +4719,7 @@ mod tests {
         let (system, mut bench) = group_scene();
         bench.sources[0].position = [50., 200., 75.];
         let n = system
-            .material_index("N-BK7_SCHOTT", bench.sources[0].wavelength)
+            .material_index(&system.surfaces[0].material, bench.sources[0].wavelength)
             .unwrap();
         let r = ((n - 1.) / (n + 1.)).powi(2);
         bench.elements[0].ghosts = 1;

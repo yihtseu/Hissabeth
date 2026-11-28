@@ -152,6 +152,9 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     let unlistenWorkspace: UnlistenFn | undefined;
     let polling = false;
     let materialsLoaded = false;
+    /** Bumped when glass catalogs are installed or removed, so analyses use the new data. */
+    const catalogEpoch = ref(0);
+    let unlistenCatalogs: (() => void) | undefined;
     /** Serialized draft captured when a request starts; the poll may adopt over the draft only while it still matches. */
     let pendingDraftText: string | null = null;
     let paraxialToken = 0;
@@ -794,16 +797,29 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
     }
 
     const hasSystem = computed(() => system.value !== null);
-    watch([revision, wavelengthIndex, hasSystem, online, recovery], () => void analyzeParaxial());
-    watch([revision, hasSystem, online, recovery], () => void analyzeLayout());
     watch(
-        [revision, fieldIndex, wavelengthIndex, hasSystem, spotSampling, online, recovery],
+        [revision, catalogEpoch, wavelengthIndex, hasSystem, online, recovery],
+        () => void analyzeParaxial(),
+    );
+    watch([revision, catalogEpoch, hasSystem, online, recovery], () => void analyzeLayout());
+    watch(
+        [
+            revision,
+            catalogEpoch,
+            fieldIndex,
+            wavelengthIndex,
+            hasSystem,
+            spotSampling,
+            online,
+            recovery,
+        ],
         () => void analyzeSpot(),
     );
     // The wavelength only matters in monochromatic mode, so weighted results are not discarded when it changes.
     watch(
         [
             revision,
+            catalogEpoch,
             fieldIndex,
             () => (mtfSpectralMode.value === 'mono' ? wavelengthIndex.value : -1),
             hasSystem,
@@ -830,6 +846,15 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         } catch {
             // Event listener optional outside Tauri runtime; polling fallback remains active.
         }
+        try {
+            unlistenCatalogs = await listen('glass-catalogs-changed', () => {
+                materialsLoaded = false;
+                catalogEpoch.value++;
+                void loadMaterials();
+            });
+        } catch {
+            // Without the event, new catalogs show up after the next system change.
+        }
         await poll();
         timer = setInterval(() => void poll(), preferences.preferences.analysis.pollIntervalMs);
     });
@@ -846,6 +871,7 @@ export function useWorkbench(wantMtf: Ref<boolean>) {
         if (timer !== undefined) clearInterval(timer);
         if (liveSyncTimer !== undefined) clearTimeout(liveSyncTimer);
         unlistenWorkspace?.();
+        unlistenCatalogs?.();
     });
 
     return {

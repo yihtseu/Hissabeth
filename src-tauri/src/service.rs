@@ -14,6 +14,7 @@ mod artifacts;
 mod batch;
 mod broker;
 mod commands;
+pub mod glass_catalogs;
 mod history;
 mod params;
 pub mod registry;
@@ -1190,7 +1191,7 @@ mod tests {
             scale: 0.1,
             offset: 0.,
         };
-        let mut glass = material::catalogs()[0].clone();
+        let mut glass = material::library().glasses[0].clone();
         glass.catalog = "LOCAL".into();
         glass.name = "PriorGlass".into();
         old.custom_glasses = vec![glass];
