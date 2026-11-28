@@ -18,6 +18,7 @@ import type {
     BenchPathBreak,
     BenchReadoutReading,
     BenchStage,
+    BenchValueBasis,
     Vec3,
 } from '../bench';
 
@@ -206,6 +207,23 @@ const fmt = (n: number | null | undefined, digits = 2) =>
 const reading = (n: number) => Number(n.toPrecision(10)).toString();
 const interruption = ({ element, port, reason }: BenchPathBreak) =>
     `${element} / ${port} (${reason})`;
+/** The value's basis, its assumptions and omissions, in one line. */
+const basisText = (basis: BenchValueBasis) =>
+    [
+        tr(`benchLab.readings.basisKind.${basis.kind}`),
+        ...(basis.assumptions ?? []).map((a) =>
+            tr(`benchLab.readings.assumption.${a.code}`, {
+                elements: (a.elements ?? []).join(', '),
+            }).trim(),
+        ),
+        ...(basis.omitted ?? []).map((o) => tr(`benchLab.readings.omission.${o.code}`)),
+    ].join(' · ');
+const statusBadge = {
+    pass: 'badge-ok',
+    indeterminate: 'badge-warn',
+    fail: 'badge-bad',
+    unreachable: 'badge-bad',
+} as const;
 </script>
 
 <template>
@@ -446,16 +464,18 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                             v-for="result in labCheck.assertions"
                             :key="result.assertion"
                             :data-assertion="result.assertion"
-                            :class="{ 'failed-assertion': result.status !== 'pass' }"
+                            :data-status="result.status"
+                            :class="{
+                                'failed-assertion':
+                                    result.status === 'fail' || result.status === 'unreachable',
+                                'undecided-assertion': result.status === 'indeterminate',
+                            }"
                         >
                             <b>{{ result.assertion }}</b>
                             <span class="note">{{
                                 tr(`benchLab.readings.kind.${result.kind}`)
                             }}</span>
-                            <span
-                                class="badge"
-                                :class="result.status === 'pass' ? 'badge-ok' : 'badge-bad'"
-                            >
+                            <span class="badge" :class="statusBadge[result.status]">
                                 {{ tr(`benchLab.readings.status.${result.status}`) }}
                             </span>
                             <span class="note">{{ result.branches.join(' / ') }}</span>
@@ -494,6 +514,17 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                                     })
                                 }}
                             </small>
+                            <small
+                                v-if="result.basis && result.status !== 'unreachable'"
+                                class="assertion-detail"
+                                data-basis
+                                :title="result.basis.omitted?.map((o) => o.detail).join('\n')"
+                                >{{
+                                    tr('benchLab.readings.basis', {
+                                        basis: basisText(result.basis),
+                                    })
+                                }}</small
+                            >
                             <span v-if="result.break" class="assertion-detail">
                                 {{
                                     tr('benchLab.readings.interrupted', {
@@ -573,6 +604,16 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                                         values: (check.deviations_mm ?? [])
                                             .map((v) => reading(v))
                                             .join(' / '),
+                                    })
+                                }}</span
+                            >
+                            <span
+                                v-if="relay.checks.find((c) => c.basis)?.basis"
+                                class="note"
+                                data-basis
+                                >{{
+                                    tr('benchLab.readings.basis', {
+                                        basis: basisText(relay.checks.find((c) => c.basis)!.basis!),
                                     })
                                 }}</span
                             >
@@ -1122,6 +1163,9 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
 }
 .lab-readings .failed-assertion {
     border-color: var(--danger);
+}
+.lab-readings .undecided-assertion {
+    border-color: var(--warning);
 }
 .assertion-detail {
     flex-basis: 100%;

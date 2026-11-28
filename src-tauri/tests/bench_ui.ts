@@ -16,6 +16,8 @@ await mkdir(workspace,{recursive:true});
 const calls: any[]=[];const errors: string[]=[];let engine!: import('node:child_process').ChildProcess;let browser!: import('@playwright/test').Browser;let id=0;
 let holdNextTrace=false;let releaseTrace: ((v?: unknown) => void) | undefined;let held=false;
 let holdNextLab = false;
+/** Rewrites the next lab check's delay_opl as an undecided lower bound, to see the panel render it. */
+let undecideNextLab = false;
 let releaseLab: (() => void) | undefined;
 async function start(){
     await unlink(resolve(workspace,'endpoint.json')).catch(()=>{});
@@ -70,6 +72,11 @@ try {
                 holdNextLab = false;
                 await new Promise<void>(resolve => { releaseLab = resolve; });
                 releaseLab = undefined;
+            }
+            if (args.name === 'bench_lab_check' && undecideNextLab) {
+                undecideNextLab = false;
+                const opl = result.assertions.find((a: any) => a.assertion === 'delay_opl');
+                Object.assign(opl, { status: 'indeterminate', basis: { kind: 'lower_bound', assumptions: [{ code: 'thin_lens', elements: ['L9'] }] } });
             }
             return result;
         }
@@ -166,6 +173,15 @@ try {
         await expect(oplAssertion.locator('.badge')).toHaveText('Fail');
         await expect(lab.locator('[data-assertion="combiner_angle"]')).toContainText(/Δr .* mm · Δθ .* mrad/);
         await expect(lab.locator('[data-assertion="combiner_angle"] .badge')).toHaveText('Pass');
+        // An assertion its value's basis cannot decide is amber, with the basis spelled out.
+        undecideNextLab = true;
+        await lab.getByRole('button', { name: 'Refresh', exact: true }).click();
+        await expect(oplAssertion.locator('.badge')).toHaveText('Indeterminate');
+        await expect(oplAssertion.locator('.badge')).toHaveClass(/badge-warn/);
+        await expect(oplAssertion).toHaveClass(/undecided-assertion/);
+        await expect(oplAssertion.locator('[data-basis]')).toHaveText('Basis: lower bound · thin lenses L9');
+        await lab.getByRole('button', { name: 'Refresh', exact: true }).click();
+        await expect(oplAssertion.locator('.badge')).toHaveText('Fail');
 
         const downloaded = page.waitForEvent('download');
         await page.getByRole('button', { name: 'Export', exact: true }).click();

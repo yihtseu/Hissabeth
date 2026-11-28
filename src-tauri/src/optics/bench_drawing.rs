@@ -215,7 +215,7 @@ pub(crate) struct LegendEntry {
 pub(crate) struct AssertionMark {
     pub id: String,
     pub passed: bool,
-    /// Status word and measured value.
+    /// Status word: pass, fail, indeterminate or unreachable.
     pub text: String,
     /// The element where the assertion is evaluated.
     pub element: Option<String>,
@@ -747,7 +747,11 @@ pub(crate) fn drawing(bench: &Bench, trace: &Trace, assertions: Vec<AssertionMar
     }
     for a in &assertions {
         if let Some(at) = a.element.as_deref().and_then(position) {
-            let mark = if a.passed { "✓" } else { "✗" };
+            let mark = match (a.passed, a.text.as_str()) {
+                (true, _) => "✓",
+                (false, "indeterminate") => "?",
+                _ => "✗",
+            };
             placer.place("assertion", &a.id, format!("{mark} {}", a.id), xy(at), 4.);
         }
     }

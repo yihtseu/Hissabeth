@@ -590,6 +590,17 @@ export interface BenchLabIssue {
     branch?: string | null;
     message: string;
 }
+/** What a reported value is: the model's exact value, a bound the real value
+ * cannot cross (lower_bound: at least this; upper_bound: at most this), or an
+ * estimate. Absent on a result, it is a model value with no stated assumption. */
+export interface BenchValueBasis {
+    kind: 'model' | 'lower_bound' | 'upper_bound' | 'estimate';
+    assumptions?: {
+        code: 'thin_splitter' | 'thin_lens' | 'thin_plate' | 'paraxial';
+        elements?: string[];
+    }[];
+    omitted?: { code: 'band_enclosure'; detail: string }[];
+}
 export interface BenchAssertionResult {
     assertion: string;
     kind: BenchAssertion['kind'];
@@ -601,7 +612,9 @@ export interface BenchAssertionResult {
     target: number;
     tolerance: number;
     residual: number | null;
-    status: 'pass' | 'fail' | 'unreachable';
+    /** indeterminate: the value's basis can neither prove nor refute the target. */
+    status: 'pass' | 'fail' | 'indeterminate' | 'unreachable';
+    basis?: BenchValueBasis;
     break?: BenchPathBreak;
 }
 export interface BenchParity {
@@ -637,6 +650,7 @@ export interface BenchRelayReading {
         residual: number | null;
         passed: boolean;
         deviations_mm?: [number, number, number];
+        basis?: BenchValueBasis;
         break?: BenchPathBreak;
     }[];
     break?: BenchPathBreak;

@@ -5,6 +5,7 @@ use super::super::{
     bench::{Bench, BranchPath, BranchReport, Kind, PathBreak, Port, Relay, RelayCheckKind, Trace, cross},
     math::{Matrix, V3, dot, scale, sub, unit},
 };
+use super::{AssumptionCode, Basis};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -199,6 +200,10 @@ pub(crate) struct RelayCheckResult {
     /// strict_4f: object→first − f1, first→second − (f1 + f2), second→image − f2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deviations_mm: Option<[f64; 3]>,
+    /// Basis of `value`: paraxial, with thin lenses' principal planes at
+    /// their element planes. Absent when there is no value.
+    #[serde(default, skip_serializing_if = "Basis::is_plain")]
+    pub basis: Basis,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     pub interruption: Option<PathBreak>,
 }
@@ -366,6 +371,7 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
                         residual: None,
                         passed: false,
                         deviations_mm: None,
+                        basis: Basis::default(),
                         interruption: Some(interruption.clone()),
                     })
                     .collect(),
@@ -378,6 +384,15 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
         Ok((stop, target, z)) => (Some(stop), Some(target), z, None),
         Err(detail) => (None, None, None, Some(PathBreak::new(&relay.branch, "", "pupil_undefined").with_detail(detail))),
     };
+    let mut basis = Basis::default();
+    basis.assume(AssumptionCode::Paraxial, vec![]);
+    basis.assume(
+        AssumptionCode::ThinLens,
+        u.powered.iter()
+            .filter(|p| bench.elements.iter().any(|e| e.id == p.element && e.kind == Kind::Lens))
+            .map(|p| p.element.clone())
+            .collect(),
+    );
     let checks = relay
         .checks
         .iter()
@@ -404,6 +419,7 @@ fn reading(bench: &Bench, system: &System, trace: &Trace, relay: &Relay, report:
                 residual,
                 passed: residual.is_some_and(|r| r.abs() <= check.tolerance),
                 deviations_mm: deviations,
+                basis: if value.is_some() { basis.clone() } else { Basis::default() },
                 interruption,
             }
         })

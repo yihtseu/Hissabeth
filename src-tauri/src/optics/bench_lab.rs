@@ -1658,11 +1658,14 @@ struct PathReading {
     interruption: Option<PathBreak>,
 }
 
-#[derive(schemars::JsonSchema, Serialize)]
+#[derive(schemars::JsonSchema, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 enum AssertionStatus {
     Pass,
     Fail,
+    /// The value's basis cannot prove the target either way: an estimate, or a
+    /// bound on the side the tolerance leaves open.
+    Indeterminate,
     Unreachable,
 }
 
@@ -1671,9 +1674,201 @@ impl AssertionStatus {
         match self {
             Self::Pass => "pass",
             Self::Fail => "fail",
+            Self::Indeterminate => "indeterminate",
             Self::Unreachable => "unreachable",
         }
     }
+
+    /// The verdict on `residual` (value − target) for a value of this basis.
+    /// A lower bound can only prove the value too large, an upper bound only
+    /// too small; an estimate proves nothing.
+    fn judge(residual: f64, tolerance: f64, kind: BasisKind) -> Self {
+        match kind {
+            BasisKind::Model if residual.abs() <= tolerance => Self::Pass,
+            BasisKind::Model => Self::Fail,
+            BasisKind::LowerBound if residual > tolerance => Self::Fail,
+            BasisKind::UpperBound if residual < -tolerance => Self::Fail,
+            _ => Self::Indeterminate,
+        }
+    }
+}
+
+/// What a reported value is: the exact value of the model (`model`), a bound
+/// the real value cannot cross, or an `estimate`. A value reported without a
+/// basis is a model value.
+#[derive(schemars::JsonSchema, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BasisKind {
+    #[default]
+    Model,
+    /// The real value is at least the reported one.
+    LowerBound,
+    /// The real value is at most the reported one.
+    UpperBound,
+    Estimate,
+}
+
+#[derive(schemars::JsonSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AssumptionCode {
+    /// A splitter or PBS without a substrate is a zero-thickness surface
+    /// (a pellicle): no glass, no lateral shift.
+    ThinSplitter,
+    /// A thin lens carries power with no thickness: the glass a real lens puts
+    /// on the path is left out.
+    ThinLens,
+    /// A waveplate or polarizer without a substrate has no thickness: the
+    /// crystal or film a real one puts on the path is left out.
+    ThinPlate,
+    /// Paraxial ray-transfer matrices, with each thin element's principal
+    /// planes at the element plane.
+    Paraxial,
+}
+
+#[derive(schemars::JsonSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OmissionCode {
+    /// The band search sampled the largest deviation it reports but could not
+    /// close the enclosure of the maximum within its budget.
+    BandEnclosure,
+}
+
+#[derive(schemars::JsonSchema, Serialize, Clone, Debug, PartialEq)]
+pub(crate) struct Assumption {
+    pub code: AssumptionCode,
+    /// Elements the assumption applies to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<String>,
+}
+
+#[derive(schemars::JsonSchema, Serialize, Clone, Debug, PartialEq)]
+pub(crate) struct Omission {
+    pub code: OmissionCode,
+    pub detail: String,
+}
+
+/// The basis of a reported value and the assumptions or omissions behind it.
+#[derive(schemars::JsonSchema, Serialize, Clone, Debug, Default, PartialEq)]
+pub(crate) struct Basis {
+    pub kind: BasisKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<Assumption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted: Vec<Omission>,
+}
+
+impl Basis {
+    pub(crate) fn is_plain(&self) -> bool {
+        self.kind == BasisKind::Model && self.assumptions.is_empty() && self.omitted.is_empty()
+    }
+
+    fn assume(&mut self, code: AssumptionCode, elements: Vec<String>) {
+        if !elements.is_empty() || code == AssumptionCode::Paraxial {
+            self.assumptions.push(Assumption { code, elements });
+        }
+    }
+
+    /// One line for drawings and issues, e.g. "lower bound · thin_lens L1".
+    fn summary(&self) -> String {
+        let kind = match self.kind {
+            BasisKind::Model => "model",
+            BasisKind::LowerBound => "lower bound",
+            BasisKind::UpperBound => "upper bound",
+            BasisKind::Estimate => "estimate",
+        };
+        let mut parts = vec![kind.to_string()];
+        for a in &self.assumptions {
+            let code = serde_json::to_value(a.code).unwrap();
+            let code = code.as_str().unwrap_or_default();
+            parts.push(if a.elements.is_empty() { code.to_string() } else { format!("{code} {}", a.elements.join(", ")) });
+        }
+        for o in &self.omitted {
+            let code = serde_json::to_value(o.code).unwrap();
+            parts.push(format!("omits {}", code.as_str().unwrap_or_default()));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Thin elements an arm crosses. Its ports list each element it meets as a
+/// run of input and output ports; the final run, the endpoint input where the
+/// comparison is made, is not crossed.
+struct ThinCrossings {
+    /// Splitters without a substrate, crossed by transmission.
+    splitters: Vec<String>,
+    /// Thin lenses and substrate-less waveplates and polarizers: glass a real
+    /// element would add to this arm.
+    lenses: Vec<String>,
+    plates: Vec<String>,
+}
+
+fn thin_crossings(bench: &Bench, path: &BranchPath) -> ThinCrossings {
+    let mut crossings = ThinCrossings { splitters: vec![], lenses: vec![], plates: vec![] };
+    let mut runs: Vec<&[Port]> = path.ports.chunk_by(|a, b| a.element == b.element).collect();
+    if path.interruption.is_none() {
+        runs.pop();
+    }
+    for run in runs {
+        let Some(e) = bench.elements.iter().find(|e| e.id == run[0].element) else { continue };
+        if e.substrate.is_some() {
+            continue;
+        }
+        match e.kind {
+            Kind::Splitter | Kind::Pbs if run.iter().any(|p| p.port == "transmitted") => crossings.splitters.push(e.id.clone()),
+            Kind::Lens => crossings.lenses.push(e.id.clone()),
+            Kind::Waveplate | Kind::Polarizer => crossings.plates.push(e.id.clone()),
+            _ => {}
+        }
+    }
+    crossings
+}
+
+/// Removes the elements both lists hold (one crossing each), so what is left
+/// is the glass one arm has and the other lacks.
+fn unmatched(a: &[String], b: &[String]) -> [Vec<String>; 2] {
+    let mut rest = b.to_vec();
+    let mut only_a = Vec::new();
+    for id in a {
+        match rest.iter().position(|r| r == id) {
+            Some(i) => {
+                rest.remove(i);
+            }
+            None => only_a.push(id.clone()),
+        }
+    }
+    [only_a, rest]
+}
+
+fn sorted_unique(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The basis of a two-arm comparison, first arm minus second. Glass a thin
+/// element leaves out only ever lengthens its arm's optical path, so omitted
+/// glass on one arm bounds the difference from that side; on both arms it
+/// leaves an estimate. `bounded` is false for quantities whose sign the
+/// omitted glass does not fix (dispersion): any omission is an estimate.
+fn comparison_basis(bench: &Bench, paths: [&BranchPath; 2], bounded: bool) -> Basis {
+    let [a, b] = paths.map(|path| thin_crossings(bench, path));
+    let thick = |c: &ThinCrossings| [c.lenses.clone(), c.plates.clone()].concat();
+    let [only_a, only_b] = unmatched(&thick(&a), &thick(&b));
+    let kind = match (only_a.is_empty(), only_b.is_empty()) {
+        (true, true) => BasisKind::Model,
+        _ if !bounded => BasisKind::Estimate,
+        (false, true) => BasisKind::LowerBound,
+        (true, false) => BasisKind::UpperBound,
+        (false, false) => BasisKind::Estimate,
+    };
+    let unmatched_of = |ids: &[String]| -> Vec<String> {
+        sorted_unique(ids.iter().filter(|id| only_a.contains(id) || only_b.contains(id)).cloned().collect())
+    };
+    let mut basis = Basis { kind, ..Basis::default() };
+    basis.assume(AssumptionCode::ThinSplitter, sorted_unique([a.splitters.clone(), b.splitters.clone()].concat()));
+    basis.assume(AssumptionCode::ThinLens, unmatched_of(&[a.lenses, b.lenses].concat()));
+    basis.assume(AssumptionCode::ThinPlate, unmatched_of(&[a.plates, b.plates].concat()));
+    basis
 }
 
 #[derive(schemars::JsonSchema, Serialize)]
@@ -1689,6 +1884,9 @@ struct AssertionResult {
     tolerance: f64,
     residual: Option<f64>,
     status: AssertionStatus,
+    /// Basis of `value`; absent for a model value with no stated assumption.
+    #[serde(default, skip_serializing_if = "Basis::is_plain")]
+    basis: Basis,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     interruption: Option<PathBreak>,
 }
@@ -1718,7 +1916,7 @@ struct DispersionValue {
     difference: f64,
     /// Band wavelength where the difference deviates most from the target.
     wavelength_nm: f64,
-    /// Upper estimate of max |Δ − target| over the band, in the assertion unit.
+    /// Rigorous upper bound of max |Δ − target| over the band, in the assertion unit.
     deviation_bound: f64,
     /// Substrate glass on the first and second branch.
     glass: [Vec<GlassPass>; 2],
@@ -1839,9 +2037,10 @@ fn dispersion_delta<T: Real>(
 /// largest bound of such an unsplittable cell, and evaluations are capped at 200 000. The reported Δ is the
 /// best sample and `deviation_bound` the largest bound left, so the assertion passes
 /// only if every wavelength in the band is within tolerance. If the model cannot be
-/// enclosed somewhere (a pole or domain edge inside a cell), or the search ends with
-/// the best sample within tolerance but the bound outside it, the assertion is
-/// unresolved instead of guessed.
+/// enclosed somewhere (a pole or domain edge inside a cell) the assertion is
+/// unresolved; if the search ends with the best sample within tolerance but the
+/// bound outside it, the sample is a lower bound of the band maximum and the
+/// assertion is indeterminate (a `band_enclosure` omission), not guessed.
 fn dispersion(
     system: &System,
     assertion: &Assertion,
@@ -1933,10 +2132,12 @@ fn dispersion(
     }
     let deviation_bound = heap.peek().map_or(0., |top| top.upper).max(settled).max(deviation(worst.0));
     let (difference, wavelength_nm) = worst;
-    let tolerance = assertion.tolerance;
-    if !deviation_bound.is_finite() || (deviation(difference) <= tolerance && deviation_bound > tolerance) {
+    // A bound the enclosure could not close below the tolerance leaves the
+    // assertion indeterminate (see check_assertions); only a non-finite one
+    // means there is no value at all.
+    if !deviation_bound.is_finite() {
         return Err(PathBreak::new(&at.element, &at.port, "dispersion_unresolved").with_detail(format!(
-            "largest sampled deviation {} at {wavelength_nm} nm, but the enclosure only bounds it by {deviation_bound}",
+            "largest sampled deviation {} at {wavelength_nm} nm, but the enclosure is unbounded",
             deviation(difference)
         )));
     }
@@ -1953,8 +2154,31 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
     let branches: HashMap<_, _> = bench.branches.iter().map(|branch| (branch.id.as_str(), branch)).collect();
     bench.assertions.iter().map(|a| {
         let [first, second] = a.branches.each_ref().map(|id| branches[id.as_str()]);
-        let compared = reached(reports[first.id.as_str()], &first.from).and_then(|pa| {
-            let pb = reached(reports[second.id.as_str()], &second.from)?;
+        let paths = reached(reports[first.id.as_str()], &first.from)
+            .and_then(|pa| Ok([pa, reached(reports[second.id.as_str()], &second.from)?]));
+        let mut basis = match (&paths, a.kind) {
+            (Ok(paths), AssertionKind::EqualOpl) => comparison_basis(bench, *paths, true),
+            (Ok(paths), AssertionKind::Dispersion) => comparison_basis(bench, *paths, false),
+            (Ok(paths), AssertionKind::Colinear) => {
+                let mut basis = comparison_basis(bench, *paths, true);
+                // A thin element's missing glass shifts no axis: colinearity is
+                // a model value under the thin-splitter assumption alone. Unlike
+                // the OPL, it is measured on the combiner's outputs, so a thin
+                // combiner is assumed too.
+                basis.kind = BasisKind::Model;
+                basis.assumptions.retain(|a| a.code == AssumptionCode::ThinSplitter);
+                let combiner = bench.elements.iter().find(|e| e.id == second.to.element);
+                if let Some(e) = combiner.filter(|e| matches!(e.kind, Kind::Splitter | Kind::Pbs) && e.substrate.is_none()) {
+                    match basis.assumptions.first_mut() {
+                        Some(thin) => thin.elements = sorted_unique([thin.elements.clone(), vec![e.id.clone()]].concat()),
+                        None => basis.assume(AssumptionCode::ThinSplitter, vec![e.id.clone()]),
+                    }
+                }
+                basis
+            }
+            _ => Basis::default(),
+        };
+        let compared = paths.clone().and_then(|[pa, pb]| {
             match a.kind {
                 AssertionKind::EqualOpl => equal_opl(pa, pb, &first.from).map(AssertionValue::Opl),
                 AssertionKind::Colinear => colinear(trace, bench, [first, second], [pa, pb])
@@ -1982,14 +2206,30 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
             AssertionValue::Rotation(_) => AssertionValue::Rotation(value.in_unit(a.unit)),
             _ => value.clone(),
         });
-        let bound = match measured {
-            Some(AssertionValue::Dispersion(value)) => value.deviation_bound,
-            _ => 0.,
-        };
-        let status = match residual {
-            Some(residual) if residual.abs() <= a.tolerance && bound <= a.tolerance => AssertionStatus::Pass,
-            Some(_) => AssertionStatus::Fail,
-            None => AssertionStatus::Unreachable,
+        let status = match (residual, measured) {
+            (None, _) => AssertionStatus::Unreachable,
+            // The band maximum of |Δ − target| lies between the largest sampled
+            // deviation and the enclosure's bound.
+            (Some(residual), Some(AssertionValue::Dispersion(value))) => {
+                if basis.kind == BasisKind::Estimate {
+                    AssertionStatus::Indeterminate
+                } else if residual.abs() > a.tolerance {
+                    AssertionStatus::Fail
+                } else if value.deviation_bound <= a.tolerance {
+                    AssertionStatus::Pass
+                } else {
+                    basis.kind = BasisKind::LowerBound;
+                    basis.omitted.push(Omission {
+                        code: OmissionCode::BandEnclosure,
+                        detail: format!(
+                            "largest sampled deviation {} at {} nm; the enclosure bounds the band maximum by {}",
+                            residual.abs(), value.wavelength_nm, value.deviation_bound
+                        ),
+                    });
+                    AssertionStatus::Indeterminate
+                }
+            }
+            (Some(residual), _) => AssertionStatus::judge(residual, a.tolerance, basis.kind),
         };
         AssertionResult {
             assertion: a.id.clone(),
@@ -2002,6 +2242,7 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
             tolerance: a.tolerance,
             residual,
             status,
+            basis,
             interruption: compared.err(),
         }
     }).collect()
@@ -2038,13 +2279,20 @@ fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
 impl LabCheck {
     pub(crate) fn require_pass(&self) -> Result<(), String> {
         if self.passed {
-            Ok(())
-        } else {
-            Err(format!(
-                "Bench lab check failed with {} errors and {} pending inputs",
-                self.counts.errors, self.pending
-            ))
+            return Ok(());
         }
+        let undecided: Vec<String> = self.readings.assertions.iter()
+            .filter(|a| a.status == AssertionStatus::Indeterminate)
+            .map(|a| format!("{} ({})", a.assertion, a.basis.summary()))
+            .collect();
+        let mut message = format!(
+            "Bench lab check failed with {} errors and {} pending inputs",
+            self.counts.errors, self.pending
+        );
+        if !undecided.is_empty() {
+            message += &format!("; {} indeterminate assertions: {}", undecided.len(), undecided.join("; "));
+        }
+        Err(message)
     }
 }
 
@@ -2248,8 +2496,16 @@ fn lab_report(
     }
     let readings = lab_readings(bench, system, trace);
     for result in &readings.assertions {
+        if result.status == AssertionStatus::Indeterminate {
+            let residual = result.residual.map_or_else(String::new, |r| format!("residual {r} "));
+            issues.push(issue("warning", "assertion_indeterminate", Some(result.at.element.as_str()), None, format!(
+                "{}: {residual}cannot prove the target {} ±{} ({})",
+                result.assertion, result.target, result.tolerance, result.basis.summary()
+            )));
+            continue;
+        }
         let (code, target, message) = match result.status {
-            AssertionStatus::Pass => continue,
+            AssertionStatus::Pass | AssertionStatus::Indeterminate => continue,
             AssertionStatus::Fail => ("assertion_failed", Some(result.at.element.as_str()), format!("{}: residual {} exceeds tolerance {}", result.assertion, result.residual.unwrap(), result.tolerance)),
             AssertionStatus::Unreachable => {
                 let location = result.interruption.as_ref().unwrap();
@@ -2289,8 +2545,10 @@ fn lab_report(
     let readiness_score = 100u32.saturating_sub(20 * errors + 7 * warnings);
     Ok(LabCheck {
         readiness_score,
-        // A placeholder awaiting the user's value keeps the bench from passing.
-        passed: errors == 0 && bench.pending.is_empty(),
+        // A placeholder awaiting the user's value, or an assertion its value's
+        // basis cannot decide, keeps the bench from passing.
+        passed: errors == 0 && bench.pending.is_empty()
+            && readings.assertions.iter().all(|a| a.status != AssertionStatus::Indeterminate),
         pending: bench.pending.len() as u32,
         counts: IssueCounts {
             errors,
@@ -2607,6 +2865,9 @@ fn reading_cards(readings: &LabReadings) -> Vec<drawing::Card> {
         if let Some(residual) = result.residual {
             lines.push(format!("Residual {} {unit}", reading_number(residual)));
         }
+        if !result.basis.is_plain() {
+            lines.push(format!("Basis {}", result.basis.summary()));
+        }
         lines.push(match &result.interruption {
             Some(at) => interruption_text(at),
             None => format!("{} / {}", result.at.element, result.at.port),
@@ -2616,6 +2877,7 @@ fn reading_cards(readings: &LabReadings) -> Vec<drawing::Card> {
             id: result.assertion.clone(),
             color: match result.status {
                 AssertionStatus::Pass => "#26734d",
+                AssertionStatus::Indeterminate => INDETERMINATE_COLOR,
                 _ => "#b42318",
             }.into(),
             lines,
@@ -2623,6 +2885,9 @@ fn reading_cards(readings: &LabReadings) -> Vec<drawing::Card> {
     });
     stages.chain(branches).chain(assertions).collect()
 }
+
+/// Amber for an undecided assertion, apart from the pass green and fail red.
+const INDETERMINATE_COLOR: &str = "#b54708";
 
 fn assertion_marks(readings: &LabReadings) -> Vec<drawing::AssertionMark> {
     readings.assertions.iter().map(|result| drawing::AssertionMark {
@@ -2861,6 +3126,7 @@ fn svg(
         let fill = match label.kind {
             "annotation" => r##" fill="#7a4b00" font-style="italic""##,
             "assertion" if plan.assertions.iter().any(|a| a.id == label.target && a.passed) => r##" fill="#26734d""##,
+            "assertion" if plan.assertions.iter().any(|a| a.id == label.target && a.text == "indeterminate") => r##" fill="#b54708""##,
             "assertion" => r##" fill="#b42318""##,
             "zone" | "stage" => r##" fill="#486581""##,
             _ => "",
@@ -3775,6 +4041,101 @@ mod tests {
         assert_eq!(check["passed"], false);
     }
 
+    #[test]
+    fn thin_lens_glass_bounds_the_opl_difference_and_bounds_decide_one_side_only() {
+        let system = System::default();
+        let base = template("mach_zehnder").unwrap();
+        let check = |bench: &Bench, target: f64| {
+            let mut b = bench.clone();
+            b.assertions = vec![Assertion { target, ..base.assertions[0].clone() }];
+            lab_check(&b, &system).unwrap()
+        };
+        let lens = |id: &str, at: V3, normal: V3| {
+            let mut e = mount_element(id, LENS, at, normal);
+            e.focal_length = 1e5;
+            e
+        };
+        let in_a = || lens("LA", [250., 300., 75.], [0., 1., 0.]);
+        let in_b = || lens("LB", [350., 200., 75.], [1., 0., 0.]);
+        // Thin splitters are pellicles: a model value under that assumption.
+        let plain = check(&base, 0.);
+        assert_eq!(plain["assertions"][0]["status"], "pass");
+        assert_eq!(plain["assertions"][0]["basis"], json!({"kind": "model", "assumptions": [{"code": "thin_splitter", "elements": ["BS1"]}]}));
+        assert_eq!(plain["passed"], true);
+        // Colinearity is read on the combiner's outputs, so the thin combiner
+        // is assumed as well; a thin lens in one arm changes nothing.
+        let colinear = Assertion { kind: AssertionKind::Colinear, unit: AssertionUnit::Mrad, ..base.assertions[0].clone() };
+        for bench in [base.clone(), mach_zehnder_with(in_a(), None)] {
+            let mut b = bench;
+            b.assertions = vec![colinear.clone()];
+            assert_eq!(lab_check(&b, &system).unwrap()["assertions"][0]["basis"], json!({"kind": "model", "assumptions": [{"code": "thin_splitter", "elements": ["BS1", "BS2"]}]}));
+        }
+        // A thin lens leaves out glass only arm A has, so A − B is a lower bound:
+        // it can prove the difference too large, never within the tolerance.
+        let a = mach_zehnder_with(in_a(), None);
+        let undecided = check(&a, 0.);
+        let result = &undecided["assertions"][0];
+        assert_eq!(result["status"], "indeterminate");
+        assert_eq!(result["basis"]["kind"], "lower_bound");
+        assert_eq!(result["basis"]["assumptions"][1], json!({"code": "thin_lens", "elements": ["LA"]}));
+        assert_eq!(undecided["passed"], false);
+        let warning = undecided["issues"].as_array().unwrap().iter()
+            .find(|i| i["code"] == "assertion_indeterminate").unwrap();
+        assert_eq!((&warning["severity"], &warning["element_id"]), (&json!("warning"), &json!("BS2")));
+        assert!(warning["message"].as_str().unwrap().contains("lower bound · thin_splitter BS1 · thin_lens LA"));
+        let refused = super::check(&{ let mut x = a.clone(); x.assertions = base.assertions.clone(); x }, &system)
+            .unwrap().require_pass().unwrap_err();
+        assert!(refused.ends_with("0 errors and 0 pending inputs; 1 indeterminate assertions: equal_arms (lower bound · thin_splitter BS1 · thin_lens LA)"), "{refused}");
+        assert_eq!(check(&a, -1.)["assertions"][0]["status"], "fail");
+        assert_eq!(check(&a, 1.)["assertions"][0]["status"], "indeterminate");
+        // In arm B the same glass makes A − B an upper bound.
+        let b = mach_zehnder_with(mount_element("PA", MASK, [250., 300., 75.], [0., 1., 0.]), Some(in_b()));
+        assert_eq!(check(&b, 0.)["assertions"][0]["basis"]["kind"], "upper_bound");
+        assert_eq!(check(&b, 1.)["assertions"][0]["status"], "fail");
+        assert_eq!(check(&b, -1.)["assertions"][0]["status"], "indeterminate");
+        // Glass left out of both arms bounds nothing.
+        let both = mach_zehnder_with(in_a(), Some(in_b()));
+        assert_eq!(check(&both, -1.)["assertions"][0]["basis"]["kind"], "estimate");
+        assert_eq!(check(&both, -1.)["assertions"][0]["status"], "indeterminate");
+        // Omitted glass of unknown dispersion leaves only an estimate: the zero
+        // the model computes for the lens arm proves nothing.
+        let mut dispersive = a.clone();
+        dispersive.assertions = vec![Assertion {
+            id: "phase".into(),
+            kind: AssertionKind::Dispersion,
+            branches: ["arm_a".into(), "arm_b".into()],
+            target: 0.,
+            unit: AssertionUnit::Rad,
+            tolerance: 1.,
+            band_nm: Some([520., 540.]),
+            quantity: Some(DispersionQuantity::Phase),
+        }];
+        let estimate = &lab_check(&dispersive, &system).unwrap()["assertions"][0];
+        assert_eq!((&estimate["status"], &estimate["basis"]["kind"]), (&json!("indeterminate"), &json!("estimate")), "{estimate}");
+        // A thin waveplate leaves its crystal out the same way; given a
+        // substrate it carries the glass and the value is a model value again.
+        let plate = || mount_element("WA", HWP, [250., 300., 75.], [0., 1., 0.]);
+        let thin = check(&mach_zehnder_with(plate(), None), 0.);
+        assert_eq!(thin["assertions"][0]["basis"]["kind"], "lower_bound");
+        assert_eq!(thin["assertions"][0]["basis"]["assumptions"][1], json!({"code": "thin_plate", "elements": ["WA"]}));
+        let mut thick = plate();
+        thick.substrate = Some(bench::Substrate { material: "N-BK7_SCHOTT".into(), thickness_mm: 3., wedge_deg: None, coated_face: None });
+        let modelled = check(&mach_zehnder_with(thick, None), 0.);
+        assert_eq!(modelled["assertions"][0]["basis"]["kind"], "model");
+        assert_eq!(modelled["assertions"][0]["basis"]["assumptions"].as_array().unwrap().len(), 1);
+        // The drawing shows the undecided assertion in amber with its basis.
+        let mut drawn = a.clone();
+        drawn.assertions = base.assertions.clone();
+        let svg = export_blueprint_report(&drawn, &system, "svg", None).unwrap().content;
+        let card = svg.split_once(r#"data-kind="assertion" data-id="equal_arms""#).unwrap().1.split_once("</g>").unwrap().0;
+        assert!(card.contains(r##"fill="#b54708""##), "{card}");
+        assert!(card.contains("ΔOPL · equal_arms · indeterminate"));
+        assert!(card.contains("Basis lower bound · thin_splitter BS1 · thin_lens LA"));
+        let plan = blueprint_drawing(&drawn, &system, 4.).unwrap();
+        let mark = plan.labels.iter().find(|l| l.kind == "assertion").unwrap();
+        assert_eq!(mark.text, "? equal_arms");
+    }
+
     /// Independent N-BK7 Sellmeier index and dn/dλ (λ in µm, Schott datasheet).
     fn bk7(um: f64) -> (f64, f64) {
         const B: [f64; 3] = [1.039_612_12, 0.231_792_344, 1.010_469_45];
@@ -4241,6 +4602,8 @@ mod tests {
         let trace = bench.trace(&system).unwrap();
         let [result] = check_assertions(&bench, &system, &trace).try_into().ok().unwrap();
         assert!(matches!(result.status, AssertionStatus::Pass), "{:?} {:?}", result.residual, result.interruption);
+        // The combiner's glass is modelled: nothing is assumed thin.
+        assert!(result.basis.is_plain(), "{:?}", result.basis);
     }
 
     #[test]
@@ -4352,6 +4715,19 @@ mod tests {
         assert!(matches!(result.status, AssertionStatus::Fail), "{} {:?}", result.status.as_str(), result.residual);
         let Some(AssertionValue::Dispersion(value)) = &result.value else { panic!() };
         assert!(value.deviation_bound >= peak, "{} vs {peak}", value.deviation_bound);
+        // A tolerance between the largest sampled deviation and the enclosure's
+        // bound: the samples cannot fail it, the bound cannot pass it.
+        let tolerance = (value.difference.abs() + value.deviation_bound) / 2.;
+        assert!(tolerance > value.difference.abs() && tolerance < value.deviation_bound);
+        bench.assertions[0].tolerance = tolerance;
+        let check = lab_check(&bench, &system).unwrap();
+        let undecided = &check["assertions"][0];
+        assert_eq!(undecided["status"], "indeterminate");
+        assert_eq!(undecided["basis"]["kind"], "lower_bound");
+        assert_eq!(undecided["basis"]["omitted"][0]["code"], "band_enclosure");
+        assert!(undecided.get("break").is_none());
+        assert_eq!(check["passed"], false);
+        assert!(check["issues"].as_array().unwrap().iter().any(|i| i["code"] == "assertion_indeterminate" && i["severity"] == "warning"));
         assert!(value.difference.abs() >= peak * (1. - 1e-6), "{} vs {peak}", value.difference);
         assert!((value.wavelength_nm - at).abs() < 1e-4, "{} vs {at}", value.wavelength_nm);
     }
@@ -5079,6 +5455,8 @@ mod tests {
         assert_eq!(reading["powered"].as_array().unwrap().len(), 1);
         assert!((reading["powered"][0]["focal_mm"].as_f64().unwrap() + 1. / group_matrix.c).abs() < 1e-9);
         assert_eq!(reading["checks"][0]["break"]["reason"], "strict_4f_needs_two_thin_elements");
+        // No value, so no basis.
+        assert!(reading["checks"][0].get("basis").is_none(), "{reading}");
     }
 
     #[test]
@@ -5116,6 +5494,12 @@ mod tests {
             assert!((value - expected).abs() < 1e-12, "{abcd:?}");
         }
         assert!(reading["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true), "{reading}");
+        // Every value is paraxial with the thin lenses' principal planes at
+        // their element planes.
+        assert!(reading["checks"].as_array().unwrap().iter().all(|c| c["basis"] == json!({
+            "kind": "model",
+            "assumptions": [{"code": "paraxial"}, {"code": "thin_lens", "elements": ["L1", "L2"]}],
+        })), "{reading}");
         // L1's plane images 600 mm past L2 (1/v = 1/200 − 1/300), 400 mm past D.
         assert!((reading["pupil_image_mm"].as_f64().unwrap() - 400.).abs() < 1e-9);
         assert!(!lab["issues"].as_array().unwrap().iter().any(|i| i["code"] == "relay_check"));

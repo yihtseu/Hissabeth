@@ -842,11 +842,14 @@ const planLabels = computed(() => {
             Math.min(Math.max(label.anchor[0], label.corner[0]), label.corner[0] + label.size[0]),
             Math.min(Math.max(label.anchor[1], label.corner[1]), label.corner[1] + label.size[1]),
         ];
+        const mark = d.assertions.find((a) => a.id === label.target);
         const tone =
             label.kind === 'assertion'
-                ? d.assertions.some((a) => a.id === label.target && a.passed)
+                ? mark?.passed
                     ? 'pass'
-                    : 'fail'
+                    : mark?.text === 'indeterminate'
+                      ? 'indeterminate'
+                      : 'fail'
                 : label.kind;
         return {
             kind: label.kind,
@@ -2686,6 +2689,9 @@ defineExpose({ saveBench, discardBench, locate });
 }
 .plan-labels text.fail {
     fill: var(--danger);
+}
+.plan-labels text.indeterminate {
+    fill: #b54708;
 }
 .plan-labels text.zone,
 .plan-labels text.stage {

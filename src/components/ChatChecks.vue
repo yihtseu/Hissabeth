@@ -36,6 +36,7 @@ const origin = computed(() => {
                 tr('chat.checksSummary', {
                     pass: checks.assertions.pass,
                     fail: checks.assertions.fail,
+                    indeterminate: checks.assertions.indeterminate ?? 0,
                     unreachable: checks.assertions.unreachable,
                     errors: checks.errors,
                     warnings: checks.warnings,

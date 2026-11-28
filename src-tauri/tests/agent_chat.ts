@@ -201,32 +201,37 @@ test('large drawings are stored, not inlined, and lab checks become an assertion
         assertions: [
             { assertion: 'equal_arms', kind: 'opl_difference', branches: ['arm_a', 'arm_b'], at: { element: 'bs2', port: 'in' }, unit: 'mm', target: 0, tolerance: 0.01, residual: 0.42, status: 'fail' },
             { assertion: 'combiner_angle', kind: 'angle', branches: ['arm_a', 'arm_b'], at: { element: 'bs2', port: 'in' }, unit: 'mrad', target: 0, tolerance: 1, residual: null, status: 'unreachable', break: { element: 'm3', port: 'in', reason: 'clipped', detail: 'outside clear aperture' } },
+            { assertion: 'lens_arms', kind: 'equal_opl', branches: ['arm_a', 'arm_b'], at: { element: 'bs2', port: 'in' }, unit: 'mm', target: 0, tolerance: 0.01, residual: 0, status: 'indeterminate', basis: { kind: 'lower_bound', assumptions: [{ code: 'thin_lens', elements: ['l1'] }] } },
             { assertion: 'parity', kind: 'parity', branches: ['arm_a', 'arm_a'], at: { element: 'cam', port: 'in' }, unit: 'count', target: 0, tolerance: 0, residual: 0, status: 'pass' },
         ],
         branches: [{ id: 'arm_b', stage_ids: [], color: '#000', paths: [], break: { element: 'm3', port: 'in', reason: 'clipped' } }, { id: 'arm_a', stage_ids: [], color: '#111', paths: [] }],
         issues: [
             { severity: 'error', code: 'assertion_failed', element_id: 'bs2', branch: null, message: 'equal_arms: residual 0.42 exceeds tolerance 0.01' },
+            { severity: 'warning', code: 'assertion_indeterminate', element_id: 'bs2', branch: null, message: 'lens_arms: cannot prove the target' },
             { severity: 'warning', code: 'mount_collision', element_id: 'm1', branch: null, message: 'm1 collides with m2' },
             { severity: 'error', code: 'clear_aperture', element_id: 'm3', branch: 'arm_b', message: '3ω beam exceeds the clear aperture of m3' },
             { severity: 'info', code: 'note', element_id: null, branch: null, message: 'ignored' },
         ],
     };
     const checks = checksOf({ content: [{ type: 'text', text: JSON.stringify(report) }] })!;
-    assert.deepEqual({ ...checks, items: undefined }, { passed: false, readiness: 60, assertions: { pass: 1, fail: 1, unreachable: 1 }, errors: 3, warnings: 1, items: undefined, more: 0, revision: 7, saved: false });
+    assert.deepEqual({ ...checks, items: undefined }, { passed: false, readiness: 60, assertions: { pass: 1, fail: 1, indeterminate: 1, unreachable: 1 }, errors: 3, warnings: 1, items: undefined, more: 0, revision: 7, saved: false });
     assert.deepEqual(checks.items.map(item => [item.kind, item.label, item.severity, item.element, item.branch]), [
         ['assertion', 'equal_arms', 'error', 'bs2', 'arm_a'],
         ['assertion', 'combiner_angle', 'error', 'm3', 'arm_a'],
         ['branch', 'arm_b', 'error', 'm3', 'arm_b'],
         ['issue', 'clear_aperture', 'error', 'm3', 'arm_b'],
+        ['assertion', 'lens_arms', 'warning', 'bs2', 'arm_a'],
         ['issue', 'mount_collision', 'warning', 'm1', undefined],
     ]);
     assert.match(checks.items[0]!.detail, /residual 0\.42 mm, tolerance ±0\.01/);
     assert.match(checks.items[1]!.detail, /m3:in clipped \(outside clear aperture\)/);
+    // An undecided assertion is a warning naming its basis; its issue is not repeated.
+    assert.match(checks.items[4]!.detail, /indeterminate: lower bound, residual 0 mm/);
     // Long failure lists are cut to CHECK_ITEMS with a count of the rest.
     const many = { ...report, issues: Array.from({ length: 40 }, (_, i) => ({ severity: 'error', code: 'c' + i, element_id: 'e', branch: null, message: 'm' })) };
     const cut = checksOf(JSON.stringify(many))!;
     assert.equal(cut.items.length, CHECK_ITEMS);
-    assert.equal(cut.more, 43 - CHECK_ITEMS);
+    assert.equal(cut.more, 44 - CHECK_ITEMS);
     // Other tool results carry no summary.
     assert.equal(checksOf(JSON.stringify({ revision: 1, assertions: [] })), undefined);
 });

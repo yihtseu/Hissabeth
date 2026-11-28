@@ -115,7 +115,7 @@ export default {
         checksPassed: 'Lab check passed',
         checksFailed: 'Lab check failed',
         checksSummary:
-            'Assertions: {pass} passed, {fail} failed, {unreachable} unreachable · {errors} errors, {warnings} warnings · readiness {readiness}',
+            'Assertions: {pass} passed, {fail} failed, {indeterminate} indeterminate, {unreachable} unreachable · {errors} errors, {warnings} warnings · readiness {readiness}',
         checksLocate: 'Locate {name} on bench',
         checksMore: '{count} more in the raw result',
         figureOmitted:
@@ -2234,7 +2234,26 @@ export default {
             relay: 'Relay {id} ({branch})',
             pupilImage: 'Pupil {stop} images {value} mm past {target}',
             deviations: 'Spacing deviations {values} mm',
-            status: { pass: 'Pass', fail: 'Fail', unreachable: 'Unreachable' },
+            status: {
+                pass: 'Pass',
+                fail: 'Fail',
+                indeterminate: 'Indeterminate',
+                unreachable: 'Unreachable',
+            },
+            basis: 'Basis: {basis}',
+            basisKind: {
+                model: 'model value',
+                lower_bound: 'lower bound',
+                upper_bound: 'upper bound',
+                estimate: 'estimate',
+            },
+            assumption: {
+                thin_splitter: 'thin splitters {elements}',
+                thin_lens: 'thin lenses {elements}',
+                thin_plate: 'thin plates {elements}',
+                paraxial: 'paraxial',
+            },
+            omission: { band_enclosure: 'band maximum not enclosed' },
             residual: 'Residual {value} {unit}',
             limit: 'Target {target} {unit} · tolerance ±{tolerance} {unit}',
             interrupted: 'Interrupted at {location}',

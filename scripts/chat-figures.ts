@@ -36,7 +36,8 @@ export interface ChatFigure {
     saved?: boolean;
 }
 
-/** One failed assertion, interrupted branch or lab issue, with where to find it. */
+/** One failed or undecided assertion, interrupted branch or lab issue, with
+ * where to find it. */
 export interface ChatCheckItem {
     kind: 'assertion' | 'branch' | 'issue';
     label: string;
@@ -50,7 +51,7 @@ export interface ChatCheckItem {
 export interface ChatChecks {
     passed: boolean;
     readiness: number;
-    assertions: { pass: number; fail: number; unreachable: number };
+    assertions: { pass: number; fail: number; indeterminate: number; unreachable: number };
     errors: number;
     warnings: number;
     items: ChatCheckItem[];
@@ -206,6 +207,7 @@ interface LabReport {
         target?: unknown;
         tolerance?: unknown;
         residual?: unknown;
+        basis?: { kind?: unknown };
     }[];
     branches?: { id: string; break?: Located }[];
     issues?: {
@@ -232,7 +234,7 @@ export function checksOf(result: unknown): ChatChecks | undefined {
         | undefined;
     if (!report) return undefined;
     const items: ChatCheckItem[] = [];
-    const assertions = { pass: 0, fail: 0, unreachable: 0 };
+    const assertions = { pass: 0, fail: 0, indeterminate: 0, unreachable: 0 };
     for (const a of report.assertions) {
         if (a.status === 'pass') {
             assertions.pass++;
@@ -248,6 +250,18 @@ export function checksOf(result: unknown): ChatChecks | undefined {
                 label: String(a.assertion),
                 detail: `${a.kind} · ${pair} · ${stop ? stopped(stop) : 'unreachable'}`,
                 element: stop?.element ?? a.at?.element,
+                branch: a.branches?.[0],
+            });
+        } else if (a.status === 'indeterminate') {
+            // The value's basis (a bound or an estimate) cannot decide the target.
+            assertions.indeterminate++;
+            const basis = String(a.basis?.kind ?? 'estimate').replace('_', ' ');
+            items.push({
+                kind: 'assertion',
+                severity: 'warning',
+                label: String(a.assertion),
+                detail: `${a.kind} · ${pair} · indeterminate: ${basis}, residual ${a.residual} ${a.unit}, tolerance ±${a.tolerance} (target ${a.target})`,
+                element: a.at?.element,
                 branch: a.branches?.[0],
             });
         } else {

@@ -52,7 +52,8 @@ export interface ChatCheckItem {
 export interface ChatChecks {
     passed: boolean;
     readiness: number;
-    assertions: { pass: number; fail: number; unreachable: number };
+    /** indeterminate is absent from summaries saved before it was counted. */
+    assertions: { pass: number; fail: number; indeterminate?: number; unreachable: number };
     errors: number;
     warnings: number;
     items: ChatCheckItem[];
