@@ -447,6 +447,14 @@ pub struct Flight {
     pub phase_rad: f64,
 }
 
+impl Flight {
+    /// Optical path equivalent of the phase-plate phase, φ·λ/2π (mm). A plate's
+    /// phase scales as 1/λ, so this is a dispersion-free delay.
+    pub(crate) fn plate_opl_mm(&self) -> f64 {
+        self.phase_rad * self.wavelength_nm * 1e-6 / std::f64::consts::TAU
+    }
+}
+
 fn is_zero(value: &f64) -> bool {
     *value == 0.
 }
@@ -530,8 +538,9 @@ pub struct BranchPath {
     /// Incoming segment at the split, shared by sibling arms. Null at a source output.
     pub start_segment: Option<usize>,
     pub length_mm: f64,
+    /// Flight OPL plus the optical path equivalent of phase plates (φ·λ/2π).
     pub opl_mm: f64,
-    /// 2π·OPL/λ plus phase-plate phases along the path (radians).
+    /// 2π·OPL/λ along the path, phase plates included (radians).
     pub phase_rad: f64,
     /// Substrate glass crossed along the path, in order.
     pub glass: Vec<GlassPass>,
@@ -878,7 +887,7 @@ impl BranchPath {
             let flight = segments[at].flight.as_ref().unwrap();
             self.segment_indices.push(at);
             self.length_mm += flight.length_mm;
-            self.opl_mm += flight.opl_mm;
+            self.opl_mm += flight.opl_mm + flight.plate_opl_mm();
             self.phase_rad += std::f64::consts::TAU * flight.opl_mm / (flight.wavelength_nm * 1e-6)
                 + flight.phase_rad;
             if segments[at].status == "substrate" {

@@ -298,7 +298,8 @@ struct Unfolded {
 /// Unfolds the branch into a straight paraxial system. Each element's power is
 /// applied once, when the path reaches it (start and end elements included); flights inside a lens group are
 /// replaced by the prescription matrix, and substrate passes count their
-/// reduced thickness.
+/// reduced thickness. A lens with a substrate applies its power where the
+/// light leaves its glass, as the trace does.
 fn unfold(
     bench: &Bench,
     system: &System,
@@ -342,23 +343,27 @@ fn unfold(
         Ok(())
     };
     total.transfer(relay.object_distance_mm, 1.);
-    let mut previous: Option<&str> = None;
+    // Keyed by element and whether the flight is inside a lens's glass, so a
+    // thick lens arrives on leaving its substrate.
+    let mut previous: Option<(&str, bool)> = None;
     for &index in &path.segment_indices {
         let flight = trace.segments[index]
             .flight
             .as_ref()
             .ok_or("segment without flight")?;
-        let group = bench
-            .elements
-            .iter()
-            .any(|e| e.id == flight.from_element && e.kind == Kind::LensGroup);
-        if group && flight.to_element == flight.from_element {
+        let from = bench.elements.iter().find(|e| e.id == flight.from_element);
+        if from.is_some_and(|e| e.kind == Kind::LensGroup)
+            && flight.to_element == flight.from_element
+        {
             continue;
         }
-        if previous != Some(flight.from_element.as_str()) {
+        let in_lens = trace.segments[index].status == "substrate"
+            && from.is_some_and(|e| e.kind == Kind::Lens);
+        let key = (flight.from_element.as_str(), in_lens);
+        if !in_lens && previous != Some(key) {
             arrive(&flight.from_element, &mut total, &mut gap)?;
         }
-        previous = Some(&flight.from_element);
+        previous = Some(key);
         total.transfer(flight.length_mm, flight.index);
         gap += flight.length_mm / flight.index;
     }
@@ -367,6 +372,36 @@ fn unfold(
             .flight
             .as_ref()
             .ok_or("segment without flight")?;
+        // An end lens with a substrate is crossed as glass before its power.
+        if bench
+            .elements
+            .iter()
+            .any(|e| e.id == flight.to_element && e.kind == Kind::Lens && e.substrate.is_some())
+        {
+            let mut at = last;
+            let mut crossed = false;
+            while let Some(glass) = trace.segments.iter().position(|s| {
+                s.status == "substrate"
+                    && s.flight.as_ref().is_some_and(|f| {
+                        f.previous_segment == Some(at) && f.from_element == flight.to_element
+                    })
+            }) {
+                let f = trace.segments[glass]
+                    .flight
+                    .as_ref()
+                    .ok_or("segment without flight")?;
+                total.transfer(f.length_mm, f.index);
+                gap += f.length_mm / f.index;
+                at = glass;
+                crossed = true;
+            }
+            if !crossed {
+                return Err(format!(
+                    "the branch's end lens {} passes no light through its substrate",
+                    flight.to_element
+                ));
+            }
+        }
         arrive(&flight.to_element, &mut total, &mut gap)?;
     }
     total.transfer(relay.image_distance_mm, 1.);

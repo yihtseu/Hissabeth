@@ -37,9 +37,10 @@
 use super::super::{
     System,
     bench::{
-        Action, Bench, BranchPath, Element, FieldProfile, Kind, Port, Source, Trace, local, rotate,
+        self, Action, Bench, BranchPath, Element, FieldProfile, Kind, Port, Source, Trace, cross,
+        local, rotate, slab_faces,
     },
-    math::{V3, add, dot, scale, sub, unit},
+    math::{V3, add, dot, norm, scale, sub, unit},
 };
 use super::relay::{Frame, frames_along};
 use serde::Serialize;
@@ -324,6 +325,22 @@ struct Event<'a> {
     incoming: Frame,
     /// Index of the medium before the element.
     index: f64,
+    /// Normal of the surface the field is sampled on, when it is not the
+    /// element plane (a lens's wedged glass exit face).
+    surface: Option<V3>,
+    /// Only the clear aperture acts (a lens's glass entry face; its power is
+    /// applied at the exit).
+    clip_only: bool,
+}
+
+/// The slab face of a lens substrate nearest `at`: the face the light crossed there.
+fn lens_face(e: &Element, at: V3) -> Option<bench::SlabFace> {
+    let faces = slab_faces(e, e.substrate.as_ref()?);
+    faces.into_iter().min_by(|x, y| {
+        dot(sub(at, x.point), x.normal)
+            .abs()
+            .total_cmp(&dot(sub(at, y.point), y.normal).abs())
+    })
 }
 
 #[derive(Clone)]
@@ -523,13 +540,36 @@ fn transpose(m: M2) -> M2 {
 /// Anamorphic step of a refraction from index `n1` along `d1` to `n2` along
 /// `d2`: the tangential axis in the outgoing basis and the stretch
 /// cos θt / cos θi. Snell's law in vector form gives the normal ∥ n2·d2 − n1·d1.
-fn refraction(n1: f64, d1: V3, n2: f64, d2: V3, [u, v]: [V3; 2]) -> Option<([f64; 2], f64)> {
+/// The outgoing basis is the incoming one carried by the rotation taking `d1`
+/// to the final direction `after` (`d2`, or the direction after a thin element
+/// that turns the ray as it leaves, as a lens leaving its glass does), so the
+/// tangential axis is taken across `d1` and carried by that same rotation: the
+/// stretch then lands on the grid axis the basis transport maps it to.
+fn refraction(
+    n1: f64,
+    d1: V3,
+    n2: f64,
+    d2: V3,
+    after: V3,
+    [u, v]: [V3; 2],
+) -> Option<([f64; 2], f64)> {
     if dot(d1, d2) > 1. - 1e-12 {
         return None;
     }
     let normal = unit(sub(scale(d2, n2), scale(d1, n1))).ok()?;
     let (cos_i, cos_t) = (dot(d1, normal).abs(), dot(d2, normal).abs());
-    let t = unit(sub(normal, scale(d2, dot(normal, d2)))).ok()?;
+    let t = unit(sub(normal, scale(d1, dot(normal, d1)))).ok()?;
+    let axis = cross(d1, after);
+    let t = match unit(axis) {
+        Ok(k) => {
+            let (sin, cos) = (norm(axis), dot(d1, after));
+            add(
+                add(scale(t, cos), scale(cross(k, t), sin)),
+                scale(k, dot(k, t) * (1. - cos)),
+            )
+        }
+        Err(_) => t,
+    };
     (cos_i > 1e-9).then(|| ([dot(t, u), dot(t, v)], cos_t / cos_i))
 }
 
@@ -604,7 +644,7 @@ fn arm<'a>(
     for i in 0..chain.len() {
         let f = flight(i);
         piston += TAU * f.opl_mm / (f.wavelength_nm * 1e-6) + f.phase_rad;
-        opl_mm += f.opl_mm;
+        opl_mm += f.opl_mm + f.plate_opl_mm();
         if let Some(e) = element(bench, &f.from_element) {
             piston += reflection_phase(e, &f.from_port);
         }
@@ -613,10 +653,22 @@ fn arm<'a>(
     for step in 1..chain.len() {
         let (f, before) = (flight(step), flight(step - 1));
         let (a, b) = (frames[step - 1], frames[step]);
+        // Leaving a lens's glass, the exit face alone refracts; the lens power
+        // that also turns the traced ray is the lens event's.
+        let exit = element(bench, &f.from_element)
+            .filter(|e| e.kind == Kind::Lens && f.from_element == before.from_element)
+            .and_then(|e| lens_face(e, trace.segments[chain[step - 1]].to))
+            .and_then(|face| bench::refract(a.direction, face.normal, before.index / f.index));
         if a.reflections == b.reflections
             && (f.index - before.index).abs() > 1e-12
-            && let Some((axis, stretch)) =
-                refraction(before.index, a.direction, f.index, b.direction, b.basis)
+            && let Some((axis, stretch)) = refraction(
+                before.index,
+                a.direction,
+                f.index,
+                exit.unwrap_or(b.direction),
+                b.direction,
+                b.basis,
+            )
         {
             refractions.push((step, axis, stretch));
         }
@@ -656,14 +708,46 @@ fn arm<'a>(
                 g[1] += dot(delta, outgoing.basis[1]);
             }
         }
-        events.push(Event {
-            step,
-            element: e,
-            port: flight(last).from_port.clone(),
-            hit: trace.segments[chain[step - 1]].to,
-            incoming: frames[step - 1],
-            index: before.index,
-        });
+        // A lens with a substrate applies its power where the light leaves the
+        // glass, in the exit medium's wavenumber, as the trace does.
+        let event = if e.kind == Kind::Lens && last > step {
+            // The entry face clips to the clear aperture before the glass, as
+            // the trace checks the entry and exit hits.
+            let hit = trace.segments[chain[step - 1]].to;
+            events.push(Event {
+                step,
+                element: e,
+                port: flight(last).from_port.clone(),
+                hit,
+                incoming: frames[step - 1],
+                index: before.index,
+                surface: lens_face(e, hit).map(|face| face.normal),
+                clip_only: true,
+            });
+            Event {
+                step: last,
+                element: e,
+                port: flight(last).from_port.clone(),
+                hit: trace.segments[chain[last - 1]].to,
+                incoming: frames[last - 1],
+                index: flight(last).index,
+                // Sampled on the exit face, which a wedge tilts off the element plane.
+                surface: lens_face(e, trace.segments[chain[last - 1]].to).map(|face| face.normal),
+                clip_only: false,
+            }
+        } else {
+            Event {
+                step,
+                element: e,
+                port: flight(last).from_port.clone(),
+                hit: trace.segments[chain[step - 1]].to,
+                incoming: frames[step - 1],
+                index: before.index,
+                surface: None,
+                clip_only: false,
+            }
+        };
+        events.push(event);
     }
     let last = flight(chain.len() - 1);
     Ok(Arm {
@@ -796,7 +880,7 @@ fn interact(
 ) -> Result<(), String> {
     let e = event.element;
     let r = e.rotation();
-    let normal = rotate([1., 0., 0.], r);
+    let normal = event.surface.unwrap_or_else(|| rotate([1., 0., 0.], r));
     let d = event.incoming.direction;
     let [bu, bv] = event.incoming.basis;
     let cos = dot(d, normal);
@@ -809,7 +893,7 @@ fn interact(
         .flatten();
     let focal = matches!(e.kind, Kind::Lens | Kind::CurvedMirror)
         .then_some(e.focal_length)
-        .filter(|f| *f != 0.);
+        .filter(|f| *f != 0. && !event.clip_only);
     let to_local = |[x, y]: [f64; 2]| {
         let offset = add(scale(bu, x), scale(bv, y));
         let point = sub(add(event.hit, offset), scale(d, dot(offset, normal) / cos));
@@ -833,7 +917,7 @@ fn interact(
             shifts.push(shift(g));
         }
     }
-    match &e.action {
+    match e.action.as_ref().filter(|_| !event.clip_only) {
         Some(Action::TipTilt {
             tilt_mrad: [ty, tz],
         }) => shifts.push(shift([k * 1e-3 * ty, k * 1e-3 * tz])),
@@ -866,6 +950,9 @@ fn interact(
         };
         if !open {
             *v = C::ZERO;
+            continue;
+        }
+        if event.clip_only {
             continue;
         }
         let mut transmittance = 1.;
@@ -1690,9 +1777,9 @@ pub(crate) fn field(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DETECTOR, MASK, MIRROR, SPLITTER, mount_element, template};
+    use super::super::{DETECTOR, LENS, MASK, MIRROR, SPLITTER, mount_element, template};
     use super::*;
-    use crate::optics::bench::{Branch, Connection, FieldSampling, PhasePlate};
+    use crate::optics::bench::{Branch, Connection, FieldSampling, PhasePlate, Substrate};
 
     fn sampling(grid: usize, pitch_um: f64, profile: FieldProfile, waist_um: f64) -> FieldSampling {
         FieldSampling {
@@ -1844,6 +1931,411 @@ mod tests {
         let mut bad = plain.clone();
         bad.elements[1].action = Some(Action::Nd { od: 1. });
         assert!(bad.validate().unwrap_err().contains("Invalid action on D"));
+    }
+
+    #[test]
+    fn a_lens_substrate_is_propagated_before_the_lens_power() {
+        // S1 heads +x from x = 100 to a detector at x = 300 through an f = 150 lens
+        // at x = 200. Glass 10 mm thick ahead of a thin lens must give the field a
+        // lens with that substrate gives: the power acts where the light leaves the glass.
+        let system = System::default();
+        let substrate = || {
+            Some(Substrate {
+                material: "N-BK7_SCHOTT".into(),
+                thickness_mm: 10.,
+                wedge_deg: None,
+                coated_face: None,
+            })
+        };
+        let read = |plate: bool| {
+            let mut bench = template("mach_zehnder").unwrap();
+            bench.assertions.clear();
+            bench.sources[0].field = Some(sampling(128, 8., FieldProfile::Gaussian, 200.));
+            let mut lens = mount_element("L", LENS, [200., 200., 75.], [1., 0., 0.]);
+            lens.focal_length = 150.;
+            lens.aperture = 1.;
+            let mut chain = vec![("S1", "out", "L")];
+            bench.elements = vec![
+                lens,
+                mount_element("D", DETECTOR, [300., 200., 75.], [1., 0., 0.]),
+            ];
+            if plate {
+                let mut p = mount_element("P", MASK, [195., 200., 75.], [1., 0., 0.]);
+                p.action = None;
+                p.substrate = substrate();
+                bench.elements.push(p);
+                chain = vec![("S1", "out", "P"), ("P", "out", "L")];
+            } else {
+                bench.elements[0].substrate = substrate();
+            }
+            chain.push(("L", "out", "D"));
+            bench.connections = chain
+                .into_iter()
+                .map(|(from, port, to)| Connection {
+                    from: from.into(),
+                    port: port.into(),
+                    to: to.into(),
+                })
+                .collect();
+            bench.branches = vec![Branch {
+                id: "beam".into(),
+                from: Port::new("S1", "out"),
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            }];
+            bench.validate().unwrap();
+            let request = FieldRequest {
+                arrays: true,
+                ..request(Some("beam"), None, 1)
+            };
+            super::field(&bench, &system, &request).unwrap()
+        };
+        let (thick, separate) = (read(false), read(true));
+        let (a, b) = (thick.intensity.unwrap(), separate.intensity.unwrap());
+        let peak = b.iter().flatten().cloned().fold(0., f64::max);
+        let worst = a
+            .iter()
+            .flatten()
+            .zip(b.iter().flatten())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0., f64::max);
+        assert!(worst < 1e-3 * peak, "{worst} vs peak {peak}");
+        assert!(
+            (thick.power - separate.power).abs() < 1e-6,
+            "{} {}",
+            thick.power,
+            separate.power
+        );
+    }
+
+    #[test]
+    fn leaving_a_thick_lens_off_axis_is_not_a_refraction() {
+        // The chief ray crosses the slab 5 mm off the axis of an f = 100 lens:
+        // the flat exit face keeps its direction, so the lens turn adds no stretch.
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.sources[0].field = Some(sampling(32, 20., FieldProfile::Gaussian, 100.));
+        let mut lens = mount_element("L", LENS, [200., 205., 75.], [1., 0., 0.]);
+        lens.substrate = Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        bench.elements = vec![
+            lens,
+            mount_element("D", DETECTOR, [280., 200., 75.], [1., 0., 0.]),
+        ];
+        bench.connections = [("S1", "out", "L"), ("L", "out", "D")]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = vec![Branch {
+            id: "beam".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+            style: None,
+        }];
+        bench.validate().unwrap();
+        let trace = bench.trace(&system).unwrap();
+        let path = &trace.branches[0].paths[0];
+        let arm = arm(&bench, &trace, "beam".into(), path).unwrap();
+        assert!(
+            arm.refractions.is_empty(),
+            "{:?}",
+            arm.refractions.iter().map(|r| r.2).collect::<Vec<_>>()
+        );
+        // The entry face clips; the exit applies the power.
+        assert_eq!(
+            arm.events.iter().map(|e| e.clip_only).collect::<Vec<_>>(),
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn a_thick_lens_clips_to_its_aperture_at_the_glass_entry() {
+        // A 10 mm slab lens of 5 mm clear radius tilted 30°: the field is clipped
+        // on the entry face before the glass (no power there), so a sample
+        // entering at y = −6 mm is blocked even though its ray would leave the
+        // glass inside the aperture.
+        let system = System::default();
+        let (c, s) = (30_f64.to_radians().cos(), 30_f64.to_radians().sin());
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.sources[0].field = Some(sampling(32, 20., FieldProfile::Gaussian, 100.));
+        // Shifted along its local y so the chief ray's glass path straddles the axis.
+        let mut lens = mount_element("L", LENS, [200. - 4. * s, 200. + 4. * c, 75.], [c, s, 0.]);
+        lens.aperture = 5.;
+        lens.substrate = Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        let mut detector = mount_element("D", DETECTOR, [300., 200., 75.], [1., 0., 0.]);
+        detector.aperture = 40.;
+        detector.body_radius = 50.;
+        bench.elements = vec![lens, detector];
+        bench.connections = [("S1", "out", "L"), ("L", "out", "D")]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = vec![Branch {
+            id: "beam".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+            style: None,
+        }];
+        bench.validate().unwrap();
+        let trace = bench.trace(&system).unwrap();
+        let path = &trace.branches[0].paths[0];
+        assert!(path.nominal_match, "{:?}", path.interruption);
+        let arm = arm(&bench, &trace, "beam".into(), path).unwrap();
+        let lens_events: Vec<&Event> = arm.events.iter().filter(|e| e.element.id == "L").collect();
+        assert_eq!(
+            lens_events.iter().map(|e| e.clip_only).collect::<Vec<_>>(),
+            [true, false]
+        );
+        let (entry, exit) = (lens_events[0], lens_events[1]);
+        let e = entry.element;
+        let [front, back] = slab_faces(e, e.substrate.as_ref().unwrap());
+        let on = |face: &bench::SlabFace, p: V3| dot(sub(p, face.point), face.normal).abs() < 1e-9;
+        assert!(
+            on(&back, entry.hit) && on(&front, exit.hit),
+            "light enters the back face and leaves the front"
+        );
+        let grid = Grid {
+            n: [32, 32],
+            pitch: 0.5,
+        };
+        let mut a = vec![C::new(1., 0.); grid.len()];
+        let k = TAU * entry.index / (arm.wavelength_nm * 1e-6);
+        interact(&mut a, grid, IDENTITY, entry, k, None).unwrap();
+        let (d, glass) = (entry.incoming.direction, exit.incoming.direction);
+        let mut blocked_but_exits_inside = false;
+        for (i, v) in a.iter().enumerate() {
+            let [x, y] = grid.coords(i);
+            let start = add(
+                add(entry.hit, scale(entry.incoming.basis[0], x)),
+                scale(entry.incoming.basis[1], y),
+            );
+            let at_entry = sub(
+                start,
+                scale(
+                    d,
+                    dot(sub(start, back.point), back.normal) / dot(d, back.normal),
+                ),
+            );
+            let l = local(sub(at_entry, e.position), e.rotation());
+            let inside = l[1].hypot(l[2]) <= e.aperture;
+            // Clip only: open samples keep their amplitude and phase.
+            assert!(
+                if inside {
+                    (v.re - 1.).abs() < 1e-12 && v.im.abs() < 1e-12
+                } else {
+                    *v == C::ZERO
+                },
+                "sample {i} at {l:?}: {v:?}"
+            );
+            let at_exit = sub(
+                at_entry,
+                scale(
+                    glass,
+                    dot(sub(at_entry, front.point), front.normal) / dot(glass, front.normal),
+                ),
+            );
+            let m = local(sub(at_exit, e.position), e.rotation());
+            blocked_but_exits_inside |= !inside && m[1].hypot(m[2]) <= e.aperture;
+        }
+        assert!(blocked_but_exits_inside);
+    }
+
+    #[test]
+    fn a_wedged_lens_samples_its_power_on_the_traced_exit_face() {
+        // A 10 mm, 10° wedged slab lens tilted 30°: the lens power is applied
+        // where the light leaves the glass, so each sample's lens height is where
+        // its ray, along the glass direction, meets the traced (wedged) back face.
+        let system = System::default();
+        let (c, s) = (30_f64.to_radians().cos(), 30_f64.to_radians().sin());
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.sources[0].field = Some(sampling(32, 20., FieldProfile::Gaussian, 100.));
+        // Facing back along the beam, so the light leaves through the wedged back face.
+        let mut lens = mount_element("L", LENS, [200., 200., 75.], [-c, -s, 0.]);
+        lens.substrate = Some(Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: Some(10.),
+            coated_face: None,
+        });
+        let mut detector = mount_element("D", DETECTOR, [300., 200., 75.], [1., 0., 0.]);
+        detector.aperture = 40.;
+        detector.body_radius = 50.;
+        bench.elements = vec![lens, detector];
+        bench.connections = [("S1", "out", "L"), ("L", "out", "D")]
+            .map(|(from, port, to)| Connection {
+                from: from.into(),
+                port: port.into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = vec![Branch {
+            id: "beam".into(),
+            from: Port::new("S1", "out"),
+            to: Port::new("D", "in"),
+            via: vec![],
+            style: None,
+        }];
+        bench.validate().unwrap();
+        let trace = bench.trace(&system).unwrap();
+        let path = &trace.branches[0].paths[0];
+        assert!(path.nominal_match, "{:?}", path.interruption);
+        let arm = arm(&bench, &trace, "beam".into(), path).unwrap();
+        let event = arm
+            .events
+            .iter()
+            .find(|e| e.element.id == "L" && !e.clip_only)
+            .unwrap();
+        let e = event.element;
+        let back = &slab_faces(e, e.substrate.as_ref().unwrap())[1];
+        assert!(
+            dot(sub(event.hit, back.point), back.normal).abs() < 1e-9,
+            "the lens event sits on the exit face"
+        );
+        let pitch = 1e-4;
+        let grid = Grid { n: [4, 4], pitch };
+        let mut a = vec![C::new(1., 0.); grid.len()];
+        let k = TAU * event.index / (arm.wavelength_nm * 1e-6);
+        interact(&mut a, grid, IDENTITY, event, k, None).unwrap();
+        let d = event.incoming.direction;
+        let hit = local(sub(event.hit, e.position), e.rotation());
+        let mut wedge_matters = false;
+        for (i, offset) in [(11, event.incoming.basis[0]), (14, event.incoming.basis[1])] {
+            let start = add(event.hit, scale(offset, pitch));
+            let on_face = sub(
+                start,
+                scale(
+                    d,
+                    dot(sub(start, back.point), back.normal) / dot(d, back.normal),
+                ),
+            );
+            let l = local(sub(on_face, e.position), e.rotation());
+            let expected =
+                -k * ((l[1] - hit[1]).powi(2) + (l[2] - hit[2]).powi(2)) / (2. * e.focal_length);
+            assert!(
+                (a[i].arg() - expected).abs() < 1e-6 * expected.abs(),
+                "sample {i}: {} vs {expected}",
+                a[i].arg()
+            );
+            // On the element plane instead, the height would differ by several percent.
+            let on_plane = sub(
+                start,
+                scale(
+                    d,
+                    dot(sub(start, event.hit), rotate([1., 0., 0.], e.rotation()))
+                        / dot(d, rotate([1., 0., 0.], e.rotation())),
+                ),
+            );
+            let p = local(sub(on_plane, e.position), e.rotation());
+            let plane =
+                -k * ((p[1] - hit[1]).powi(2) + (p[2] - hit[2]).powi(2)) / (2. * e.focal_length);
+            wedge_matters |= (plane / expected - 1.).abs() > 0.05;
+        }
+        assert!(wedge_matters);
+    }
+
+    #[test]
+    fn an_oblique_thick_lens_stretches_in_and_back_out_of_its_glass() {
+        // A 10 mm slab lens tilted 30° about z, met off its axis in plane (y) and
+        // out of plane (z, so the lens turns the ray out of the refraction plane):
+        // the entry and exit stretches act on the same grid axis and cancel, so
+        // their combined grid map is the identity.
+        let system = System::default();
+        let (c, s) = (30_f64.to_radians().cos(), 30_f64.to_radians().sin());
+        for offset in [[5., 0.], [0., 6.]] {
+            let mut bench = template("mach_zehnder").unwrap();
+            bench.assertions.clear();
+            bench.sources[0].field = Some(sampling(32, 20., FieldProfile::Gaussian, 100.));
+            let mut lens = mount_element(
+                "L",
+                LENS,
+                [200. + offset[0] * s, 200. - offset[0] * c, 75. - offset[1]],
+                [c, s, 0.],
+            );
+            lens.substrate = Some(Substrate {
+                material: "N-BK7_SCHOTT".into(),
+                thickness_mm: 10.,
+                wedge_deg: None,
+                coated_face: None,
+            });
+            let mut detector = mount_element("D", DETECTOR, [300., 200., 75.], [1., 0., 0.]);
+            detector.aperture = 40.;
+            detector.body_radius = 50.;
+            bench.elements = vec![lens, detector];
+            bench.connections = [("S1", "out", "L"), ("L", "out", "D")]
+                .map(|(from, port, to)| Connection {
+                    from: from.into(),
+                    port: port.into(),
+                    to: to.into(),
+                })
+                .into();
+            bench.branches = vec![Branch {
+                id: "beam".into(),
+                from: Port::new("S1", "out"),
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            }];
+            bench.validate().unwrap();
+            let trace = bench.trace(&system).unwrap();
+            let path = &trace.branches[0].paths[0];
+            assert!(path.nominal_match, "{offset:?}: {:?}", path.interruption);
+            let arm = arm(&bench, &trace, "beam".into(), path).unwrap();
+            assert_eq!(arm.refractions.len(), 2, "{offset:?}");
+            let n = system
+                .material_index("N-BK7_SCHOTT", arm.wavelength_nm)
+                .unwrap();
+            let entry = (s / n).asin().cos() / c;
+            assert!(
+                (arm.refractions[0].2 - entry).abs() < 1e-9,
+                "{offset:?}: {} vs {entry}",
+                arm.refractions[0].2
+            );
+            // Grid map of a stretch m along unit axis a: I + (m − 1)·a·aᵀ.
+            let stretch = |&(_, [x, y], m): &(usize, [f64; 2], f64)| {
+                [
+                    [1. + (m - 1.) * x * x, (m - 1.) * x * y],
+                    [(m - 1.) * x * y, 1. + (m - 1.) * y * y],
+                ]
+            };
+            let (a, b) = (stretch(&arm.refractions[0]), stretch(&arm.refractions[1]));
+            let g = [
+                [
+                    b[0][0] * a[0][0] + b[0][1] * a[1][0],
+                    b[0][0] * a[0][1] + b[0][1] * a[1][1],
+                ],
+                [
+                    b[1][0] * a[0][0] + b[1][1] * a[1][0],
+                    b[1][0] * a[0][1] + b[1][1] * a[1][1],
+                ],
+            ];
+            assert!(
+                [g[0][0] - 1., g[0][1], g[1][0], g[1][1] - 1.]
+                    .iter()
+                    .all(|x| x.abs() < 1e-9),
+                "{offset:?}: grid map {g:?}"
+            );
+        }
     }
 
     #[test]

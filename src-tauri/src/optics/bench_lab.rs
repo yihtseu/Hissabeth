@@ -6440,15 +6440,169 @@ mod tests {
         };
         let (before, opl, other) = phase(&base);
         let (after, opl_after, other_after) = phase(&plated);
-        // Quarter wave at λ/2 is π/4 at λ; geometry and the other arm are unchanged.
+        // Quarter wave at λ/2 is π/4 at λ, an optical path of λ/8 at every
+        // wavelength; geometry and the other arm are unchanged.
         assert!(
             (after - before - std::f64::consts::FRAC_PI_4).abs() < 1e-9,
             "{}",
             after - before
         );
-        assert_eq!(opl, opl_after);
+        assert!(
+            (opl_after - opl - wavelength * 1e-6 / 8.).abs() < 1e-12,
+            "{}",
+            opl_after - opl
+        );
         assert_eq!(other, other_after);
-        assert!((before - std::f64::consts::TAU * opl / (wavelength * 1e-6)).abs() < 1e-6);
+        for (phase, opl) in [(before, opl), (after, opl_after)] {
+            assert!((phase - std::f64::consts::TAU * opl / (wavelength * 1e-6)).abs() < 1e-6);
+        }
+        // equal_opl sees the plate: the arm difference moves by the same λ/8.
+        let difference = |bench: &Bench| {
+            let mut bench = bench.clone();
+            bench.assertions = template("mach_zehnder").unwrap().assertions;
+            let lab = lab_check(&bench, &system).unwrap();
+            lab["assertions"][0]["value"].as_f64().unwrap()
+        };
+        let shift = difference(&plated) - difference(&base);
+        assert!(
+            (shift.abs() - wavelength * 1e-6 / 8.).abs() < 1e-9,
+            "{shift}"
+        );
+    }
+
+    #[test]
+    fn a_lens_substrate_is_crossed_as_glass_before_the_lens_power() {
+        let system = System::default();
+        let n = system.material_index("N-BK7_SCHOTT", 632.8).unwrap();
+        let mut lens = Element {
+            focal_length: 100.,
+            ..mount_element("L", LENS, [200., 100., 100.], [1., 0., 0.])
+        };
+        lens.substrate = Some(bench::Substrate {
+            material: "N-BK7_SCHOTT".into(),
+            thickness_mm: 10.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        let mut bench = relay_bench(
+            &[
+                ("S1", [100., 100., 100.], [1., 0., 0.]),
+                ("S2", [100., 105., 100.], [1., 0., 0.]),
+            ],
+            vec![
+                lens,
+                mount_element("D", DETECTOR, [400., 100., 100.], [1., 0., 0.]),
+            ],
+            &[("S1", "out", "L"), ("L", "out", "D")],
+        );
+        for source in &mut bench.sources {
+            source.wavelength = 632.8;
+        }
+        bench.branches = vec![route("axis", "S1", "D")];
+        bench.relays = vec![Relay {
+            id: "thick".into(),
+            branch: "axis".into(),
+            object_distance_mm: 0.,
+            image_distance_mm: 0.,
+            pupil_stop: None,
+            pupil_target: None,
+            checks: vec![],
+        }];
+        bench.validate().unwrap();
+        let trace = bench.trace(&system).unwrap();
+        // The slab spans x 190..200 behind the lens plane: 90 mm air, 10 mm glass, 200 mm air.
+        let path = &trace.branches[0].paths[0];
+        assert!(path.nominal_match && path.interruption.is_none());
+        assert!((path.length_mm - 300.).abs() < 1e-9, "{}", path.length_mm);
+        assert!(
+            (path.opl_mm - (290. + 10. * n)).abs() < 1e-9,
+            "{}",
+            path.opl_mm
+        );
+        assert_eq!(path.glass.len(), 1);
+        assert_eq!(
+            (path.glass[0].element.as_str(), path.glass[0].thickness_mm),
+            ("L", 10.)
+        );
+        // An off-axis parallel ray crosses the slab undeviated and turns at the exit face by −h/f.
+        let exit = trace
+            .segments
+            .iter()
+            .find(|s| {
+                s.source == "S2"
+                    && s.flight
+                        .as_ref()
+                        .is_some_and(|f| f.from_element == "L" && f.from_port == "out")
+            })
+            .unwrap();
+        assert!(
+            (exit.from[0] - 200.).abs() < 1e-9 && (exit.from[1] - 105.).abs() < 1e-9,
+            "{:?}",
+            exit.from
+        );
+        let d = sub(exit.to, exit.from);
+        assert!((d[1] / d[0] + 0.05).abs() < 1e-9, "{d:?}");
+        // Paraxial matrix: 90 mm air, 10/n reduced glass, then the lens, then 200 mm.
+        let lab = lab_check(&bench, &system).unwrap();
+        let abcd: Vec<f64> = lab["relays"][0]["abcd"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        // T(200)·L(1/100)·T(q) with q = 90 + 10/n reduced mm.
+        let q = 90. + 10. / n;
+        let expected = [-1., 200. - q, -0.01, 1. - q / 100.];
+        for (value, wanted) in abcd.iter().zip(expected) {
+            assert!(
+                (value - wanted).abs() < 1e-9 * wanted.abs().max(1.),
+                "{abcd:?} vs {expected:?}"
+            );
+        }
+        assert!(
+            (lab["relays"][0]["powered"][0]["distance_mm"]
+                .as_f64()
+                .unwrap()
+                - q)
+                .abs()
+                < 1e-9
+        );
+        // A branch ending at the lens still crosses its glass before the power.
+        bench.branches.push(route("to_lens", "S1", "L"));
+        bench.relays.push(Relay {
+            id: "end".into(),
+            branch: "to_lens".into(),
+            ..bench.relays[0].clone()
+        });
+        let lab = lab_check(&bench, &system).unwrap();
+        let end = &lab["relays"][1];
+        let abcd: Vec<f64> = end["abcd"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        for (value, wanted) in abcd.iter().zip([1., q, -0.01, 1. - q / 100.]) {
+            assert!(
+                (value - wanted).abs() < 1e-9 * wanted.abs().max(1.),
+                "{abcd:?}"
+            );
+        }
+        assert!(
+            (end["powered"][0]["distance_mm"].as_f64().unwrap() - q).abs() < 1e-9,
+            "{end}"
+        );
+        // An end lens that passes no light through its glass leaves the relay unresolved.
+        bench
+            .elements
+            .iter_mut()
+            .find(|e| e.id == "L")
+            .unwrap()
+            .transmittance = 0.;
+        let lab = lab_check(&bench, &system).unwrap();
+        let end = &lab["relays"][1];
+        assert!(end["abcd"].is_null(), "{end}");
+        assert_eq!(end["break"]["reason"], "relay_unresolved", "{end}");
     }
 
     #[test]

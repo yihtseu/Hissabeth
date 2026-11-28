@@ -576,8 +576,15 @@ pub(crate) fn element_solid(e: &Element, thickness: Option<f64>, side: f64) -> S
     shaped_solid(e, thickness, None, side)
 }
 
-/// Face radii (positive convex, infinite flat) and edge thickness of a lens.
-fn lens_profile(e: &Element, thickness: Option<f64>, shape: Option<&LensShape>) -> ([f64; 2], f64) {
+/// Face radii (positive convex, infinite flat), edge thickness and sag scale
+/// of the lens solid as drawn. With a substrate its axial vertices sit on the
+/// traced slab, and sags that would meet before the rim are flattened (scale
+/// below 1) to keep a tenth of the centre thickness at the edge.
+fn lens_profile(
+    e: &Element,
+    thickness: Option<f64>,
+    shape: Option<&LensShape>,
+) -> ([f64; 2], f64, f64) {
     let derived = lens_bulges(e);
     let radius = |given: Option<f64>, default: f64| {
         given.map_or(default, |r| if r == 0. { f64::INFINITY } else { r })
@@ -587,15 +594,30 @@ fn lens_profile(e: &Element, thickness: Option<f64>, shape: Option<&LensShape>) 
         radius(shape.and_then(|s| s.back_radius_mm), derived[1]),
     ];
     let rim = e.body_radius;
-    let rise = |radius: f64| sag(radius, rim, rim);
+    let rises = radii.map(|radius| sag(radius, rim, rim));
+    let rise = rises[0] + rises[1];
+    if let Some(s) = &e.substrate {
+        // The traced glass is the slab: both vertices sit on its planes, so the
+        // axial thickness is the substrate's. A convex face curves into the slab
+        // (scaled so the edge keeps a tenth of the thickness); a concave face,
+        // which would leave it, is drawn flat.
+        let t = s.thickness_mm;
+        let convex: f64 = rises.iter().map(|r| r.max(0.)).sum();
+        let k = if t - convex < 0.1 * t {
+            0.9 * t / convex
+        } else {
+            1.
+        };
+        return (radii, t - k * convex, k);
+    }
     let edge = match shape.and_then(|s| s.center_thickness_mm) {
-        Some(center) => center - rise(radii[0]) - rise(radii[1]),
+        Some(center) => center - rise,
         // A diverging lens keeps at least 1 mm at its centre.
         None => thickness
             .unwrap_or_else(|| default_thickness(e))
-            .max(1. - rise(radii[0]) - rise(radii[1])),
+            .max(1. - rise),
     };
-    (radii, edge)
+    (radii, edge, 1.)
 }
 
 /// The solid of one element. A one-sided body (mirror, camera, SLM) sits
@@ -686,15 +708,57 @@ pub(crate) fn shaped_solid(
             solid.revolve(&frame, &profile, &edges);
         }
         (Kind::Lens, _) => {
-            // Each face bulges out of the edge planes ±t/2 by its sag.
-            let ([front, back], t) = lens_profile(e, thickness, shape);
-            let bulge = |radius: f64, r: f64| sag(radius, rim, rim) - sag(radius, r, rim);
-            let mut profile: Vec<(f64, f64)> = stations(rim)
-                .map(|r| (t / 2. + bulge(front, r), r))
-                .collect();
-            profile.extend(stations(rim).rev().map(|r| (-t / 2. - bulge(back, r), r)));
-            solid.center = frame.origin;
+            // Each face bulges out of the edge planes ±t/2 by its sag. With a
+            // substrate the axial vertices sit at x = 0 and −thickness and the
+            // back face tilts by the wedge, as the traced slab does.
+            let ([front, back], t, k) = lens_profile(e, thickness, shape);
+            let rise = [front, back].map(|radius| k * sag(radius, rim, rim));
+            let vertices = match &e.substrate {
+                Some(s) => [0., -s.thickness_mm],
+                None => [t / 2. + rise[0], -t / 2. - rise[1]],
+            };
+            // With a substrate a concave face is drawn flat on its slab plane.
+            let scales = [front, back].map(|radius| {
+                if e.substrate.is_some() && sag(radius, rim, rim) < 0. {
+                    0.
+                } else {
+                    k
+                }
+            });
+            let surface = |r: f64| {
+                [
+                    vertices[0] - scales[0] * sag(front, r, rim),
+                    vertices[1] + scales[1] * sag(back, r, rim),
+                ]
+            };
+            let mut profile: Vec<(f64, f64)> = stations(rim).map(|r| (surface(r)[0], r)).collect();
+            profile.extend(stations(rim).rev().map(|r| (surface(r)[1], r)));
+            solid.center = frame.world([(vertices[0] + vertices[1]) / 2., 0., 0.]);
             solid.revolve(&frame, &profile, &vec![(GLASS, 0.55); 2 * RINGS + 1]);
+            if let Some(s) = e
+                .substrate
+                .as_ref()
+                .filter(|s| s.wedge_deg.is_some_and(|w| w != 0.))
+            {
+                // Shear by depth below the front vertex, so the back vertex and a
+                // flat back face land on the traced wedged face, x = −t − y·tan(wedge),
+                // and curved faces stay inside the slab.
+                let (t, wedge) = (s.thickness_mm, s.wedge_deg.unwrap_or(0.).to_radians().tan());
+                let local = |p: V3| [0, 1, 2].map(|i| dot(sub(p, frame.origin), frame.axes[i]));
+                for face in &mut solid.faces {
+                    for p in &mut face.points {
+                        let [x, y, z] = local(*p);
+                        *p = frame.world([x + x / t * y * wedge, y, z]);
+                    }
+                    if let Ok(n) = unit(newell(&face.points)) {
+                        face.normal = if dot(n, face.normal) < 0. {
+                            scale(n, -1.)
+                        } else {
+                            n
+                        };
+                    }
+                }
+            }
         }
         (Kind::LensGroup, _) => disk(
             &mut solid,
@@ -1885,16 +1949,23 @@ pub(crate) fn render(
         e.substrate.is_some()
             && matches!(
                 e.kind,
-                Kind::Aperture | Kind::Splitter | Kind::Pbs | Kind::Waveplate | Kind::Polarizer
+                Kind::Aperture
+                    | Kind::Splitter
+                    | Kind::Pbs
+                    | Kind::Waveplate
+                    | Kind::Polarizer
+                    | Kind::Lens
             )
     }) {
         let substrate = e.substrate.as_ref().expect("filtered");
-        let t = options
+        // A lens solid always spans its traced substrate.
+        let drawn = options
             .thickness_mm
             .as_ref()
             .and_then(|m| m.get(&e.id))
             .copied()
-            .unwrap_or(substrate.thickness_mm);
+            .filter(|_| e.kind != Kind::Lens);
+        let t = drawn.unwrap_or(substrate.thickness_mm);
         let thinnest =
             t - substrate.wedge_deg.unwrap_or(0.).to_radians().tan().abs() * e.body_radius;
         if thinnest <= 0. {
@@ -1933,7 +2004,7 @@ pub(crate) fn render(
                 "layout3d lens_shape center_thickness_mm of {id} must be positive"
             ));
         }
-        let (_, edge) = lens_profile(
+        let (_, edge, _) = lens_profile(
             lens,
             options
                 .thickness_mm
@@ -2234,6 +2305,116 @@ mod tests {
     }
 
     #[test]
+    fn a_lens_with_a_substrate_fills_the_traced_slab() {
+        let at = [100., 50., 80.];
+        let mut lens = element(Kind::Lens, at, [0.; 3], 12.5);
+        lens.focal_length = 100.;
+        lens.substrate = Some(bench::Substrate {
+            material: "N-BK7".into(),
+            thickness_mm: 10.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        let (lo, hi) = bounds(&element_solid(&lens, None, 1.));
+        assert!(
+            close(lo[0], at[0] - 10., 1e-9) && close(hi[0], at[0], 1e-9),
+            "{lo:?} {hi:?}"
+        );
+        // A plano lens keeps its flat face on the slab's back and its vertex on the front.
+        lens.lens_form = Some(LensForm::Plano);
+        let (lo, hi) = bounds(&element_solid(&lens, None, 1.));
+        assert!(
+            close(lo[0], at[0] - 10., 1e-9) && close(hi[0], at[0], 1e-9),
+            "{lo:?} {hi:?}"
+        );
+        // A substrate thinner than the sags keeps a positive edge, still within the slab.
+        lens.lens_form = None;
+        lens.substrate.as_mut().unwrap().thickness_mm = 1.;
+        let solid = element_solid(&lens, None, 1.);
+        let (lo, hi) = bounds(&solid);
+        assert!(
+            close(lo[0], at[0] - 1., 1e-9) && close(hi[0], at[0], 1e-9),
+            "{lo:?} {hi:?}"
+        );
+        let rim: Vec<f64> = solid
+            .faces
+            .iter()
+            .flat_map(|f| &f.points)
+            .filter(|p| {
+                close(
+                    ((p[1] - at[1]).powi(2) + (p[2] - at[2]).powi(2)).sqrt(),
+                    12.5,
+                    1e-6,
+                )
+            })
+            .map(|p| p[0] - at[0])
+            .collect();
+        let edge = rim.iter().cloned().fold(f64::MIN, f64::max)
+            - rim.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(close(edge, 0.1, 1e-6), "edge {edge}");
+        // A wedged plano lens tilts its flat back face onto the traced one, x = −t − y·tan(wedge).
+        lens.lens_form = Some(LensForm::Plano);
+        lens.substrate = Some(bench::Substrate {
+            material: "N-BK7".into(),
+            thickness_mm: 10.,
+            wedge_deg: Some(5.),
+            coated_face: None,
+        });
+        let solid = element_solid(&lens, None, 1.);
+        let tan = 5_f64.to_radians().tan();
+        for p in solid.faces.iter().flat_map(|f| &f.points) {
+            assert!(p[0] - at[0] >= -10. - (p[1] - at[1]) * tan - 1e-9, "{p:?}");
+        }
+        let (lo, hi) = bounds(&solid);
+        assert!(
+            close(lo[0], at[0] - 10. - 12.5 * tan, 1e-6) && close(hi[0], at[0], 1e-9),
+            "{lo:?} {hi:?}"
+        );
+        // Diverging and meniscus lenses stay within the slab and keep its axial
+        // thickness: concave faces are drawn flat on the slab planes.
+        for (focal, shape) in [
+            (-100., None),
+            (
+                100.,
+                Some(LensShape {
+                    front_radius_mm: Some(40.),
+                    back_radius_mm: Some(-60.),
+                    center_thickness_mm: None,
+                }),
+            ),
+        ] {
+            lens.focal_length = focal;
+            lens.lens_form = None;
+            lens.substrate.as_mut().unwrap().wedge_deg = None;
+            let solid = shaped_solid(&lens, None, shape.as_ref(), 1.);
+            let (lo, hi) = bounds(&solid);
+            assert!(
+                close(lo[0], at[0] - 10., 1e-9) && close(hi[0], at[0], 1e-9),
+                "{focal}: {lo:?} {hi:?}"
+            );
+            // Each face's innermost ring lies on its slab plane (flat) or within the
+            // sag of the steepest, 40 mm, radius of it (convex).
+            let radius = |p: &V3| (p[1] - at[1]).hypot(p[2] - at[2]);
+            for (plane, side) in [(0., 1.), (-10., -1.)] {
+                let face: Vec<&V3> = solid
+                    .faces
+                    .iter()
+                    .flat_map(|f| &f.points)
+                    .filter(|p| side * (p[0] - at[0] + 5.) > 0.)
+                    .collect();
+                let inner = face.iter().map(|p| radius(p)).fold(f64::INFINITY, f64::min);
+                for p in face.iter().filter(|p| close(radius(p), inner, 1e-9)) {
+                    let depth = side * (plane - (p[0] - at[0]));
+                    assert!(
+                        (-1e-9..=inner * inner / 60.).contains(&depth),
+                        "{focal}: {p:?} {depth} below the {plane} plane at r = {inner}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_face_normal_points_out_of_its_solid() {
         let r = 20.;
         let at = [100., 50., 80.];
@@ -2264,6 +2445,10 @@ mod tests {
             with(Kind::Lens, &|e| e.focal_length = 60.),
             with(Kind::Lens, &|e| e.focal_length = -60.),
             with(Kind::Lens, &|e| e.lens_form = Some(LensForm::Plano)),
+            with(Kind::Lens, &|e| {
+                e.focal_length = 60.;
+                e.substrate = Some(substrate(None));
+            }),
             with(Kind::LensGroup, &|_| {}),
             with(Kind::Waveplate, &|_| {}),
             with(Kind::Polarizer, &|_| {}),
@@ -3553,6 +3738,31 @@ mod tests {
             )
             .is_ok()
         );
+        // A thin traced substrate draws its flattened faces with or without an empty shape.
+        let mut thin = lensed.clone();
+        let l = thin.elements.iter_mut().find(|e| e.id == "L").unwrap();
+        l.focal_length = 100.;
+        l.substrate = Some(bench::Substrate {
+            material: "N-BK7".into(),
+            thickness_mm: 1.,
+            wedge_deg: None,
+            coated_face: None,
+        });
+        render(&thin, &system, &Layout3dOptions::default(), None).unwrap();
+        render(&thin, &system, &shaped("L", LensShape::default()), None).unwrap();
+        // A wedge the thin substrate cannot span is refused, as for plates.
+        thin.elements
+            .iter_mut()
+            .find(|e| e.id == "L")
+            .unwrap()
+            .substrate
+            .as_mut()
+            .unwrap()
+            .wedge_deg = Some(5.);
+        let refusal = render(&thin, &system, &Layout3dOptions::default(), None)
+            .err()
+            .unwrap();
+        assert!(refusal.contains("too thin for its wedge"), "{refusal}");
         // Options ask for the 3-D layout when given, or with layout3d true.
         assert!(Layout3dOptions::default().requested().is_none());
         assert!(

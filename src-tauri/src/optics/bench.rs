@@ -652,7 +652,9 @@ fn unit_fraction() -> f64 {
 /// Plane-parallel or wedged glass slab. The front face is the element plane
 /// (local `x = 0`, outward normal `+x`); the back face passes through local
 /// `[-thickness_mm, 0, 0]` and is tilted by `wedge_deg` about the local `z` axis.
-/// Light enters on whichever face it reaches first.
+/// Light enters on whichever face it reaches first. On a lens the slab is the
+/// centre thickness: light crosses it as a plate and the thin-lens power acts
+/// where it leaves the glass.
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Substrate {
@@ -1122,11 +1124,11 @@ impl FieldSampling {
             })
     }
 }
-struct SlabFace {
-    point: V3,
-    normal: V3,
+pub(crate) struct SlabFace {
+    pub(crate) point: V3,
+    pub(crate) normal: V3,
 }
-fn slab_faces(e: &Element, substrate: &Substrate) -> [SlabFace; 2] {
+pub(crate) fn slab_faces(e: &Element, substrate: &Substrate) -> [SlabFace; 2] {
     let wedge = substrate.wedge_deg.unwrap_or(0.).to_radians();
     [
         SlabFace {
@@ -1151,7 +1153,7 @@ fn face_distance(p: V3, d: V3, face: &SlabFace) -> Option<f64> {
 }
 /// Vector Snell refraction with relative index `eta = n_incident / n_transmitted`;
 /// `None` on total internal reflection.
-fn refract(d: V3, normal: V3, eta: f64) -> Option<V3> {
+pub(crate) fn refract(d: V3, normal: V3, eta: f64) -> Option<V3> {
     let m = if dot(d, normal) > 0. {
         scale(normal, -1.)
     } else {
@@ -1784,7 +1786,12 @@ impl Bench {
             if let Some(s) = &e.substrate
                 && (!matches!(
                     e.kind,
-                    Kind::Aperture | Kind::Splitter | Kind::Pbs | Kind::Waveplate | Kind::Polarizer
+                    Kind::Aperture
+                        | Kind::Lens
+                        | Kind::Splitter
+                        | Kind::Pbs
+                        | Kind::Waveplate
+                        | Kind::Polarizer
                 ) || !e.regions.is_empty()
                     || s.material.is_empty()
                     || s.material.len() > 128
@@ -1795,7 +1802,7 @@ impl Bench {
                     || (s.coated_face.is_some() != matches!(e.kind, Kind::Splitter | Kind::Pbs)))
             {
                 return Err(format!(
-                    "Invalid substrate on {}: substrates need an aperture without regions, splitter, PBS, waveplate or polarizer, a material name, thickness in 0..1e4 mm, wedge within ±45°, and a coated face (front or back) on splitters and PBS only",
+                    "Invalid substrate on {}: substrates need an aperture without regions, lens, splitter, PBS, waveplate or polarizer, a material name, thickness in 0..1e4 mm, wedge within ±45°, and a coated face (front or back) on splitters and PBS only",
                     e.id
                 ));
             }
@@ -3623,11 +3630,17 @@ impl Bench {
                                     beam: child_beam.clone(),
                                 });
                             }
-                            start = (
-                                path.points.last().copied().unwrap_or(entry),
-                                path.direction,
-                                previous,
-                            );
+                            let exit = path.points.last().copied().unwrap_or(entry);
+                            let direction = if e.kind == Kind::Lens {
+                                focused(
+                                    path.direction,
+                                    local(sub(exit, e.position), e.rotation()),
+                                    e,
+                                )?
+                            } else {
+                                path.direction
+                            };
+                            start = (exit, direction, previous);
                         }
                         Err(reason) => {
                             let departure = Departure {
