@@ -46,21 +46,17 @@ struct ZmxSurface {
     clip: Option<f64>,
     params: BTreeMap<usize, f64>,
 }
+/// Radius, conic, even and odd aspheric terms, toroid and Zernike sag of a surface.
+type Profile = (
+    f64,
+    f64,
+    Vec<f64>,
+    Vec<f64>,
+    Option<Toroid>,
+    Option<SagZernike>,
+);
 impl ZmxSurface {
-    fn profile(
-        &self,
-        surface: usize,
-    ) -> Result<
-        (
-            f64,
-            f64,
-            Vec<f64>,
-            Vec<f64>,
-            Option<Toroid>,
-            Option<SagZernike>,
-        ),
-        String,
-    > {
+    fn profile(&self, surface: usize) -> Result<Profile, String> {
         let radius = if self.curvature == 0. {
             0.
         } else {
