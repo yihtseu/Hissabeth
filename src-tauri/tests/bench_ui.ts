@@ -26,7 +26,15 @@ async function start(){
 }
 async function optical(name: string,args: any = {}){
     const ep=JSON.parse(await readFile(resolve(workspace,'endpoint.json'),'utf8'));const [host,port]=ep.address.split(':');
-    return new Promise<any>((done,fail)=>{const socket=createConnection({host,port:Number(port)});let data='';socket.setTimeout(20000);socket.on('error',fail);socket.on('timeout',()=>{socket.destroy();fail(Error('Optical timeout'));});socket.on('data',chunk=>{data+=chunk;if(!data.includes('\n'))return;socket.end();try{const response=JSON.parse(data.split('\n')[0]);if(response.error)throw Error(response.error.message);if(response.result.isError)throw Error(response.result.content[0].text);done(JSON.parse(response.result.content[0].text));}catch(e){fail(e);}});socket.on('connect',()=>socket.write(JSON.stringify({token:ep.token,request:{jsonrpc:'2.0',id:++id,method:'tools/call',params:{name,arguments:args}}})+'\n'));});
+    return new Promise<any>((done,fail)=>{const socket=createConnection({host,port:Number(port)});let data='';socket.setTimeout(20000);socket.on('error',fail);socket.on('timeout',()=>{socket.destroy();fail(Error('Optical timeout'));});socket.on('data',chunk=>{data+=chunk;if(!data.includes('\n'))return;socket.end();try{const response=JSON.parse(data.split('\n')[0]);if(response.error)throw Error(response.error.message);if(response.result.isError)throw Error(response.result.content[0].text);done(appResult(name,response.result.content));}catch(e){fail(e);}});socket.on('connect',()=>socket.write(JSON.stringify({token:ep.token,request:{jsonrpc:'2.0',id:++id,method:'tools/call',params:{name,arguments:args}}})+'\n'));});
+}
+/** Over MCP artifact_fetch carries its bytes in a second content item; the app receives them as base64 `data`. */
+function appResult(name: string,content: any[]){
+    const result=JSON.parse(content[0].text);
+    if(name!=='artifact_fetch')return result;
+    const item=content[1];
+    result.data=item.type==='image'?item.data:item.resource.blob??Buffer.from(item.resource.text,'utf8').toString('base64');
+    return result;
 }
 const server=createServer(async(req,res)=>{try{const path=new URL(req.url ?? '/','http://localhost').pathname;const file=resolve(root,'dist',path==='/'?'index.html':path.slice(1));if(!file.startsWith(resolve(root,'dist')+'/')){res.writeHead(403).end();return;}res.setHeader('Content-Type',{'.html':'text/html','.js':'text/javascript','.css':'text/css','.png':'image/png','.ico':'image/x-icon'}[extname(file)]??'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404).end();}});
 try {
@@ -95,6 +103,18 @@ try {
         await expect(lab.getByRole('status')).toContainText(`Revision ${initialStage.revision} · Saved bench`);
         await expect(oplAssertion).toContainText('ΔOPL 600 mm');
         await expect(oplAssertion.locator('.badge')).toHaveText('Pass');
+        // The 2D view draws the same symbols, branch colours and assertion marks as the blueprint.
+        const plan = await optical('bench_drawing', {});
+        const delayColor = plan.legend.find((entry: any) => entry.key === 'arm_delay').color;
+        await expect(page.locator('.plan-beams line[data-branch="arm_delay"]').first()).toHaveAttribute('stroke', delayColor);
+        await expect(page.locator('[data-element="M3"] .plan-symbol')).toHaveAttribute('data-symbol', 'mirror');
+        await expect(page.locator('[data-element="BS1"] .plan-symbol')).toHaveAttribute('data-symbol', plan.symbols.find((s: any) => s.id === 'BS1').kind);
+        await expect(page.locator('.plan-labels text[data-label="assertion"][data-target="delay_opl"]')).toHaveClass(/pass/);
+        await expect(page.locator('.plan-legend [data-legend="branch"][data-key="arm_delay"] .swatch')).toHaveCSS('border-top-color', delayColor.replace(/^#(..)(..)(..)$/, (_: string, r: string, g: string, b: string) => `rgb(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)})`));
+        // Every shared hole is drawn (the blueprint draws the same list), and the result cards match.
+        await expect(page.locator('.plan-holes')).toHaveAttribute('data-holes', String(plan.holes.length));
+        expect(((await page.locator('.plan-holes').getAttribute('d')) ?? '').split('M').length - 1).toBe(plan.holes.length);
+        await expect(page.locator('.plan-cards li')).toHaveCount(plan.cards.length);
         await page.locator('.bench-element-list').getByRole('button', { name: /^M3\b/ }).click();
         const mirrorX = page.locator('.bench-inspector').getByRole('spinbutton', { name: 'X (mm)' });
         const position = stage.getByRole('spinbutton', { name: 'Position (mm)' });
@@ -114,8 +134,16 @@ try {
         );
         await expect(mirrorX).toHaveValue('562.5');
 
+        // The stage-solved drawing lands before the trace: M3 must not be shifted twice.
+        holdNextTrace = true;
         await position.fill('2.5');
         await position.press('Tab');
+        await expect.poll(() => held).toBe(true);
+        await expect(page.locator('.plan-cards li', { hasText: 'Position 2.5 mm' })).toHaveCount(1);
+        releaseTrace!();
+        await expect.poll(() => held).toBe(false);
+        await expect(mirrorX).toHaveValue('552.5');
+        await expect(page.locator('[data-element="M3"] .plan-symbol')).not.toHaveAttribute('transform', /./);
         await expect(stageReading).toContainText('Position 2.5 mm');
         await expect(oplAssertion).toContainText('ΔOPL 605 mm');
 

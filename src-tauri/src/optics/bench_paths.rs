@@ -31,6 +31,23 @@ pub struct Branch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 128))]
     pub via: Vec<Port>,
+    /// How the drawing shows this branch's beams; the shared palette colour and a solid line when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<BranchStyle>,
+}
+
+/// Drawing style of a named branch, shared by the 2D view, the blueprint, the legend
+/// and the branch readings.
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchStyle {
+    /// Beam colour "#rrggbb".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(pattern(r"^#[0-9a-fA-F]{6}$"))]
+    pub color: Option<String>,
+    /// Draw the branch dotted. On an upper height layer the dots join that layer's dashes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dash: bool,
 }
 
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +238,11 @@ impl Bench {
         for branch in &self.branches {
             if !(1..=64).contains(&branch.id.len()) || by_id.insert(&branch.id, branch).is_some() {
                 return Err(format!("Invalid or repeated branch ID: {}", branch.id));
+            }
+            if let Some(color) = branch.style.as_ref().and_then(|s| s.color.as_deref())
+                && !(color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit()))
+            {
+                return Err(format!("Invalid branch style: {}: color must be #rrggbb", branch.id));
             }
             if !(1..=64).contains(&branch.to.port.len()) || branch.via.len() > 128 {
                 return Err(format!(

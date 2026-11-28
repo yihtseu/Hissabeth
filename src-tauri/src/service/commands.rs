@@ -358,6 +358,17 @@ pub(super) fn bench_lab_check(
     })
 }
 
+pub(super) fn bench_drawing(
+    target: &Target<'_>,
+    args: p::BenchDrawing,
+) -> Result<BenchReport<bench_lab::drawing::Drawing>, String> {
+    let text_mm = args.text_mm.unwrap_or(4.);
+    if !(1. ..=50.).contains(&text_mm) {
+        return Err(format!("text_mm must be between 1 and 50, got {text_mm}"));
+    }
+    bench_report(target, args.bench, |b, s, _| bench_lab::blueprint_drawing(b, s, text_mm))
+}
+
 pub(super) fn bench_field(
     target: &Target<'_>,
     args: p::BenchField,

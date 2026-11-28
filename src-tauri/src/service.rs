@@ -373,6 +373,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bench_drawing_feeds_the_svg_blueprint_and_the_gui_alike() {
+        let (_dir, workspace) = shared_workspace();
+        let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None);
+        let mut bench = call("bench_template", json!({"name":"delay_line"})).unwrap()["bench"].clone();
+        bench["annotations"] = json!([{"target":{"element":"M3"},"text":"Lock the stage"}]);
+        let plan = call("bench_drawing", json!({"bench":bench})).unwrap();
+        assert_eq!(plan["saved"], false);
+        let svg = call("bench_export_blueprint", json!({"bench":bench,"format":"svg"})).unwrap();
+        let svg = svg["content"].as_str().unwrap();
+        for symbol in plan["symbols"].as_array().unwrap() {
+            assert!(svg.contains(&format!(r#"data-element="{}" data-symbol="{}""#, symbol["id"].as_str().unwrap(), symbol["kind"].as_str().unwrap())));
+        }
+        for label in plan["labels"].as_array().unwrap() {
+            let text = label["text"].as_str().unwrap();
+            assert!(svg.contains(&format!(r#"data-label="{}" data-target="{}""#, label["kind"].as_str().unwrap(), label["target"].as_str().unwrap())));
+            assert!(svg.contains(text), "{text}");
+        }
+        for entry in plan["legend"].as_array().unwrap().iter().filter(|e| e["kind"] == "branch") {
+            assert!(svg.contains(&format!(r#"data-branch="{}" stroke="{}""#, entry["key"].as_str().unwrap(), entry["color"].as_str().unwrap())));
+        }
+        let check = call("bench_lab_check", json!({"bench":bench})).unwrap();
+        for branch in check["branches"].as_array().unwrap() {
+            assert!(plan["legend"].as_array().unwrap().iter().any(|e| e["key"] == branch["id"] && e["color"] == branch["color"]));
+        }
+        let big = call("bench_drawing", json!({"bench":bench,"text_mm":12.})).unwrap();
+        assert!(big["labels"][0]["size"][1].as_f64().unwrap() > plan["labels"][0]["size"][1].as_f64().unwrap());
+        assert!(call("bench_drawing", json!({"bench":bench,"text_mm":0.5})).is_err());
+    }
+
+    #[test]
     fn lab_tools_preview_report_export_and_commit_with_revision() {
         let (_dir, workspace) = shared_workspace();
         let call = |name, args| dispatch(&Caller::Gui, &workspace, name, args, None);

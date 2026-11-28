@@ -301,7 +301,13 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_lab_check,
                 Read,
                 None,
-                "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, SVG highlight color), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+                "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, drawing color shared with bench_drawing), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+            ),
+            tool!(
+                bench_drawing,
+                Read,
+                None,
+                "Read the plan-view bench drawing shared by the SVG blueprint and the GUI 2D view, in table millimetres. Returns the table origin, size and hole pitch, ruler ticks, zone outlines, stage outlines with travel axes, one schematic symbol per element and source (stroke polylines with body, fill, face and hatch roles), beam segments coloured per named branch with direction arrows, dashed off the base layer with their height layer, periscope rises, labels placed clear of symbols, beams and each other (overlaps counts any remaining conflicts, leader set when the label sits away from its target), bench annotations, assertion pass/fail marks and the legend. text_mm sets the label height (default 4)."
             ),
             tool!(
                 bench_field,

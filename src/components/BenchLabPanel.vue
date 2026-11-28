@@ -407,7 +407,6 @@ const interruption = ({ element, port, reason }: BenchPathBreak) =>
                         >
                             <b>
                                 <span
-                                    v-if="arm.color"
                                     class="arm-swatch"
                                     :style="{ backgroundColor: arm.color }"
                                 ></span>

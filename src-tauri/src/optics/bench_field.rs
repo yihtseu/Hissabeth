@@ -1438,7 +1438,7 @@ mod tests {
         bench.connections = [("S1", "out", "M"), ("M", "reflected", "D")]
             .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
             .into();
-        bench.branches = vec![Branch { id: "beam".into(), from: Port::new("S1", "out"), to: Port::new("D", "in"), via: vec![] }];
+        bench.branches = vec![Branch { id: "beam".into(), from: Port::new("S1", "out"), to: Port::new("D", "in"), via: vec![], style: None }];
         bench
     }
 
@@ -1466,6 +1466,7 @@ mod tests {
                 from: Port::new("BS1", start),
                 to: Port::new(detector, "in"),
                 via: vec![Port::new("BS2", end)],
+                style: None,
             })
             .into();
         bench
@@ -1584,7 +1585,7 @@ mod tests {
             .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![] })
+            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![], style: None })
             .into();
         let reading = super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1)).unwrap();
         assert_eq!(reading.pairs[0].coherence, 1.);
@@ -1710,7 +1711,7 @@ mod tests {
             .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![] })
+            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![], style: None })
             .into();
         let mut req = request(None, Some(Port::new("D", "in")), 1);
         req.arrays = true;
@@ -1799,7 +1800,7 @@ mod tests {
                 .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
                 .into();
             bench.branches = [("S1", "transmitted"), ("S2", "reflected")]
-                .map(|(s, port)| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("BS", port)] })
+                .map(|(s, port)| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("BS", port)], style: None })
                 .into();
             super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1))
         };
@@ -1874,7 +1875,7 @@ mod tests {
             .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
             .into();
         bench.branches = ["S1", "S2"]
-            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("T", "out")] })
+            .map(|s| Branch { id: s.into(), from: Port::new(s, "out"), to: Port::new("D", "in"), via: vec![Port::new("T", "out")], style: None })
             .into();
         let alone = super::field(&bench, &system, &request(Some("S2"), None, 1)).unwrap();
         let joint = super::field(&bench, &system, &request(None, Some(Port::new("D", "in")), 1)).unwrap();

@@ -101,6 +101,18 @@ pub(super) struct BenchReadout {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(super) struct BenchDrawing {
+    #[schemars(default, with = "bench::Bench")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bench: Option<bench::Bench>,
+    /// Label text height in table millimetres, 1..50 (default 4, as in the SVG blueprint).
+    #[schemars(default, with = "f64", range(min = 1, max = 50))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_mm: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct BenchCatalog {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]

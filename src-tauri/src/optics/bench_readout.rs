@@ -678,7 +678,7 @@ mod tests {
         bench.connections = [("S1", "out", "M"), ("M", "reflected", "D")]
             .map(|(from, port, to)| Connection { from: from.into(), port: port.into(), to: to.into() })
             .into();
-        bench.branches = vec![Branch { id: "beam".into(), from: Port::new("S1", "out"), to: Port::new("D", "in"), via: vec![] }];
+        bench.branches = vec![Branch { id: "beam".into(), from: Port::new("S1", "out"), to: Port::new("D", "in"), via: vec![], style: None }];
         bench
     }
 
@@ -869,7 +869,7 @@ mod tests {
         second.field.as_mut().unwrap().pitch_um = 40.;
         bench.sources.push(second);
         bench.connections.push(Connection { from: "S2".into(), port: "out".into(), to: "D".into() });
-        bench.branches.push(Branch { id: "second".into(), from: Port::new("S2", "out"), to: Port::new("D", "in"), via: vec![] });
+        bench.branches.push(Branch { id: "second".into(), from: Port::new("S2", "out"), to: Port::new("D", "in"), via: vec![], style: None });
         let detector = &mut bench.elements[0];
         (detector.aperture, detector.body_radius) = (20., 25.);
         let config = detector.readout.as_mut().unwrap();

@@ -145,6 +145,11 @@ interface ToolMap {
         args: { bench?: import('./bench').BenchInput; require_pass?: boolean };
         result: import('./bench').BenchLabCheck;
     };
+    /** Plan-view drawing shared by the 2D workbench and the SVG blueprint. */
+    bench_drawing: {
+        args: { bench?: import('./bench').BenchInput; text_mm?: number };
+        result: import('./bench').BenchDrawing;
+    };
     /** Angular-spectrum field at one branch end or superposed at one input port. */
     bench_field: {
         args: {

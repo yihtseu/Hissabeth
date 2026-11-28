@@ -86,6 +86,8 @@ export interface BenchElement {
     regions?: BenchRegion[];
     /** Glass slab behind the element plane (apertures, splitters, PBS, waveplates, polarizers). */
     substrate?: BenchSubstrate | null;
+    /** Lens cross-section on drawings; plano puts the flat face on the element's −X side. */
+    lens_form?: 'symmetric' | 'plano' | null;
     /** Scalar phase on transmitted outputs: exactly one of radians or waves. */
     phase?: BenchPhasePlate | null;
     /** Height layer ID. Its height fixes Z, except on periscope mirrors. */
@@ -232,6 +234,8 @@ export interface BenchBranch {
     to: BenchPort;
     /** Ordered output selections at intermediate elements with multiple nominal continuations. */
     via?: BenchPort[];
+    /** Drawing style: a #rrggbb colour in place of the palette colour, and dots along the branch's beams. */
+    style?: { color?: string; dash?: boolean };
 }
 export type BenchAssertionUnit = 'mm' | 'um' | 'mrad' | 'fs' | 'rad' | 'count';
 export interface BenchAssertion {
@@ -269,8 +273,15 @@ export interface Bench {
     folds?: BenchBranch[];
     /** Paraxial ABCD relays checked along branches. */
     relays?: BenchRelay[];
+    /** Model notes placed on the drawing by element/source or named branch. */
+    annotations?: BenchAnnotation[];
     max_interactions: number;
     min_power: number;
+}
+/** A drawing note: 1–256 characters on one element/source or one named branch. */
+export interface BenchAnnotation {
+    target: { element: string } | { branch: string };
+    text: string;
 }
 export type BenchRelayCheckKind = 'conjugate' | 'magnification' | 'afocal' | 'strict_4f';
 export interface BenchRelay {
@@ -418,6 +429,8 @@ export interface BenchAssembly {
 }
 export interface BenchCatalogItem {
     part: string;
+    /** Lens cross-section to copy onto a placed lens. */
+    lens_form?: 'symmetric' | 'plano';
     name: string;
     category: string;
     kind: BenchKind;
@@ -577,7 +590,8 @@ export interface BenchLabCheck {
     branches: {
         id: string;
         stage_ids: string[];
-        color: string | null;
+        /** Shared with this branch's beams in bench_drawing and the blueprint. */
+        color: string;
         paths: {
             source: string;
             wavelength_nm: number;
@@ -868,7 +882,14 @@ export function benchProblems(value: unknown): string[] {
                         !isPort(branch.from) ||
                         !isPort(branch.to) ||
                         (branch.via !== undefined &&
-                            (!Array.isArray(branch.via) || !branch.via.every(isPort))),
+                            (!Array.isArray(branch.via) || !branch.via.every(isPort))) ||
+                        (branch.style !== undefined &&
+                            (typeof branch.style !== 'object' ||
+                                branch.style === null ||
+                                (branch.style.color !== undefined &&
+                                    !/^#[0-9a-fA-F]{6}$/.test(branch.style.color)) ||
+                                (branch.style.dash !== undefined &&
+                                    typeof branch.style.dash !== 'boolean'))),
                 ))
         )
             throw Error();
@@ -897,6 +918,23 @@ export function benchProblems(value: unknown): string[] {
                         !Array.isArray(a.branches) ||
                         a.branches.length !== 2 ||
                         a.branches.some((branch) => typeof branch !== 'string'),
+                ))
+        )
+            throw Error();
+        if (
+            b.annotations !== undefined &&
+            (!Array.isArray(b.annotations) ||
+                b.annotations.length > 64 ||
+                b.annotations.some(
+                    (a) =>
+                        typeof a.text !== 'string' ||
+                        a.text.length < 1 ||
+                        [...a.text].length > 256 ||
+                        typeof a.target !== 'object' ||
+                        a.target === null ||
+                        Object.keys(a.target).length !== 1 ||
+                        typeof Object.values(a.target)[0] !== 'string' ||
+                        !('element' in a.target || 'branch' in a.target),
                 ))
         )
             throw Error();
@@ -948,6 +986,75 @@ export interface BenchModeReading {
     intensity: number;
     /** Coupled power over the ROI power. */
     fraction: number;
+}
+type BenchPoint2 = [number, number];
+export type BenchSymbolRole = 'body' | 'fill' | 'face' | 'hatch';
+export type BenchLabelKind =
+    | 'element'
+    | 'source'
+    | 'periscope'
+    | 'stage'
+    | 'zone'
+    | 'assertion'
+    | 'annotation';
+/** Plan-view drawing shared by the 2D workbench and the SVG blueprint (table-frame XY mm, Y up). */
+export interface BenchDrawing {
+    revision: number;
+    saved: boolean;
+    origin: BenchPoint2;
+    size: BenchPoint2;
+    hole_pitch: number;
+    /** Table-frame XY of every breadboard hole; empty above 25,000 holes. */
+    holes: BenchPoint2[];
+    hole_radius: number;
+    text_mm: number;
+    rulers: { axis: 'x' | 'y'; value_mm: number; major: boolean }[];
+    zones: { id: string; label: string; outline: BenchPoint2[] }[];
+    stages: { id: string; outline: BenchPoint2[]; travel: [BenchPoint2, BenchPoint2] }[];
+    symbols: {
+        id: string;
+        kind: string;
+        center: BenchPoint2;
+        strokes: { role: BenchSymbolRole; closed: boolean; points: BenchPoint2[] }[];
+    }[];
+    beams: {
+        branch: string | null;
+        /** Ray split path of the traced segment, as in bench_trace. */
+        path: string;
+        color: string;
+        dashed: boolean;
+        /** Dash pattern in mm; empty for solid. */
+        dash: number[];
+        layer: string | null;
+        from: BenchPoint2;
+        to: BenchPoint2;
+        arrow: [BenchPoint2, BenchPoint2, BenchPoint2] | null;
+    }[];
+    periscopes: { id: string; at: BenchPoint2; rise_mm: number }[];
+    labels: {
+        kind: BenchLabelKind;
+        target: string;
+        text: string;
+        anchor: BenchPoint2;
+        /** Lower-left corner and size of the text box. */
+        corner: BenchPoint2;
+        size: BenchPoint2;
+        leader: boolean;
+        overlaps: number;
+    }[];
+    legend: {
+        kind: 'branch' | 'beam' | 'layer' | 'symbol';
+        key: string;
+        text: string;
+        color: string;
+        dashed: boolean;
+        dash: number[];
+    }[];
+    assertions: { id: string; passed: boolean; text: string; element: string | null }[];
+    /** Result cards: stage positions, branch path lengths, assertion results. */
+    cards: { kind: 'stage' | 'branch' | 'assertion'; id: string; color: string; lines: string[] }[];
+    /** Every part's position as drawn, after stage motion. */
+    positions: { id: string; position: Vec3 }[];
 }
 export interface BenchReadoutReading {
     saved: boolean;

@@ -12,7 +12,7 @@ use std::{
 #[path = "bench_paths.rs"]
 mod paths;
 pub use paths::{
-    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, DispersionQuantity, GlassPass, Port, Relay,
+    Assertion, AssertionKind, AssertionUnit, Branch, BranchReport, BranchStyle, DispersionQuantity, GlassPass, Port, Relay,
     RelayCheck, RelayCheckKind,
 };
 pub(super) use paths::BranchPath;
@@ -68,10 +68,29 @@ pub struct Bench {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 32))]
     pub relays: Vec<Relay>,
+    /// Notes drawn on the bench drawing beside an element or along a named branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 64))]
+    pub annotations: Vec<Annotation>,
     #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub min_power: f64,
+}
+/// A drawing note placed beside an element or source, or along a named branch.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Annotation {
+    pub target: AnnotationTarget,
+    #[schemars(length(min = 1, max = 256))]
+    pub text: String,
+}
+/// What an annotation points at: `{"element": ID}` (an element or source) or `{"branch": ID}`.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnnotationTarget {
+    Element(String),
+    Branch(String),
 }
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +267,11 @@ pub struct Element {
     /// internally reflected) output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub substrate: Option<Substrate>,
+    /// Cross-section of a thin lens on drawings: symmetric (the default) or
+    /// plano, with the flat face on the element's −X side. The thin-lens trace
+    /// does not depend on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_form: Option<LensForm>,
     /// Scalar phase added to the element's transmitted outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<PhasePlate>,
@@ -328,6 +352,11 @@ struct ElementInput {
     /// internally reflected) output.
     #[serde(default)]
     substrate: Option<Substrate>,
+    /// Cross-section of a thin lens on drawings: symmetric (the default) or
+    /// plano, with the flat face on the element's −X side. The thin-lens trace
+    /// does not depend on it.
+    #[serde(default)]
+    lens_form: Option<LensForm>,
     /// Scalar phase added to the element's transmitted outputs.
     #[serde(default)]
     phase: Option<PhasePlate>,
@@ -378,6 +407,7 @@ impl From<ElementInput> for Element {
             lever_arm_mm: input.lever_arm_mm,
             regions: input.regions,
             substrate: input.substrate,
+            lens_form: input.lens_form,
             phase: input.phase,
             layer: input.layer,
             action: input.action,
@@ -477,6 +507,12 @@ pub struct Substrate {
     /// reflective coating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coated_face: Option<Face>,
+}
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LensForm {
+    Symmetric,
+    Plano,
 }
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1612,8 +1648,8 @@ impl Bench {
                 return Err(format!("Invalid or repeated layer: {}", l.id));
             }
         }
-        if self.layers.len() > 16 || self.periscopes.len() > 32 || self.zones.len() > 32 {
-            return Err("Bench layer, periscope or zone budget exceeded".into());
+        if self.layers.len() > 16 || self.periscopes.len() > 32 || self.zones.len() > 32 || self.annotations.len() > 64 {
+            return Err("Bench layer, periscope, zone or annotation budget exceeded".into());
         }
         for e in &self.elements {
             if let Some(layer) = &e.layer
@@ -1661,6 +1697,17 @@ impl Bench {
                 return Err(format!(
                     "Invalid zone {}: give a unique ID and exactly one of polygon_mm (3–64 vertices of a simple polygon) or rect (min below max), with known member elements",
                     z.id
+                ));
+            }
+        }
+        for (index, note) in self.annotations.iter().enumerate() {
+            let known = match &note.target {
+                AnnotationTarget::Element(id) => element(id).is_some() || self.sources.iter().any(|s| &s.id == id),
+                AnnotationTarget::Branch(id) => self.branches.iter().any(|b| &b.id == id),
+            };
+            if !known || note.text.trim().is_empty() || note.text.chars().count() > 256 {
+                return Err(format!(
+                    "Invalid annotation {index}: give 1–256 characters of text and a target of {{\"element\": an element or source ID}} or {{\"branch\": a named branch ID}}"
                 ));
             }
         }
@@ -3371,6 +3418,7 @@ pub fn example() -> Bench {
         lever_arm_mm: None,
         regions: vec![],
         substrate: None,
+        lens_form: None,
         phase: None,
         layer: None,
         action: None,
@@ -3440,6 +3488,7 @@ pub fn example() -> Bench {
         zones: vec![],
         folds: vec![],
         relays: vec![],
+        annotations: vec![],
         max_interactions: 32,
         min_power: 1e-8,
     }
@@ -3626,6 +3675,7 @@ mod tests {
             from: Port::new("S1", "out"),
             to: Port::new("D", "in"),
             via: vec![],
+            style: None,
         });
         for ghosts in [0, 1] {
             bench.elements[0].ghosts = ghosts;
@@ -4176,6 +4226,7 @@ mod tests {
                 from: Port::new("AP", arm),
                 to: Port::new("AP2", "in"),
                 via: vec![],
+                style: None,
             })
             .into();
         let trace = bench.trace(&system).unwrap();
@@ -4280,6 +4331,7 @@ mod tests {
                 from: Port::new("AP2", arm),
                 to: Port::new("D_L", "in"),
                 via: vec![],
+                style: None,
             });
         }
         let trace = cascade.trace(&system).unwrap();
@@ -4495,6 +4547,7 @@ mod tests {
                 from: Port::new("S1", "out"),
                 to: Port::new(detector, "in"),
                 via: vec![Port::new("AP", arm)],
+                style: None,
             })
             .into();
         bench.assertions.clear();

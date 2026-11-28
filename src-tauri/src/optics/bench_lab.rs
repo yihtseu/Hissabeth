@@ -3,7 +3,7 @@ use super::{
     System,
     bench::{
         self, Assertion, AssertionKind, AssertionUnit, Bench, Branch, BranchPath, BranchReport,
-        BalancedPair, Connection, DispersionQuantity, Element, FieldProfile, FieldSampling, GlassPass, Kind, ModeBasis, ModeFamily,
+        BalancedPair, Connection, LensForm, DispersionQuantity, Element, FieldProfile, FieldSampling, GlassPass, Kind, ModeBasis, ModeFamily,
         ModeNormalization, Mount, PathBreak, PhasePlate, Polarization, Port, Quadrature, Readout, ReadoutPort, Region, RegionShape,
         Stage, StagePose, StagePzt, Trace, next_beam,
     },
@@ -26,6 +26,8 @@ mod layout;
 pub(crate) mod field;
 #[path = "bench_relay.rs"]
 mod relay;
+#[path = "bench_drawing.rs"]
+pub(crate) mod drawing;
 use alignment_solver::{AimResidual, Combiner, Separation, measure};
 
 const FORK_REACH: f64 = 22.;
@@ -52,6 +54,8 @@ struct Hardware {
     base_size: [f64; 2],
     typical_price_usd: u32,
     notes: &'static str,
+    /// Drawing cross-section of a lens.
+    lens_form: Option<LensForm>,
 }
 impl Hardware {
     fn mount(self) -> Mount {
@@ -83,6 +87,7 @@ const LENS: Hardware = Hardware {
     base_size: [25., 25.],
     typical_price_usd: 55,
     notes: "Model uses nominal focal length and a separate post/base.",
+    lens_form: Some(LensForm::Plano),
 };
 const MIRROR: Hardware = Hardware {
     part: "KM100",
@@ -178,6 +183,7 @@ const MASK: Hardware = Hardware {
     base_size: [25., 25.],
     typical_price_usd: 40,
     notes: "Custom laser-cut mask; hole ports are named L, C and R.",
+    lens_form: None,
 };
 const DUMP: Hardware = Hardware {
     part: "BT610/M",
@@ -302,6 +308,9 @@ struct CatalogItem {
     mount: Mount,
     typical_price_usd: u32,
     notes: &'static str,
+    /// Lens cross-section to copy onto a placed lens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lens_form: Option<LensForm>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -358,6 +367,7 @@ pub(crate) fn catalog_report(query: Option<&str>, kind: Option<&str>) -> Catalog
                 mount: item.mount(),
                 typical_price_usd: item.typical_price_usd,
                 notes: item.notes,
+                lens_form: item.lens_form.filter(|_| item.kind == Kind::Lens),
             })
         })
         .collect();
@@ -413,6 +423,7 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         lever_arm_mm: hardware.lever_arm_mm,
         regions: vec![],
         substrate: None,
+        lens_form: hardware.lens_form.filter(|_| hardware.kind == Kind::Lens),
         phase: None,
         layer: None,
         action: None,
@@ -703,6 +714,7 @@ pub fn template(name: &str) -> Result<Bench, String> {
             from: Port::new("BS1", output),
             to: Port::new("BS2", input),
             via: vec![],
+            style: None,
         }).collect();
         scene.assertions = vec![Assertion {
             id: "equal_arms".into(),
@@ -727,7 +739,7 @@ pub fn template(name: &str) -> Result<Bench, String> {
                     via.push(Port::new(&format!("{chain}{}", k + 1), "reflected"));
                 }
                 via.push(Port::new(&format!("C{port}"), if arm == "signal" { "reflected" } else { "transmitted" }));
-                branches.push(Branch { id: format!("{port} {arm}"), from: Port::new("S1", "out"), to: Port::new("CAM", "in"), via });
+                branches.push(Branch { id: format!("{port} {arm}"), from: Port::new("S1", "out"), to: Port::new("CAM", "in"), via, style: None });
             }
         }
         scene.branches = branches;
@@ -739,6 +751,7 @@ pub fn template(name: &str) -> Result<Bench, String> {
                 from: Port::new("AP", arm),
                 to: Port::new(&format!("D_{arm}"), "in"),
                 via: vec![],
+                style: None,
             })
             .into();
     }
@@ -765,6 +778,7 @@ pub fn template(name: &str) -> Result<Bench, String> {
             from: Port::new("BS1", output),
             to: Port::new("BS2", input),
             via: vec![],
+            style: None,
         }).collect();
         // At zero the delay arm has two 300 mm legs in addition to the reference length.
         scene.assertions = [
@@ -1621,7 +1635,8 @@ struct StageReading {
 struct BranchReading {
     id: String,
     stage_ids: Vec<String>,
-    color: Option<&'static str>,
+    /// The branch's colour on the bench drawing and blueprint.
+    color: String,
     paths: Vec<PathReading>,
     #[serde(rename = "break", skip_serializing_if = "Option::is_none")]
     interruption: Option<PathBreak>,
@@ -1987,8 +2002,6 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
 }
 
 fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
-    const STAGE_ARM_COLORS: &[&str] = &["#a85c00", "#7554a3", "#26734d", "#b04375", "#2162a1"];
-    let mut colors = STAGE_ARM_COLORS.iter().copied().cycle();
     LabReadings {
         stages: bench.stages.iter().map(|stage| StageReading {
             id: stage.id.clone(),
@@ -1997,7 +2010,7 @@ fn lab_readings(bench: &Bench, system: &System, trace: &Trace) -> LabReadings {
         }).collect(),
         branches: trace.branches.iter().map(|report| BranchReading {
             id: report.id.clone(),
-            color: if report.stage_ids.is_empty() { None } else { colors.next() },
+            color: drawing::branch_style(bench, &report.id).0,
             stage_ids: report.stage_ids.clone(),
             paths: report.paths.iter().map(|path| PathReading {
                 source: path.source.clone(),
@@ -2511,14 +2524,7 @@ fn interruption_text(at: &PathBreak) -> String {
     format!("{} / {} ({})", at.element, at.port, at.reason)
 }
 
-struct ReadingCard<'a> {
-    kind: &'static str,
-    id: &'a str,
-    color: &'static str,
-    lines: Vec<String>,
-}
-
-fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
+fn reading_cards(readings: &LabReadings) -> Vec<drawing::Card> {
     let stages = readings.stages.iter().map(|stage| {
         let mut lines = vec![
             format!("Delay stage {}", stage.id),
@@ -2527,7 +2533,7 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
         if let Some(value) = stage.pzt_um {
             lines.push(format!("PZT {} µm", reading_number(value)));
         }
-        ReadingCard { kind: "stage", id: &stage.id, color: "#243b53", lines }
+        drawing::Card { kind: "stage", id: stage.id.clone(), color: "#243b53".into(), lines }
     });
     let branches = readings.branches.iter().map(|branch| {
         let mut lines = vec![branch.id.clone()];
@@ -2545,9 +2551,7 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
                 None => format!("OPL {value} mm"),
             });
         }
-        ReadingCard {
-            kind: "branch", id: &branch.id, color: branch.color.unwrap_or("#243b53"), lines,
-        }
+        drawing::Card { kind: "branch", id: branch.id.clone(), color: branch.color.clone(), lines }
     });
     let assertions = readings.assertions.iter().map(|result| {
         let unit = result.unit.symbol();
@@ -2589,17 +2593,42 @@ fn reading_cards(readings: &LabReadings) -> Vec<ReadingCard<'_>> {
             Some(at) => interruption_text(at),
             None => format!("{} / {}", result.at.element, result.at.port),
         });
-        ReadingCard {
+        drawing::Card {
             kind: "assertion",
-            id: &result.assertion,
+            id: result.assertion.clone(),
             color: match result.status {
                 AssertionStatus::Pass => "#26734d",
                 _ => "#b42318",
-            },
+            }.into(),
             lines,
         }
     });
     stages.chain(branches).chain(assertions).collect()
+}
+
+fn assertion_marks(readings: &LabReadings) -> Vec<drawing::AssertionMark> {
+    readings.assertions.iter().map(|result| drawing::AssertionMark {
+        id: result.assertion.clone(),
+        passed: matches!(result.status, AssertionStatus::Pass),
+        text: result.status.as_str().into(),
+        element: Some(result.at.element.clone()),
+    }).collect()
+}
+
+/// Legend entries laid out in rows across `width`: (x, row, entry).
+fn legend_rows(legend: &[drawing::LegendEntry], width: f64) -> Vec<(f64, usize, &drawing::LegendEntry)> {
+    let mut placed = Vec::new();
+    let (mut x, mut row) = (0., 0);
+    for entry in legend {
+        let span = 12. + entry.text.chars().count() as f64 * 2.4 + 6.;
+        if x > 0. && x + span > width {
+            x = 0.;
+            row += 1;
+        }
+        placed.push((x, row, entry));
+        x += span;
+    }
+    placed
 }
 
 fn svg(
@@ -2608,15 +2637,18 @@ fn svg(
     grid: &Grid,
     gaussian: &Envelope<'_>,
     trace: &Trace,
+    center: &Trace,
     version: Option<BlueprintRevision>,
 ) -> Result<String, String> {
     let [w, h] = bench.table_size;
-    let readings = lab_readings(bench, system, trace);
-    let cards = reading_cards(&readings);
+    let plan = plan(bench, system, grid, trace, center, 4.);
+    let legend = legend_rows(&plan.legend, w.max(120.));
+    let legend_area = legend.last().map_or(0., |(_, row, _)| 7. * (row + 1) as f64 + 4.);
+    let cards = &plan.cards;
     let card_width = cards.iter().flat_map(|card| &card.lines)
         .map(|line| line.chars().count()).max().map_or(0., |chars| chars as f64 * 4. + 12.);
     let columns = (((w + 6.) / (card_width + 6.)) as usize).max(1);
-    let card_height = |row: &[ReadingCard<'_>]| {
+    let card_height = |row: &[drawing::Card]| {
         8. + 6. * row.iter().map(|card| card.lines.len()).max().unwrap_or(0) as f64
     };
     let card_area: f64 = cards.chunks(columns).map(|row| card_height(row) + 6.).sum();
@@ -2629,7 +2661,7 @@ fn svg(
     let modal_area: f64 = modal.iter().map(|(_, r)| modal_size(r)[1] + 6.).sum();
     let modal_width = modal.iter().map(|(_, r)| modal_size(r)[0]).fold(0., f64::max);
     let page_width = w.max(card_width).max(modal_width) + 64.;
-    let page_height = h + 108. + card_area + modal_area;
+    let page_height = h + 108. + legend_area + card_area + modal_area;
     let pt = |[x, y, _]: V3| [x - grid.origin[0], h - (y - grid.origin[1])];
     let points = |p: [V3; 4]| {
         p.map(|p| {
@@ -2647,9 +2679,9 @@ fn svg(
 "##,
         xml(&bench.name)
     );
-    let hole_radius = 1.5_f64.min(grid.pitch / 5.);
-    for hole @ [col, row] in grid.drawing_holes()? {
-        let [x, y] = pt(grid.point(hole));
+    let hole_radius = plan.hole_radius;
+    for ([col, row], &[x, y]) in grid.drawing_holes()?.zip(&plan.holes) {
+        let [x, y] = pt([x, y, 0.]);
         writeln!(
             out,
             r##"<circle cx="{x:.4}" cy="{y:.4}" r="{hole_radius}"/>"##
@@ -2670,6 +2702,36 @@ fn svg(
             )
             .unwrap();
         }
+    }
+    let flat = |[x, y]: [f64; 2]| [x - grid.origin[0], h - (y - grid.origin[1])];
+    let polyline = |points: &[[f64; 2]]| {
+        points.iter().map(|&p| {
+            let [x, y] = flat(p);
+            format!("{x:.4},{y:.4}")
+        }).collect::<Vec<_>>().join(" ")
+    };
+    out.push_str(r##"</g><g id="rulers" font-family="sans-serif" font-size="3" fill="#486581" text-anchor="middle">
+<path stroke="#829ab1" stroke-width=".3" d=""##);
+    for tick in &plan.rulers {
+        let length = if tick.major { 3.5 } else { 2. };
+        match tick.axis {
+            "x" => write!(out, "M{:.4} 0V{:.4}", tick.value_mm, -length),
+            _ => write!(out, "M{w} {:.4}H{:.4}", h - tick.value_mm, w + length),
+        }.unwrap();
+    }
+    out.push_str("\"/>\n");
+    for tick in plan.rulers.iter().filter(|t| t.major) {
+        let value = reading_number(tick.value_mm);
+        match tick.axis {
+            "x" => writeln!(out, r##"<text x="{:.4}" y="-5">{value}</text>"##, tick.value_mm),
+            _ => writeln!(out, r##"<text x="{}" y="{:.4}" text-anchor="start">{value}</text>"##, w + 5., h - tick.value_mm + 1.),
+        }.unwrap();
+    }
+    writeln!(out, r##"<text x="{}" y="-11" text-anchor="end">mm</text>"##, w).unwrap();
+    out.push_str(r##"</g><g id="zones" fill="none" stroke="#829ab1" stroke-width=".4" stroke-dasharray="3 2">
+"##);
+    for zone in &plan.zones {
+        writeln!(out, r##"<polygon data-zone="{}" points="{}"/>"##, xml(&zone.id), polyline(&zone.outline)).unwrap();
     }
     out.push_str(
         r##"</g><g id="mounts" fill="#d9e2ec" stroke="#829ab1" stroke-width="0.45">
@@ -2705,51 +2767,91 @@ fn svg(
             .unwrap();
         }
     }
-    out.push_str(
-        r##"</g><g id="beams" stroke="#007c91" stroke-width=".55">
-"##,
-    );
-    for segment in &gaussian.segments {
-        let [x1, y1] = pt(segment.from);
-        let [x2, y2] = pt(segment.to);
+    out.push_str("</g><g id=\"beams\" stroke-width=\".9\">\n");
+    let mut open: Option<Option<&str>> = None;
+    for beam in &plan.beams {
+        if open != Some(beam.branch.as_deref()) {
+            if open.is_some() {
+                out.push_str("</g>\n");
+            }
+            match &beam.branch {
+                Some(id) => writeln!(out, r##"<g data-branch="{}" stroke="{}">"##, xml(id), beam.color),
+                None => writeln!(out, r##"<g data-beam="unbranched" stroke="{}">"##, beam.color),
+            }.unwrap();
+            open = Some(beam.branch.as_deref());
+        }
+        let [x1, y1] = flat(beam.from);
+        let [x2, y2] = flat(beam.to);
+        let dash = dasharray(&beam.dash);
+        writeln!(out, r##"<line x1="{x1:.4}" y1="{y1:.4}" x2="{x2:.4}" y2="{y2:.4}"{dash}/>"##).unwrap();
+        if let Some(arrow) = &beam.arrow {
+            writeln!(out, r##"<path d="M{}Z" fill="{}" stroke="none"/>"##, polyline(arrow).replace(' ', "L"), beam.color).unwrap();
+        }
+    }
+    if open.is_some() {
+        out.push_str("</g>\n");
+    }
+    out.push_str(r##"</g></g><g id="stages" fill="none" stroke="#243b53" stroke-width=".4">
+"##);
+    for stage in &plan.stages {
+        let [a, b] = stage.travel.map(flat);
         writeln!(
             out,
-            r##"<line x1="{x1:.4}" y1="{y1:.4}" x2="{x2:.4}" y2="{y2:.4}"/>"##
-        )
-        .unwrap();
+            r##"<g data-stage="{}"><polygon points="{}" stroke-dasharray="1.5 1"/><path d="M{:.4} {:.4}L{:.4} {:.4}" stroke-width=".6"/><circle cx="{:.4}" cy="{:.4}" r=".8"/><circle cx="{:.4}" cy="{:.4}" r=".8"/></g>"##,
+            xml(&stage.id), polyline(&stage.outline), a[0], a[1], b[0], b[1], a[0], a[1], b[0], b[1],
+        ).unwrap();
     }
-    out.push_str("</g><g id=\"stage-arms\" stroke-width=\"1.5\">\n");
-    for (branch, report) in readings.branches.iter().zip(&trace.branches) {
-        let Some(color) = branch.color else { continue };
-        writeln!(out, r##"<g data-branch="{}" stroke="{color}">"##, xml(&branch.id)).unwrap();
-        for index in report.paths.iter().flat_map(|path| &path.segment_indices) {
-            let segment = &trace.segments[*index];
-            let [x1, y1] = pt(segment.from);
-            let [x2, y2] = pt(segment.to);
-            writeln!(out, r##"<line x1="{x1:.4}" y1="{y1:.4}" x2="{x2:.4}" y2="{y2:.4}"/>"##).unwrap();
+    out.push_str(r##"</g><g id="symbols" stroke="#102a43" stroke-width=".45" stroke-linejoin="round">
+"##);
+    for symbol in &plan.symbols {
+        writeln!(out, r##"<g data-element="{}" data-symbol="{}">"##, xml(&symbol.id), symbol.kind).unwrap();
+        for stroke in &symbol.strokes {
+            let style = match stroke.role {
+                drawing::Role::Body => r##"fill="#fff" stroke="#102a43""##,
+                drawing::Role::Fill => r##"fill="#334e68" stroke="#102a43""##,
+                drawing::Role::Face => r##"fill="none" stroke="#102a43" stroke-width="1""##,
+                drawing::Role::Hatch => r##"fill="none" stroke="#102a43" stroke-width=".25""##,
+            };
+            let tag = if stroke.closed { "polygon" } else { "polyline" };
+            writeln!(out, r##"<{tag} data-role="{}" points="{}" {style}/>"##,
+                serde_json::to_value(stroke.role).unwrap().as_str().unwrap_or_default(), polyline(&stroke.points)).unwrap();
         }
         out.push_str("</g>\n");
     }
-    out.push_str(
-        r##"</g></g><g id="optics" fill="#102a43" font-family="sans-serif" font-size="4">
-"##,
-    );
-    for (id, position, radius) in bench
-        .elements
-        .iter()
-        .map(|e| (e.id.as_str(), e.position, e.aperture))
-        .chain(
-            bench
-                .sources
-                .iter()
-                .map(|s| (s.id.as_str(), s.position, 3.)),
-        )
-    {
-        let [x, y] = pt(position);
-        let [px, py, pz] = sub(position, grid.origin);
-        writeln!(out, r##"<circle cx="{x:.4}" cy="{y:.4}" r="{radius:.4}" fill="none" stroke="#102a43" stroke-width=".65"/>
-<text x="{:.4}" y="{:.4}">{} ({px:.1}, {py:.1}, {pz:.1})</text>"##,
-            x + 4., y - radius - 2., xml(id)).unwrap();
+    out.push_str(r##"</g><g id="periscopes" fill="none" stroke="#102a43" stroke-width=".45">
+"##);
+    for mark in &plan.periscopes {
+        let [x, y] = flat(mark.at);
+        writeln!(
+            out,
+            r##"<g data-periscope="{}" data-rise="{}"><circle cx="{x:.4}" cy="{y:.4}" r="3"/><path d="M{:.4} {y:.4}H{:.4}M{x:.4} {:.4}V{:.4}"/></g>"##,
+            xml(&mark.id), reading_number(mark.rise_mm), x - 3., x + 3., y - 3., y + 3.,
+        ).unwrap();
+    }
+    writeln!(out, r##"</g><g id="labels" font-family="sans-serif" font-size="{}" fill="#102a43">"##, plan.text_mm).unwrap();
+    for label in &plan.labels {
+        let [x, y] = flat(label.corner);
+        if label.leader {
+            let near = [
+                label.anchor[0].clamp(label.corner[0], label.corner[0] + label.size[0]),
+                label.anchor[1].clamp(label.corner[1], label.corner[1] + label.size[1]),
+            ];
+            let [ax, ay] = flat(label.anchor);
+            let [bx, by] = flat(near);
+            writeln!(out, r##"<line x1="{ax:.4}" y1="{ay:.4}" x2="{bx:.4}" y2="{by:.4}" stroke="#829ab1" stroke-width=".3"/>"##).unwrap();
+        }
+        let fill = match label.kind {
+            "annotation" => r##" fill="#7a4b00" font-style="italic""##,
+            "assertion" if plan.assertions.iter().any(|a| a.id == label.target && a.passed) => r##" fill="#26734d""##,
+            "assertion" => r##" fill="#b42318""##,
+            "zone" | "stage" => r##" fill="#486581""##,
+            _ => "",
+        };
+        writeln!(
+            out,
+            r##"<text data-label="{}" data-target="{}" x="{:.4}" y="{:.4}"{fill}>{}</text>"##,
+            label.kind, xml(&label.target), x + 0.3 * plan.text_mm, y - 0.35 * plan.text_mm, xml(&label.text),
+        ).unwrap();
     }
     let title_y = h + 20.;
     writeln!(
@@ -2770,17 +2872,33 @@ fn svg(
             title_y + 29., version.revision).unwrap();
     }
     let mut y = title_y + 36.;
+    out.push_str("</g><g id=\"legend\" font-family=\"sans-serif\" font-size=\"4\" fill=\"#102a43\">\n");
+    for (x, row, entry) in &legend {
+        let line_y = y + 7. * *row as f64 + 3.;
+        let swatch = if entry.kind == "symbol" {
+            format!(r##"<rect x="{x}" y="{}" width="4" height="4" fill="#d9e2ec" stroke="{}" stroke-width=".4"/>"##, line_y - 3.5, entry.color)
+        } else {
+            let dash = dasharray(&entry.dash);
+            format!(r##"<line x1="{x}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width=".9"{dash}/>"##, line_y - 1.5, x + 9., line_y - 1.5, entry.color)
+        };
+        writeln!(
+            out,
+            r##"<g data-legend="{}" data-key="{}">{swatch}<text x="{}" y="{line_y}">{}</text></g>"##,
+            entry.kind, xml(&entry.key), x + 12., xml(&entry.text),
+        ).unwrap();
+    }
+    y += legend_area;
     out.push_str(r##"</g><g id="lab-readings" font-family="sans-serif" font-size="4">"##);
     for row in cards.chunks(columns) {
         let height = card_height(row);
         for (column, card) in row.iter().enumerate() {
             let x = column as f64 * (card_width + 6.);
-            let color = card.color;
+            let color = &card.color;
             writeln!(
                 out,
                 r##"<g data-kind="{}" data-id="{}" transform="translate({x} {y})" fill="{color}">
 <rect width="{card_width}" height="{height}" rx="2" fill="#fff" stroke="{color}" stroke-width=".5"/>"##,
-                card.kind, xml(card.id),
+                card.kind, xml(&card.id),
             ).unwrap();
             for (index, line) in card.lines.iter().enumerate() {
                 let line_y = 7 + 6 * index;
@@ -3229,6 +3347,38 @@ pub(crate) struct BlueprintRevision {
     pub saved: bool,
 }
 
+/// The plan-view drawing shared by the SVG blueprint and the GUI 2D view, with
+/// text sized at `text_mm` table millimetres.
+pub(crate) fn blueprint_drawing(bench: &Bench, system: &System, text_mm: f64) -> Result<drawing::Drawing, String> {
+    let scene = bench.resolved_stages()?;
+    let bench = scene.as_ref();
+    let trace = center_trace(bench, system)?;
+    let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
+    Ok(plan(bench, system, &Grid::new(bench)?, physical.as_ref().unwrap_or(&trace), &trace, text_mm))
+}
+
+/// The shared drawing with the breadboard holes and the result cards of `readings_trace`.
+fn plan(bench: &Bench, system: &System, grid: &Grid, readings_trace: &Trace, center: &Trace, text_mm: f64) -> drawing::Drawing {
+    let readings = lab_readings(bench, system, readings_trace);
+    let mut plan = drawing::drawing(bench, center, assertion_marks(&readings), text_mm);
+    plan.cards = reading_cards(&readings);
+    if let Ok(holes) = grid.drawing_holes() {
+        plan.holes = holes.map(|hole| {
+            let [x, y, _] = grid.point(hole);
+            [x, y]
+        }).collect();
+    }
+    plan
+}
+
+fn dasharray(dash: &[f64]) -> String {
+    if dash.is_empty() {
+        return String::new();
+    }
+    let pattern: Vec<String> = dash.iter().map(|d| reading_number(*d)).collect();
+    format!(r#" stroke-dasharray="{}""#, pattern.join(" "))
+}
+
 pub fn export_blueprint(bench: &Bench, system: &System, format: &str) -> Result<Value, String> {
     serde_json::to_value(export_blueprint_report(bench, system, format, None)?)
         .map_err(|e| e.to_string())
@@ -3257,7 +3407,7 @@ pub(crate) fn export_blueprint_report(
             "svg" => {
                 let physical = (!bench.branches.is_empty()).then(|| bench.trace_resolved(system)).transpose()?;
                 let content = svg(
-                    bench, system, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), version,
+                    bench, system, &Grid::new(bench)?, &gaussian, physical.as_ref().unwrap_or(&trace), &trace, version,
                 )?;
                 ("svg", "image/svg+xml", content)
             }
@@ -3284,7 +3434,7 @@ pub(crate) fn export_blueprint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optics::bench::{HeightLayer, Periscope, Region, RegionShape, Relay, RelayCheck, RelayCheckKind, Zone, ZoneRect, rotate};
+    use crate::optics::bench::{Annotation, AnnotationTarget, BranchStyle, HeightLayer, Periscope, Region, RegionShape, Relay, RelayCheck, RelayCheckKind, Zone, ZoneRect, rotate};
     #[test]
     fn unexpected_hit_on_a_region_plate_is_reported_not_an_internal_error() {
         let mut bench = template("three_arm").unwrap();
@@ -3603,6 +3753,7 @@ mod tests {
             from: Port::new("S1", "out"),
             to: Port::new("D", "in"),
             via: vec![],
+            style: None,
         }];
         let wavelength = bench.sources[0].wavelength;
         let n = system.material_index("N-BK7_SCHOTT", wavelength).unwrap();
@@ -3756,6 +3907,7 @@ mod tests {
             from: Port::new("S1", "out"),
             to: Port::new("D", "in"),
             via: vec![],
+            style: None,
         }];
         bench
     }
@@ -3937,6 +4089,7 @@ mod tests {
             from: Port::new("S1", "out"),
             to: Port::new("D", "in"),
             via: vec![],
+            style: None,
         }];
         let trace = bench.trace(&system).unwrap();
         let path = &trace.branches[0].paths[0];
@@ -3991,6 +4144,7 @@ mod tests {
             from: Port::new(from, "out"),
             to: Port::new("W", input),
             via: vec![],
+            style: None,
         };
         bench.branches = vec![arm("a", "S1", "in_a"), arm("b", "S2", "in_b")];
         bench.assertions = vec![Assertion {
@@ -4633,7 +4787,7 @@ mod tests {
     }
 
     fn route(id: &str, from: &str, to: &str) -> Branch {
-        Branch { id: id.into(), from: Port::new(from, "out"), to: Port::new(to, "in"), via: vec![] }
+        Branch { id: id.into(), from: Port::new(from, "out"), to: Port::new(to, "in"), via: vec![], style: None }
     }
 
     fn mirror(id: &str, at: V3, incoming: V3, outgoing: V3) -> Element {
@@ -5276,6 +5430,7 @@ mod tests {
             from: Port::new("M1", "reflected"),
             to: Port::new("D", "in"),
             via: vec![],
+            style: None,
         }];
         let result = aim(&bench, false, None, &system).unwrap();
         assert!(result.ok, "{:?}", result.conflicts);
@@ -5333,5 +5488,316 @@ mod tests {
         let mut unknown = bench.clone();
         unknown.zones[0].members.push("nope".into());
         assert!(unknown.validate().unwrap_err().contains("Invalid zone"));
+    }
+
+    fn on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+        let (d, q) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
+        let len = d[0].hypot(d[1]);
+        let t = (q[0] * d[0] + q[1] * d[1]) / (len * len);
+        (q[0] * d[1] - q[1] * d[0]).abs() / len < 1e-6 && (-1e-9..=1. + 1e-9).contains(&t)
+    }
+
+    fn inside(p: [f64; 2], corner: [f64; 2], size: [f64; 2]) -> bool {
+        p[0] > corner[0] + 1e-6 && p[0] < corner[0] + size[0] - 1e-6 && p[1] > corner[1] + 1e-6 && p[1] < corner[1] + size[1] - 1e-6
+    }
+
+    #[test]
+    fn templates_draw_every_part_with_labels_clear_of_symbols_beams_and_each_other() {
+        for name in TEMPLATES {
+            assert_drawn_with_clear_labels(name, &template(name).unwrap(), 4.);
+        }
+    }
+
+    #[test]
+    fn a_compact_layout_with_large_text_keeps_labels_clear_and_draws_leaders() {
+        // Mach–Zehnder squeezed to 30 % about its source, so parts sit about a
+        // body diameter apart, with 7 mm text: labels must move off their anchors.
+        let mut bench = template("mach_zehnder").unwrap();
+        let center = bench.sources[0].position;
+        let squeeze = |p: &mut V3| {
+            for axis in 0..2 {
+                p[axis] = center[axis] + 0.3 * (p[axis] - center[axis]);
+            }
+        };
+        bench.elements.iter_mut().for_each(|e| squeeze(&mut e.position));
+        let plan = assert_drawn_with_clear_labels("compact mach_zehnder", &bench, 7.);
+        let parts: Vec<&drawing::Symbol> = plan.symbols.iter().collect();
+        let nearest = parts.iter().flat_map(|a| parts.iter().filter(move |b| b.id != a.id).map(move |b| {
+            (a.center[0] - b.center[0]).hypot(a.center[1] - b.center[1])
+        })).fold(f64::INFINITY, f64::min);
+        assert!(nearest < 50., "layout not compact: nearest parts {nearest} mm apart");
+        assert!(plan.labels.iter().any(|l| l.leader), "no label needed a leader");
+        for label in plan.labels.iter().filter(|l| l.leader) {
+            assert!(!inside(label.anchor, label.corner, label.size), "{:?}: leader drawn to a point inside its box", label.text);
+        }
+    }
+
+    /// Independent geometric checks of a blueprint drawing: every part drawn
+    /// and labelled, labels clear of every symbol box, of each other and of
+    /// every beam, and arrows on their beams pointing downstream.
+    fn assert_drawn_with_clear_labels(name: &str, bench: &Bench, text_mm: f64) -> drawing::Drawing {
+        let system = System::default();
+        {
+            let plan = blueprint_drawing(bench, &system, text_mm).unwrap();
+            let ids: Vec<&str> =
+                bench.elements.iter().map(|e| e.id.as_str()).chain(bench.sources.iter().map(|s| s.id.as_str())).collect();
+            assert_eq!(plan.symbols.len(), ids.len(), "{name}");
+            for id in &ids {
+                let symbol = plan.symbols.iter().find(|s| s.id == *id).unwrap_or_else(|| panic!("{name}: no symbol for {id}"));
+                assert!(symbol.strokes.iter().all(|s| s.points.len() >= 2), "{name}: {id}");
+                assert!(plan.labels.iter().any(|l| l.target == *id), "{name}: {id} has no label");
+            }
+            assert!(plan.beams.iter().any(|b| b.arrow.is_some()), "{name}: no direction arrows");
+            let symbol_boxes: Vec<([f64; 2], [f64; 2])> = plan.symbols.iter().map(|s| {
+                s.strokes.iter().flat_map(|k| &k.points).fold(
+                    ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+                    |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]),
+                )
+            }).collect();
+            for (i, label) in plan.labels.iter().enumerate() {
+                assert_eq!(label.overlaps, 0, "{name}: label {:?} overlaps", label.text);
+                // Every symbol's bounding box, the label's own target included, stays clear.
+                for (symbol, (lo, hi)) in plan.symbols.iter().zip(&symbol_boxes) {
+                    let apart = label.corner[0] + label.size[0] <= lo[0] + 1e-6
+                        || hi[0] <= label.corner[0] + 1e-6
+                        || label.corner[1] + label.size[1] <= lo[1] + 1e-6
+                        || hi[1] <= label.corner[1] + 1e-6;
+                    assert!(apart, "{name}: label {:?} covers symbol {}", label.text, symbol.id);
+                }
+                // Independent of the placer: no other label box and no beam enters this box.
+                for other in &plan.labels[i + 1..] {
+                    let apart = label.corner[0] + label.size[0] <= other.corner[0] + 1e-6
+                        || other.corner[0] + other.size[0] <= label.corner[0] + 1e-6
+                        || label.corner[1] + label.size[1] <= other.corner[1] + 1e-6
+                        || other.corner[1] + other.size[1] <= label.corner[1] + 1e-6;
+                    assert!(apart, "{name}: {:?} overlaps {:?}", label.text, other.text);
+                }
+                for beam in &plan.beams {
+                    for k in 0..=400 {
+                        let t = k as f64 / 400.;
+                        let p = [beam.from[0] + t * (beam.to[0] - beam.from[0]), beam.from[1] + t * (beam.to[1] - beam.from[1])];
+                        assert!(!inside(p, label.corner, label.size), "{name}: a beam crosses label {:?}", label.text);
+                    }
+                }
+            }
+            for beam in &plan.beams {
+                if let Some([tip, a, b]) = beam.arrow {
+                    let (mid, d) = ([(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.], [beam.to[0] - beam.from[0], beam.to[1] - beam.from[1]]);
+                    assert!((tip[0] - mid[0]) * d[0] + (tip[1] - mid[1]) * d[1] > 0., "{name}: arrow points upstream");
+                    assert!(on_segment(tip, beam.from, beam.to), "{name}: arrow off its beam");
+                }
+            }
+            plan
+        }
+    }
+
+    #[test]
+    fn branch_beams_share_the_reading_colour_in_drawing_and_legend() {
+        let system = System::default();
+        let bench = template("delay_line").unwrap();
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        let scene = bench.resolved_stages().unwrap();
+        let trace = scene.as_ref().trace_resolved(&system).unwrap();
+        let readings = lab_readings(scene.as_ref(), &system, &trace);
+        assert!(readings.branches.len() >= 2);
+        let mut colors = HashSet::new();
+        for branch in &readings.branches {
+            let beams: Vec<_> = plan.beams.iter().filter(|b| b.branch.as_deref() == Some(branch.id.as_str())).collect();
+            assert!(!beams.is_empty(), "{}", branch.id);
+            assert!(beams.iter().all(|b| b.color == branch.color), "{}", branch.id);
+            assert!(plan.legend.iter().any(|e| e.kind == "branch" && e.key == branch.id && e.color == branch.color));
+            assert!(colors.insert(branch.color.as_str()), "branches share {}", branch.color);
+        }
+        assert!(plan.beams.iter().filter(|b| b.branch.is_none()).all(|b| b.color == drawing::NEUTRAL));
+    }
+
+    #[test]
+    fn branch_style_colours_and_dots_beams_legend_readings_and_svg() {
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        let id = bench.branches[0].id.clone();
+        bench.branches[0].style = Some(BranchStyle { color: Some("#1a2b3c".into()), dash: true });
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        let beams: Vec<_> = plan.beams.iter().filter(|b| b.branch.as_deref() == Some(id.as_str())).collect();
+        assert!(!beams.is_empty());
+        for beam in &beams {
+            assert_eq!(beam.color, "#1a2b3c");
+            assert_eq!(beam.dash, if beam.dashed { vec![3., 1.2, 0.8, 1.2] } else { vec![0.8, 1.2] });
+        }
+        let entry = plan.legend.iter().find(|e| e.kind == "branch" && e.key == id).unwrap();
+        assert_eq!((entry.color.as_str(), entry.dash.as_slice()), ("#1a2b3c", [0.8, 1.2].as_slice()));
+        // Other branches keep their palette colour and solid lines.
+        assert!(plan.beams.iter().filter(|b| b.branch.is_some() && b.branch.as_deref() != Some(id.as_str()))
+            .all(|b| b.color != "#1a2b3c" && b.dash.iter().all(|_| b.dashed)));
+        let scene = bench.resolved_stages().unwrap();
+        let trace = scene.as_ref().trace_resolved(&system).unwrap();
+        let readings = lab_readings(scene.as_ref(), &system, &trace);
+        assert_eq!(readings.branches.iter().find(|b| b.id == id).unwrap().color, "#1a2b3c");
+        assert!(plan.cards.iter().any(|c| c.kind == "branch" && c.id == id && c.color == "#1a2b3c"));
+        let svg = export_blueprint(&bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(svg.contains(r##"stroke="#1a2b3c""##) && svg.contains(r#"stroke-dasharray="0.8 1.2""#), "{svg}");
+        for bad in ["#12345", "1a2b3c4", "#12345g"] {
+            bench.branches[0].style = Some(BranchStyle { color: Some(bad.into()), dash: false });
+            let error = bench.validate().unwrap_err();
+            assert!(error.contains("Invalid branch style"), "{bad}: {error}");
+        }
+        let parsed: Branch = serde_json::from_value(json!({
+            "id": "b", "from": {"element": "S1", "port": "out"}, "to": {"element": "D", "port": "in"},
+            "style": {"color": "#00ff00"}
+        })).unwrap();
+        assert_eq!(parsed.style.unwrap().color.as_deref(), Some("#00ff00"));
+    }
+
+    #[test]
+    fn drawing_positions_are_the_stage_solved_part_positions() {
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        let m3 = bench.elements.iter().find(|e| e.id == "M3").unwrap().position;
+        bench.stages[0].position_mm = 2.5;
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        let drawn = |id: &str| plan.positions.iter().find(|p| p.id == id).unwrap().position;
+        // The stage carries M3 along +X; the source stays put.
+        assert_eq!(drawn("M3"), [m3[0] + 2.5, m3[1], m3[2]]);
+        assert_eq!(drawn(&bench.sources[0].id), bench.sources[0].position);
+        assert_eq!(plan.positions.len(), bench.elements.len() + bench.sources.len());
+    }
+
+    #[test]
+    fn catalog_plano_convex_lenses_are_drawn_plano_with_the_flat_face_on_minus_x() {
+        let system = System::default();
+        let bench = template("beam_expander_focus").unwrap();
+        let lenses: Vec<_> = bench.elements.iter().filter(|e| e.kind == Kind::Lens && e.label.contains("LA1509")).collect();
+        assert!(!lenses.is_empty());
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        for lens in lenses {
+            assert_eq!(lens.lens_form, Some(LensForm::Plano), "{}", lens.id);
+            let symbol = plan.symbols.iter().find(|s| s.id == lens.id).unwrap();
+            assert_eq!(symbol.kind, if lens.focal_length < 0. { "plano_concave_lens" } else { "plano_convex_lens" });
+            let n = rotate([1., 0., 0.], lens.rotation());
+            let along = |p: &[f64; 2]| (p[0] - lens.position[0]) * n[0] + (p[1] - lens.position[1]) * n[1];
+            let face = symbol.strokes.iter().find(|s| s.role == drawing::Role::Face).unwrap();
+            assert!(face.points.iter().all(|p| along(p).abs() < 1e-9), "{}: flat face off the element plane", lens.id);
+            assert!(symbol.strokes.iter().flat_map(|s| &s.points).all(|p| along(p) > -1e-9), "{}: glass on the −X side", lens.id);
+        }
+        let lenses = catalog(Some("LA1509"), None);
+        assert_eq!(lenses["items"][0]["lens_form"], "plano");
+        assert!(catalog(Some("KM100"), None)["items"].as_array().unwrap().iter().all(|i| i.get("lens_form").is_none()));
+    }
+
+    #[test]
+    fn blueprint_and_gui_share_the_plate_splitter_holes_and_result_cards() {
+        let system = System::default();
+        let bench = template("delay_line").unwrap();
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        // The template's splitters are BSW10 plates (Kind::Splitter, no modelled substrate).
+        let plates: Vec<_> = bench.elements.iter().filter(|e| e.kind == SPLITTER.kind).collect();
+        assert!(!plates.is_empty() && SPLITTER.part == "BSW10");
+        for e in plates {
+            assert_eq!(plan.symbols.iter().find(|s| s.id == e.id).unwrap().kind, "plate_splitter", "{}", e.id);
+        }
+        let grid = Grid::new(&bench).unwrap();
+        let expected = ((grid.last[0] + 1) * (grid.last[1] + 1)) as usize;
+        assert_eq!(plan.holes.len(), expected);
+        assert_eq!(plan.holes[0], [bench.origin[0], bench.origin[1]]);
+        assert_eq!(plan.holes[1], [bench.origin[0], bench.origin[1] + bench.hole_pitch]);
+        let svg = export_blueprint(&bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
+        let holes = svg.split(r#"<g id="holes""#).nth(1).unwrap().split("</g>").next().unwrap();
+        assert_eq!(holes.matches("<circle").count(), plan.holes.len());
+        assert!(!plan.cards.is_empty());
+        let readings = svg.split(r#"<g id="lab-readings""#).nth(1).unwrap().split("</g><g id=").next().unwrap();
+        for card in &plan.cards {
+            assert!(readings.contains(&format!(r#"data-kind="{}" data-id="{}""#, card.kind, card.id)), "{}", card.id);
+            for line in &card.lines {
+                assert!(readings.contains(&xml(line)), "{line}");
+            }
+        }
+        assert_eq!(readings.matches("data-kind=").count(), plan.cards.len());
+    }
+
+    #[test]
+    fn upper_layer_beams_are_dashed_and_paired_periscopes_mark_their_rise() {
+        let system = System::default();
+        let on = |mut e: Element, layer: &str| {
+            e.layer = Some(layer.into());
+            e
+        };
+        let mut bench = layered_bench(
+            vec![
+                on(aimed("PL", MIRROR, [300., 200., 60.]), "H1"),
+                on(aimed("PU", MIRROR, [310., 215., 100.]), "H2"),
+                on(mount_element("D", DETECTOR, [500., 200., 100.], [1., 0., 0.]), "H2"),
+            ],
+            &[("S1", "out", "PL"), ("PL", "reflected", "PU"), ("PU", "reflected", "D")],
+        );
+        bench.layers = vec![
+            HeightLayer { id: "H1".into(), height_mm: 75. },
+            HeightLayer { id: "H2".into(), height_mm: 145. },
+        ];
+        bench.periscopes = vec![Periscope { id: "P".into(), lower: "PL".into(), upper: "PU".into() }];
+        let result = aim(&bench, false, None, &system).unwrap();
+        assert!(result.ok, "{:?}", result.conflicts);
+        let plan = blueprint_drawing(&result.bench, &system, 4.).unwrap();
+        let mark = &plan.periscopes[0];
+        assert_eq!((mark.id.as_str(), mark.at), ("P", [300., 200.]));
+        assert!((mark.rise_mm - 70.).abs() < 1e-9);
+        assert!(plan.labels.iter().any(|l| l.kind == "periscope" && l.target == "P" && l.text.contains("+70 mm")));
+        let flat: Vec<_> = plan.beams.iter().filter(|b| (b.to[0] - b.from[0]).hypot(b.to[1] - b.from[1]) > 1.).collect();
+        let lower = flat.iter().find(|b| on_segment([250., 200.], b.from, b.to)).expect("lower beam");
+        assert!(!lower.dashed && lower.layer.as_deref() == Some("H1"));
+        let upper = flat.iter().find(|b| on_segment([400., 200.], b.from, b.to)).expect("upper beam");
+        assert!(upper.dashed && upper.layer.as_deref() == Some("H2"));
+        assert!(plan.legend.iter().any(|e| e.kind == "layer" && e.key == "H2" && e.dashed));
+        let svg = export_blueprint(&result.bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(svg.contains(r#"data-periscope="P" data-rise="70""#), "{svg}");
+    }
+
+    #[test]
+    fn annotations_sit_by_their_element_or_branch_and_bad_references_are_rejected() {
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        let branch = bench.branches[0].id.clone();
+        bench.annotations = vec![
+            Annotation { target: AnnotationTarget::Element("M3".into()), text: "Clean before use".into() },
+            Annotation { target: AnnotationTarget::Branch(branch.clone()), text: "Reference arm".into() },
+        ];
+        let plan = blueprint_drawing(&bench, &system, 4.).unwrap();
+        let notes: Vec<_> = plan.labels.iter().filter(|l| l.kind == "annotation").collect();
+        assert_eq!(notes.len(), 2);
+        let m3 = bench.elements.iter().find(|e| e.id == "M3").unwrap().position;
+        assert_eq!((notes[0].target.as_str(), notes[0].anchor), ("M3", [m3[0], m3[1]]));
+        assert_eq!((notes[1].target.as_str(), notes[1].text.as_str()), (branch.as_str(), "Reference arm"));
+        assert!(plan.beams.iter().filter(|b| b.branch.as_deref() == Some(branch.as_str())).any(|b| on_segment(notes[1].anchor, b.from, b.to)));
+        assert!(notes.iter().all(|n| n.overlaps == 0));
+        let svg = export_blueprint(&bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(svg.contains(&format!(r#"data-label="annotation" data-target="{branch}""#)) && svg.contains("Clean before use"));
+        // The target is one object naming exactly one element or branch.
+        let parsed = serde_json::from_value::<Annotation>(json!({"target":{"element":"M3"},"text":"Clean before use"})).unwrap();
+        assert_eq!(parsed, bench.annotations[0]);
+        for shape in [
+            json!({"target":{"element":"M3","branch":branch},"text":"x"}),
+            json!({"target":{},"text":"x"}),
+            json!({"element":"M3","text":"x"}),
+            json!({"target":{"element":"M3"}}),
+        ] {
+            assert!(serde_json::from_value::<Annotation>(shape.clone()).is_err(), "{shape}");
+        }
+        let element = |id: &str| AnnotationTarget::Element(id.into());
+        let note = |text: String, target: AnnotationTarget| Annotation { target, text };
+        for bad in [
+            note("x".into(), element("nope")),
+            note("x".into(), AnnotationTarget::Branch("nope".into())),
+            note(String::new(), element("M3")),
+            note("x".repeat(257), element("M3")),
+        ] {
+            let mut b = bench.clone();
+            b.annotations = vec![bad];
+            assert!(b.validate().unwrap_err().contains("Invalid annotation 0"));
+        }
+        let mut source_note = bench.clone();
+        source_note.annotations = vec![note("Laser".into(), element("S1"))];
+        source_note.validate().unwrap();
+        let mut many = bench.clone();
+        many.annotations = vec![bench.annotations[0].clone(); 65];
+        assert!(many.validate().unwrap_err().contains("annotation budget"));
     }
 }

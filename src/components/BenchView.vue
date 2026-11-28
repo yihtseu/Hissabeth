@@ -23,6 +23,7 @@ import {
     benchRotate,
     type Bench,
     type BenchCatalogItem,
+    type BenchDrawing,
     type BenchElement,
     type BenchRegion,
     type BenchLabCheck,
@@ -111,8 +112,10 @@ const zoneOutlines = computed(() => {
     const b = scene.value;
     if (!b) return [];
     const z = b.origin[2];
+    const drawn = new Map((plan.value?.zones ?? []).map((zone) => [zone.id, zone.outline]));
     return (b.zones ?? []).map((zone) => {
         const pts: [number, number][] =
+            drawn.get(zone.id) ??
             zone.polygon_mm ??
             (zone.rect
                 ? [
@@ -166,6 +169,8 @@ const labInput = computed(() => ({
 }));
 const labSnapshot = shallowRef<{ input: typeof labInput.value; report: BenchLabCheck }>();
 const labRevisionMismatch = ref(false);
+/** The shared plan drawing, with each part's position when it was drawn. */
+const planSnapshot = shallowRef<{ drawing: BenchDrawing; positions: Map<string, Vec3> }>();
 const labCheck = computed(() => labSnapshot.value?.report ?? null);
 const labStale = computed(
     () =>
@@ -286,6 +291,36 @@ async function runLabCheck(): Promise<void> {
     }
 }
 
+let planToken = 0;
+let planZoomTimer: ReturnType<typeof setTimeout> | undefined;
+/** Label height asked of bench_drawing so labels read at about 11 px. */
+const planTextMm = () => Math.min(50, Math.max(1, 11 / factor.value));
+async function runDrawing(): Promise<void> {
+    const request = ++planToken;
+    const input = labInput.value;
+    if (props.mode !== '2d' || !input.bench || !props.online) return;
+    const text_mm = planTextMm();
+    try {
+        const drawing = await callTool(
+            'bench_drawing',
+            benchDirty.value ? { bench: input.bench, text_mm } : { text_mm },
+        );
+        // Any edit replaces labInput at once, so a reply to an older bench is dropped.
+        if (
+            !alive ||
+            request !== planToken ||
+            input !== labInput.value ||
+            drawing.revision !== input.revision
+        )
+            return;
+        // The engine drew stage-solved positions; offsets are measured from those.
+        const positions = new Map<string, Vec3>(drawing.positions.map((p) => [p.id, p.position]));
+        planSnapshot.value = { drawing, positions };
+    } catch {
+        // Keep the last drawing; the lab check reports why the bench cannot be drawn.
+    }
+}
+
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let stagePreviewTimer: ReturnType<typeof setTimeout> | undefined;
 function schedulePreview(stageMotion = false): void {
@@ -300,6 +335,7 @@ function schedulePreview(stageMotion = false): void {
     debounceTimer = setTimeout(() => {
         if (!stageMotion) void run();
         void runLabCheck();
+        void runDrawing();
     }, 120);
 }
 
@@ -318,8 +354,10 @@ onBeforeUnmount(() => {
     alive = false;
     token++;
     labToken++;
+    planToken++;
     clearTimeout(debounceTimer);
     clearTimeout(stagePreviewTimer);
+    clearTimeout(planZoomTimer);
 });
 
 function ensureDraft(): Bench | null {
@@ -429,6 +467,10 @@ function discardBench(): void {
     statusMsg.value = '';
     void run();
     void runLabCheck();
+    // The drawing of the discarded draft must not linger; a newer request also
+    // invalidates any still in flight.
+    planSnapshot.value = undefined;
+    void runDrawing();
 }
 
 function nextElementId(prefix: string): string {
@@ -481,6 +523,7 @@ function addFromCatalog(item: BenchCatalogItem): void {
         ...(item.extinction_ratio != null ? { extinction_ratio: item.extinction_ratio } : {}),
         ...(item.screw_tpi != null ? { screw_tpi: item.screw_tpi } : {}),
         ...(item.lever_arm_mm != null ? { lever_arm_mm: item.lever_arm_mm } : {}),
+        ...(item.lens_form ? { lens_form: item.lens_form } : {}),
     };
     b.elements.push(elem);
     selected.value = id;
@@ -583,6 +626,7 @@ function removeConnection(from: string, port: string): void {
 const holeDots = computed(() => {
     const b = scene.value;
     if (!b || props.mode !== '2d') return [];
+    if (plan.value) return [];
     const [w, h] = b.table_size;
     const cols = Math.floor(w / b.hole_pitch) + 1;
     const rows = Math.floor(h / b.hole_pitch) + 1;
@@ -597,15 +641,10 @@ const holeDots = computed(() => {
     return pts;
 });
 
-const visibleRays = computed(
-    () =>
-        trace.value?.segments.filter(
-            (s) =>
-                !branch.value ||
-                s.branch === branch.value ||
-                branch.value.startsWith(s.branch + '/'),
-        ) ?? [],
-);
+/** The ray split path is the selected one or leads into it. */
+const onBranch = (path: string) =>
+    !branch.value || path === branch.value || branch.value.startsWith(path + '/');
+const visibleRays = computed(() => trace.value?.segments.filter((s) => onBranch(s.branch)) ?? []);
 const failures = computed(
     () => trace.value?.terminations.filter((t) => t.reason !== 'detected') ?? [],
 );
@@ -644,6 +683,113 @@ const project = (p: Vec3): [number, number] => {
     return [500 + x * factor.value + pan.value[0], 340 - y * factor.value + pan.value[1]];
 };
 const path = (points: Vec3[]) => points.map((p) => project(p).join(',')).join(' ');
+/** The plan drawing in 2D mode, without parts that have since been removed. */
+const plan = computed(() => {
+    const snapshot = planSnapshot.value;
+    if (props.mode !== '2d' || !snapshot || !scene.value) return null;
+    const ids = new Set(allEntities.value.map((e) => e.id));
+    const d = snapshot.drawing;
+    return {
+        ...d,
+        symbols: d.symbols.filter((symbol) => ids.has(symbol.id)),
+        labels: d.labels.filter(
+            (label) => !['element', 'source'].includes(label.kind) || ids.has(label.target),
+        ),
+    };
+});
+/** Every hole of the shared drawing as one path of circles: the same holes as the SVG blueprint. */
+const planHolePath = computed(() => {
+    const d = plan.value;
+    if (!d) return '';
+    const r = Math.max(1, d.hole_radius * factor.value);
+    return d.holes
+        .map((hole) => {
+            const [x, y] = flat(hole);
+            return `M${fixed(x - r)} ${fixed(y)}a${fixed(r)} ${fixed(r)} 0 1 0 ${fixed(2 * r)} 0a${fixed(r)} ${fixed(r)} 0 1 0 ${fixed(-2 * r)} 0`;
+        })
+        .join('');
+});
+const planBeams = computed(() => (plan.value?.beams ?? []).filter((beam) => onBranch(beam.path)));
+/** Dash pattern scaled from mm to screen, kept legible when zoomed out. */
+const dashPattern = (dash: number[]) =>
+    dash.length ? dash.map((d) => fixed(d * Math.max(factor.value, 2.7))).join(' ') : undefined;
+const planSymbols = computed(() => new Map((plan.value?.symbols ?? []).map((s) => [s.id, s])));
+const flat = (p: [number, number]) => project([p[0], p[1], scene.value?.origin[2] ?? 0]);
+const flatPath = (points: [number, number][]) => points.map((p) => flat(p).join(',')).join(' ');
+/** Screen offset of a part dragged since the drawing was made, so its symbol follows it. */
+const planShift = (id: string): string | undefined => {
+    const was = planSnapshot.value?.positions.get(id);
+    const now = allEntities.value.find((e) => e.id === id)?.position;
+    if (!was || !now || (was[0] === now[0] && was[1] === now[1])) return undefined;
+    const f = factor.value;
+    return `translate(${(now[0] - was[0]) * f} ${-(now[1] - was[1]) * f})`;
+};
+const planLabels = computed(() => {
+    const d = plan.value;
+    if (!d) return [];
+    const em = d.text_mm;
+    return d.labels.map((label) => {
+        const near: [number, number] = [
+            Math.min(Math.max(label.anchor[0], label.corner[0]), label.corner[0] + label.size[0]),
+            Math.min(Math.max(label.anchor[1], label.corner[1]), label.corner[1] + label.size[1]),
+        ];
+        const tone =
+            label.kind === 'assertion'
+                ? d.assertions.some((a) => a.id === label.target && a.passed)
+                    ? 'pass'
+                    : 'fail'
+                : label.kind;
+        return {
+            kind: label.kind,
+            target: label.target,
+            text: label.text,
+            leader: label.leader,
+            at: flat([label.corner[0] + 0.3 * em, label.corner[1] + 0.35 * em]),
+            leaderFrom: flat(label.anchor),
+            leaderTo: flat(near),
+            tone,
+            shift: ['element', 'source', 'annotation'].includes(label.kind)
+                ? planShift(label.target)
+                : undefined,
+        };
+    });
+});
+const planRulers = computed(() => {
+    const d = plan.value;
+    if (!d) return [];
+    const [x0, y0] = d.origin;
+    return d.rulers
+        .filter((tick) => tick.major)
+        .map((tick) => {
+            const along: [number, number] =
+                tick.axis === 'x' ? [x0 + tick.value_mm, y0] : [x0, y0 + tick.value_mm];
+            const [x, y] = flat(along);
+            return { axis: tick.axis, value_mm: tick.value_mm, x, y };
+        });
+});
+/** The shared drawing holds only the centre ray; a sample-ray path picked in the
+ * branch filter that it does not cover keeps its traced rays. */
+const raysShown = computed(() =>
+    plan.value && (!branch.value || planBeams.value.length)
+        ? visibleRays.value.filter(
+              (ray) =>
+                  !['hit', 'escaped', 'group_surface'].includes(ray.status) ||
+                  ray.branch.includes(':scatter') ||
+                  ray.branch.includes(':ghost'),
+          )
+        : visibleRays.value,
+);
+watch(
+    () => [props.revision, props.online, props.mode],
+    () => void runDrawing(),
+    { immediate: true },
+);
+watch(factor, () => {
+    const drawn = planSnapshot.value?.drawing.text_mm;
+    if (!drawn || Math.abs(planTextMm() / drawn - 1) < 0.25) return;
+    clearTimeout(planZoomTimer);
+    planZoomTimer = setTimeout(() => void runDrawing(), 250);
+});
 const floor = computed(() => {
     const b = scene.value;
     if (!b) return '';
@@ -1184,6 +1330,12 @@ defineExpose({ saveBench, discardBench });
                         "
                     >
                         <polygon :points="floor" class="bench-table" />
+                        <path
+                            v-if="plan?.holes.length"
+                            class="bench-holes plan-holes"
+                            :d="planHolePath"
+                            :data-holes="plan.holes.length"
+                        />
                         <g v-if="holeDots.length" class="bench-holes">
                             <circle
                                 v-for="(pt, hi) in holeDots"
@@ -1208,6 +1360,17 @@ defineExpose({ saveBench, discardBench });
                             :points="path(line)"
                             class="bench-gridline"
                         />
+                        <g v-if="planRulers.length" class="plan-rulers" aria-hidden="true">
+                            <text
+                                v-for="tick in planRulers"
+                                :key="tick.axis + tick.value_mm"
+                                :x="tick.axis === 'x' ? tick.x : tick.x - 6"
+                                :y="tick.axis === 'x' ? tick.y + 14 : tick.y + 3"
+                                :text-anchor="tick.axis === 'x' ? 'middle' : 'end'"
+                            >
+                                {{ tick.value_mm }}
+                            </text>
+                        </g>
                         <g
                             v-for="zone in zoneOutlines"
                             :key="'zone' + zone.id"
@@ -1216,7 +1379,12 @@ defineExpose({ saveBench, discardBench });
                             :data-zone="zone.id"
                         >
                             <polyline :points="zone.points" />
-                            <text :x="zone.center[0]" :y="zone.center[1]" text-anchor="middle">
+                            <text
+                                v-if="!plan"
+                                :x="zone.center[0]"
+                                :y="zone.center[1]"
+                                text-anchor="middle"
+                            >
                                 {{ zone.label }}
                             </text>
                         </g>
@@ -1236,8 +1404,32 @@ defineExpose({ saveBench, discardBench });
                             :points="poly"
                             class="bench-gaussian"
                         />
+                        <g v-if="plan" class="plan-beams" :data-revision="plan.revision">
+                            <template v-for="(beam, i) in planBeams" :key="'beam' + i">
+                                <line
+                                    :x1="flat(beam.from)[0]"
+                                    :y1="flat(beam.from)[1]"
+                                    :x2="flat(beam.to)[0]"
+                                    :y2="flat(beam.to)[1]"
+                                    :stroke="beam.color"
+                                    :stroke-dasharray="dashPattern(beam.dash)"
+                                    :data-branch="beam.branch ?? 'unbranched'"
+                                />
+                                <polygon
+                                    v-if="beam.arrow"
+                                    :points="flatPath(beam.arrow)"
+                                    :fill="beam.color"
+                                />
+                            </template>
+                        </g>
+                        <g v-if="plan" class="plan-stages">
+                            <g v-for="stage in plan.stages" :key="stage.id" :data-stage="stage.id">
+                                <polygon :points="flatPath(stage.outline)" />
+                                <polyline :points="flatPath(stage.travel)" class="travel" />
+                            </g>
+                        </g>
                         <polyline
-                            v-for="(ray, i) in visibleRays"
+                            v-for="(ray, i) in raysShown"
                             :key="'ray' + i"
                             :points="path([ray.from, ray.to])"
                             class="bench-ray"
@@ -1291,19 +1483,35 @@ defineExpose({ saveBench, discardBench });
                             @keydown.enter="selected = e.id"
                             @dblclick="e.kind === 'lens_group' && emit('inspectGroup')"
                         >
-                            <polyline
-                                v-if="e.kind !== 'lens_group'"
-                                :points="shape(e)"
-                                class="bench-body"
-                                :class="e.kind"
-                            />
-                            <polyline
-                                v-for="(curve, i) in groupCurves(e)"
-                                :key="i"
-                                :points="path(curve)"
-                                class="bench-body lens"
-                            />
-                            <polyline :points="shape(e, e.aperture)" class="bench-aperture" />
+                            <g
+                                v-if="planSymbols.get(e.id)"
+                                class="plan-symbol"
+                                :data-symbol="planSymbols.get(e.id)?.kind"
+                                :transform="planShift(e.id)"
+                            >
+                                <component
+                                    :is="stroke.closed ? 'polygon' : 'polyline'"
+                                    v-for="(stroke, i) in planSymbols.get(e.id)?.strokes"
+                                    :key="i"
+                                    :points="flatPath(stroke.points)"
+                                    :class="stroke.role"
+                                />
+                            </g>
+                            <template v-else>
+                                <polyline
+                                    v-if="e.kind !== 'lens_group'"
+                                    :points="shape(e)"
+                                    class="bench-body"
+                                    :class="e.kind"
+                                />
+                                <polyline
+                                    v-for="(curve, i) in groupCurves(e)"
+                                    :key="i"
+                                    :points="path(curve)"
+                                    class="bench-body lens"
+                                />
+                                <polyline :points="shape(e, e.aperture)" class="bench-aperture" />
+                            </template>
                             <g
                                 v-for="region in e.regions ?? []"
                                 :key="region.port"
@@ -1323,8 +1531,13 @@ defineExpose({ saveBench, discardBench });
                                 :cy="project(e.position)[1]"
                                 r="7"
                                 class="bench-center"
+                                :class="{ 'plan-hit': planSymbols.has(e.id) }"
                             />
-                            <text :x="project(e.position)[0] + 10" :y="project(e.position)[1] - 10">
+                            <text
+                                v-if="!plan"
+                                :x="project(e.position)[0] + 10"
+                                :y="project(e.position)[1] - 10"
+                            >
                                 {{ e.id }}
                             </text>
                         </g>
@@ -1339,16 +1552,105 @@ defineExpose({ saveBench, discardBench });
                             @click="selected = s.id"
                             @keydown.enter="selected = s.id"
                         >
+                            <g
+                                v-if="planSymbols.get(s.id)"
+                                class="plan-symbol"
+                                data-symbol="laser"
+                                :transform="planShift(s.id)"
+                            >
+                                <component
+                                    :is="stroke.closed ? 'polygon' : 'polyline'"
+                                    v-for="(stroke, i) in planSymbols.get(s.id)?.strokes"
+                                    :key="i"
+                                    :points="flatPath(stroke.points)"
+                                    :class="stroke.role"
+                                />
+                            </g>
                             <circle
                                 :cx="project(s.position)[0]"
                                 :cy="project(s.position)[1]"
                                 r="8"
+                                :class="{ 'plan-hit': planSymbols.has(s.id) }"
                             />
-                            <text :x="project(s.position)[0] + 12" :y="project(s.position)[1] - 10">
+                            <text
+                                v-if="!plan"
+                                :x="project(s.position)[0] + 12"
+                                :y="project(s.position)[1] - 10"
+                            >
                                 {{ s.id }}
                             </text>
                         </g>
+                        <g v-if="plan" class="plan-periscopes">
+                            <g
+                                v-for="mark in plan.periscopes"
+                                :key="mark.id"
+                                :data-periscope="mark.id"
+                                :data-rise="mark.rise_mm"
+                            >
+                                <circle :cx="flat(mark.at)[0]" :cy="flat(mark.at)[1]" r="9" />
+                                <path
+                                    :d="`M${flat(mark.at)[0] - 9} ${flat(mark.at)[1]}h18M${flat(mark.at)[0]} ${flat(mark.at)[1] - 9}v18`"
+                                />
+                            </g>
+                        </g>
+                        <g
+                            v-if="plan"
+                            class="plan-labels"
+                            :style="{ fontSize: `${plan.text_mm * factor}px` }"
+                        >
+                            <g
+                                v-for="(label, i) in planLabels"
+                                :key="'label' + i"
+                                :transform="label.shift"
+                            >
+                                <line
+                                    v-if="label.leader"
+                                    :x1="label.leaderFrom[0]"
+                                    :y1="label.leaderFrom[1]"
+                                    :x2="label.leaderTo[0]"
+                                    :y2="label.leaderTo[1]"
+                                />
+                                <text
+                                    :x="label.at[0]"
+                                    :y="label.at[1]"
+                                    :class="label.tone"
+                                    :data-label="label.kind"
+                                    :data-target="label.target"
+                                >
+                                    {{ label.text }}
+                                </text>
+                            </g>
+                        </g>
                     </svg>
+                    <ul v-if="plan?.legend.length" class="plan-legend">
+                        <li
+                            v-for="entry in plan.legend"
+                            :key="entry.kind + entry.key"
+                            :data-legend="entry.kind"
+                            :data-key="entry.key"
+                        >
+                            <span
+                                class="swatch"
+                                :class="entry.kind"
+                                :style="{
+                                    borderColor: entry.color,
+                                    borderStyle: entry.dash.length ? 'dashed' : 'solid',
+                                }"
+                            ></span>
+                            {{ entry.text }}
+                        </li>
+                    </ul>
+                    <ul v-if="plan?.cards.length" class="plan-cards">
+                        <li
+                            v-for="card in plan.cards"
+                            :key="card.kind + card.id"
+                            :data-kind="card.kind"
+                            :data-id="card.id"
+                            :style="{ borderColor: card.color, color: card.color }"
+                        >
+                            <span v-for="(line, li) in card.lines" :key="li">{{ line }}</span>
+                        </li>
+                    </ul>
                     <p class="bench-help">
                         {{ tr('optical.cameraHelp') }}
                         <span v-if="mode === '2d'"> · {{ tr('benchLab.dragHint') }}</span>
@@ -1877,6 +2179,7 @@ defineExpose({ saveBench, discardBench });
     pointer-events: none;
     box-shadow: var(--shadow-sm);
 }
+.plan-holes,
 .bench-holes circle {
     fill: var(--border-strong);
     pointer-events: none;
@@ -2042,6 +2345,141 @@ defineExpose({ saveBench, discardBench });
 }
 .bench-zone.flagged polyline {
     stroke: var(--danger);
+}
+.plan-beams line {
+    stroke-width: 2;
+}
+.plan-beams polygon {
+    stroke: none;
+}
+.plan-stages polygon {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1;
+    stroke-dasharray: 5 3;
+}
+.plan-stages .travel {
+    fill: none;
+    stroke: var(--text);
+    stroke-width: 1.5;
+}
+.plan-symbol polygon,
+.plan-symbol polyline {
+    stroke: var(--text);
+    stroke-width: 1;
+    stroke-linejoin: round;
+}
+.plan-symbol .body {
+    fill: var(--panel);
+}
+.plan-symbol .fill {
+    fill: var(--text);
+}
+.plan-symbol .face {
+    fill: none;
+    stroke-width: 2.2;
+}
+.plan-symbol .hatch {
+    fill: none;
+    stroke-width: 0.6;
+}
+.bench-object.chosen .plan-symbol polygon,
+.bench-object.chosen .plan-symbol polyline {
+    stroke: var(--accent);
+}
+.bench-object.flagged .plan-symbol .body {
+    stroke: var(--danger);
+    stroke-dasharray: 4 2;
+}
+.bench-center.plan-hit,
+.bench-source circle.plan-hit {
+    fill: transparent;
+    stroke: none;
+}
+.bench-object.chosen .bench-center.plan-hit {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2;
+}
+.plan-periscopes {
+    fill: none;
+    stroke: var(--warning);
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+.plan-labels {
+    pointer-events: none;
+}
+.plan-labels text {
+    fill: var(--text);
+    paint-order: stroke;
+    stroke: var(--panel);
+    stroke-width: 3px;
+}
+.plan-labels text.annotation {
+    fill: var(--warning);
+    font-style: italic;
+}
+.plan-labels text.pass {
+    fill: var(--success, #26734d);
+}
+.plan-labels text.fail {
+    fill: var(--danger);
+}
+.plan-labels text.zone,
+.plan-labels text.stage {
+    fill: var(--muted);
+}
+.plan-labels line {
+    stroke: var(--muted);
+    stroke-width: 1;
+}
+.plan-rulers text {
+    fill: var(--muted);
+    font-size: 10px;
+    pointer-events: none;
+}
+.plan-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 11px;
+}
+.plan-cards li {
+    display: flex;
+    flex-direction: column;
+    padding: 3px 6px;
+    border: 1px solid;
+    border-radius: 4px;
+    background: var(--surface);
+}
+.plan-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    color: var(--muted);
+    font-size: 12px;
+}
+.plan-legend li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.plan-legend .swatch {
+    width: 18px;
+    height: 0;
+    border-top-width: 2px;
+}
+.plan-legend .swatch.symbol {
+    width: 10px;
+    height: 10px;
+    border-width: 1px;
 }
 .bench-zone text {
     fill: var(--muted);
