@@ -611,7 +611,7 @@ export interface BenchLabIssue {
 export interface BenchValueBasis {
     kind: 'model' | 'lower_bound' | 'upper_bound' | 'estimate';
     assumptions?: {
-        code: 'thin_splitter' | 'thin_lens' | 'thin_plate' | 'paraxial';
+        code: 'thin_splitter' | 'thin_lens' | 'thin_plate' | 'paraxial' | 'in_phase_launch';
         elements?: string[];
     }[];
     omitted?: { code: 'band_enclosure'; detail: string }[];

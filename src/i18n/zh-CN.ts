@@ -2203,6 +2203,7 @@ export default {
                 thin_lens: '薄透镜 {elements}',
                 thin_plate: '薄片 {elements}',
                 paraxial: '傍轴近似',
+                in_phase_launch: '光源同相发射 {elements}',
             },
             omission: { band_enclosure: '波段最大值未被包络' },
             residual: '残差 {value} {unit}',

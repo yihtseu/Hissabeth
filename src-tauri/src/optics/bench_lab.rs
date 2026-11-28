@@ -1870,6 +1870,9 @@ pub(crate) enum AssumptionCode {
     /// Paraxial ray-transfer matrices, with each thin element's principal
     /// planes at the element plane.
     Paraxial,
+    /// Sources of one coherence group launch in phase, each at its own
+    /// position: an OPL difference between their arms counts from the launches.
+    InPhaseLaunch,
 }
 
 #[derive(schemars::JsonSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1883,7 +1886,7 @@ pub(crate) enum OmissionCode {
 #[derive(schemars::JsonSchema, Serialize, Clone, Debug, PartialEq)]
 pub(crate) struct Assumption {
     pub code: AssumptionCode,
-    /// Elements the assumption applies to.
+    /// Elements (sources, for `in_phase_launch`) the assumption applies to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub elements: Vec<String>,
 }
@@ -2129,12 +2132,66 @@ fn reached<'a>(report: &'a BranchReport, from: &Port) -> Result<&'a BranchPath, 
     Ok(path)
 }
 
-fn equal_opl(a: &BranchPath, b: &BranchPath, from: &Port) -> Result<f64, PathBreak> {
-    // Both paths were built from the same split arrival, so they share a source and wavelength.
-    if a.start_segment != b.start_segment {
-        return Err(PathBreak::new(&from.element, &from.port, "different_start"));
+/// Two arms measured from a shared coherent origin.
+struct Rooted {
+    paths: [BranchPath; 2],
+    /// Sources taken to launch in phase, when the arms come from two of them.
+    launched: Vec<String>,
+}
+
+/// Arms of one source count from the last segment they share, so the common
+/// propagation cancels; arms of two mutually coherent sources count from their
+/// launches.
+fn common_origin(
+    bench: &Bench,
+    segments: &[bench::Segment],
+    [a, b]: [&BranchPath; 2],
+    at: &Port,
+) -> Result<Rooted, PathBreak> {
+    if a.source == b.source {
+        if a.start_segment == b.start_segment {
+            return Ok(Rooted {
+                paths: [a.clone(), b.clone()],
+                launched: Vec::new(),
+            });
+        }
+        let shared: HashSet<usize> = BranchPath::ancestry(segments, b.attachment(segments))
+            .into_iter()
+            .collect();
+        let origin = BranchPath::ancestry(segments, a.attachment(segments))
+            .into_iter()
+            .find(|at| shared.contains(at));
+        return Ok(Rooted {
+            paths: [
+                a.rooted_at(bench, segments, origin),
+                b.rooted_at(bench, segments, origin),
+            ],
+            launched: Vec::new(),
+        });
     }
-    Ok(a.opl_mm - b.opl_mm)
+    let group = |id: &str| {
+        bench
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.coherence.as_ref())
+            .map(|c| c.group.as_str())
+    };
+    match (group(&a.source), group(&b.source)) {
+        (Some(ga), Some(gb)) if ga == gb => Ok(Rooted {
+            paths: [
+                a.rooted_at(bench, segments, None),
+                b.rooted_at(bench, segments, None),
+            ],
+            launched: sorted_unique(vec![a.source.clone(), b.source.clone()]),
+        }),
+        _ => Err(
+            PathBreak::new(&at.element, &at.port, "incoherent_sources").with_detail(format!(
+                "sources {} and {} share no coherence group",
+                a.source, b.source
+            )),
+        ),
+    }
 }
 
 fn colinear(
@@ -2378,8 +2435,20 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
         let [first, second] = a.branches.each_ref().map(|id| branches[id.as_str()]);
         let paths = reached(reports[first.id.as_str()], &first.from)
             .and_then(|pa| Ok([pa, reached(reports[second.id.as_str()], &second.from)?]));
+        let rooted = match (&paths, a.kind) {
+            (Ok(paths), AssertionKind::EqualOpl) => Some(common_origin(bench, &trace.segments, *paths, &first.from)),
+            _ => None,
+        };
         let mut basis = match (&paths, a.kind) {
-            (Ok(paths), AssertionKind::EqualOpl) => comparison_basis(bench, *paths, true),
+            (Ok(_), AssertionKind::EqualOpl) => match &rooted {
+                Some(Ok(rooted)) => {
+                    let [ra, rb] = &rooted.paths;
+                    let mut basis = comparison_basis(bench, [ra, rb], true);
+                    basis.assume(AssumptionCode::InPhaseLaunch, rooted.launched.clone());
+                    basis
+                }
+                _ => Basis::default(),
+            },
             (Ok(paths), AssertionKind::Dispersion) => comparison_basis(bench, *paths, false),
             (Ok(paths), AssertionKind::Colinear) => {
                 let mut basis = comparison_basis(bench, *paths, true);
@@ -2402,7 +2471,10 @@ fn check_assertions(bench: &Bench, system: &System, trace: &Trace) -> Vec<Assert
         };
         let compared = paths.clone().and_then(|[pa, pb]| {
             match a.kind {
-                AssertionKind::EqualOpl => equal_opl(pa, pb, &first.from).map(AssertionValue::Opl),
+                AssertionKind::EqualOpl => match rooted.as_ref().expect("rooted equal OPL arms") {
+                    Ok(Rooted { paths: [ra, rb], .. }) => Ok(AssertionValue::Opl(ra.opl_mm - rb.opl_mm)),
+                    Err(error) => Err(error.clone()),
+                },
                 AssertionKind::Colinear => colinear(trace, bench, [first, second], [pa, pb])
                     .map(AssertionValue::Colinear),
                 AssertionKind::Dispersion => dispersion(system, a, [pa, pb], &second.to).map(AssertionValue::Dispersion),
@@ -5131,6 +5203,127 @@ mod tests {
 
     /// Mach–Zehnder with element `a` inserted in arm A (BS1→M1, along +Y) and,
     /// optionally, `b` in arm B (BS1→M2, along +X).
+    #[test]
+    fn equal_opl_counts_from_the_shared_origin_across_starts_endpoints_and_coherent_sources() {
+        let system = System::default();
+        let arm = |id: &str, from: Port, to: Port, via: Vec<Port>| Branch {
+            id: id.into(),
+            from,
+            to,
+            via,
+            style: None,
+        };
+        let compare = |bench: &Bench, pair: [&str; 2]| {
+            let mut b = bench.clone();
+            b.assertions = vec![Assertion {
+                id: "cmp".into(),
+                branches: pair.map(String::from),
+                ..template("mach_zehnder").unwrap().assertions[0].clone()
+            }];
+            b.validate().unwrap();
+            lab_check(&b, &system).unwrap()["assertions"][0].clone()
+        };
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.branches.push(arm(
+            "launch_a",
+            Port::new("S1", "out"),
+            Port::new("BS2", "in_a"),
+            vec![Port::new("BS1", "reflected")],
+        ));
+        bench.branches.push(arm(
+            "from_m2",
+            Port::new("M2", "reflected"),
+            Port::new("BS2", "in_b"),
+            vec![],
+        ));
+        bench.branches.push(arm(
+            "b_to_m2",
+            Port::new("BS1", "transmitted"),
+            Port::new("M2", "in"),
+            vec![],
+        ));
+        let trace = bench.trace(&system).unwrap();
+        let opl = |id: &str| trace.branches.iter().find(|r| r.id == id).unwrap().paths[0].opl_mm;
+        let prefix = opl("launch_a") - opl("arm_a");
+        assert!(prefix > 1., "launch to BS1: {prefix}");
+        // An arm starting at the source and one starting at BS1 share the
+        // launch-to-BS1 flight, which cancels: the arms are still balanced.
+        let across = compare(&bench, ["launch_a", "arm_b"]);
+        assert_eq!(across["status"], "pass", "{across}");
+        assert!(across["value"].as_f64().unwrap().abs() < 1e-9, "{across}");
+        assert_eq!(
+            across["basis"],
+            json!({"kind": "model", "assumptions": [{"code": "thin_splitter", "elements": ["BS1"]}]})
+        );
+        // An arm starting at M2 shares the launch-to-BS1 flight with arm_a: the
+        // BS1–M2 leg is prepended and the arms balance again.
+        let downstream = compare(&bench, ["arm_a", "from_m2"]);
+        assert_eq!(downstream["status"], "pass", "{downstream}");
+        assert!(
+            downstream["value"].as_f64().unwrap().abs() < 1e-9,
+            "{downstream}"
+        );
+        assert!(
+            (opl("arm_b") - opl("from_m2") - 200.).abs() < 1.,
+            "BS1 to M2"
+        );
+        assert_eq!(downstream["basis"], across["basis"]);
+        // Different endpoints compare their full lengths from the shared split:
+        // BS1–M1–BS2 against BS1–M2.
+        let endpoints = compare(&bench, ["arm_a", "b_to_m2"]);
+        let expected = opl("arm_a") - opl("b_to_m2");
+        assert!(
+            (endpoints["value"].as_f64().unwrap() - expected).abs() < 1e-9,
+            "{endpoints}"
+        );
+        assert!((expected - 200.).abs() < 1., "M2 to BS2: {expected}");
+        // A second source counts from its own launch only when it shares a
+        // coherence group with the first.
+        let mut two = bench.clone();
+        let mut s2 = two.sources[0].clone();
+        s2.id = "S2".into();
+        s2.position = [450., 700., 75.];
+        s2.direction = [0., -1., 0.];
+        two.sources.push(s2);
+        two.connections.push(Connection {
+            from: "S2".into(),
+            port: "out".into(),
+            to: "D2".into(),
+        });
+        two.branches.push(arm(
+            "second",
+            Port::new("S2", "out"),
+            Port::new("D2", "in"),
+            vec![],
+        ));
+        let incoherent = compare(&two, ["launch_a", "second"]);
+        assert_eq!(incoherent["value"], Value::Null, "{incoherent}");
+        assert_eq!(
+            incoherent["break"]["reason"], "incoherent_sources",
+            "{incoherent}"
+        );
+        for source in &mut two.sources {
+            source.coherence = Some(bench::Coherence {
+                group: "laser".into(),
+                length_mm: None,
+            });
+        }
+        // arm_a starts at BS1, so its launch-to-BS1 flight is prepended:
+        // 150 + 200 + 200 = 550 mm against S2's 700 − 550 = 150 mm to D2.
+        let launched = compare(&two, ["arm_a", "second"]);
+        assert!(
+            (launched["value"].as_f64().unwrap() - 400.).abs() < 1e-6,
+            "{launched}"
+        );
+        assert!(
+            launched["basis"]["assumptions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"code": "in_phase_launch", "elements": ["S1", "S2"]})),
+            "{launched}"
+        );
+    }
+
     fn mach_zehnder_with(a: Element, b: Option<Element>) -> Bench {
         let mut bench = template("mach_zehnder").unwrap();
         bench.assertions.clear();
@@ -5150,6 +5343,52 @@ mod tests {
             bench.elements.push(element);
         }
         bench
+    }
+
+    #[test]
+    fn rooting_a_path_prepends_the_prefix_glass_with_its_thickness() {
+        let system = System::default();
+        let mut bench = template("mach_zehnder").unwrap();
+        bench.assertions.clear();
+        bench.elements = vec![
+            plate("P1", [200., 200., 75.], [1., 0., 0.], 6.),
+            plate("P2", [300., 200., 75.], [1., 0., 0.], 4.),
+            mount_element("D", DETECTOR, [450., 200., 75.], [1., 0., 0.]),
+        ];
+        bench.connections = [("S1", "P1"), ("P1", "P2"), ("P2", "D")]
+            .map(|(from, to)| Connection {
+                from: from.into(),
+                port: "out".into(),
+                to: to.into(),
+            })
+            .into();
+        bench.branches = [("line", "S1"), ("after", "P2")]
+            .map(|(id, from)| Branch {
+                id: id.into(),
+                from: Port::new(from, "out"),
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            })
+            .into();
+        let trace = bench.trace(&system).unwrap();
+        let [line, after] = [0, 1].map(|i| &trace.branches[i].paths[0]);
+        assert_eq!(after.glass.len(), 1, "{:?}", after.glass);
+        let rooted = after.rooted_at(&bench, &trace.segments, None);
+        assert!(
+            (rooted.opl_mm - line.opl_mm).abs() <= 1e-9,
+            "{} vs {}",
+            rooted.opl_mm,
+            line.opl_mm
+        );
+        assert!((rooted.length_mm - line.length_mm).abs() <= 1e-9);
+        assert_eq!(rooted.segment_indices, line.segment_indices);
+        assert_eq!(rooted.ports, line.ports);
+        assert_eq!(
+            serde_json::to_value(&rooted.glass).unwrap(),
+            serde_json::to_value(&line.glass).unwrap()
+        );
+        assert_eq!(rooted.glass[0].thickness_mm, 6.);
     }
 
     #[test]

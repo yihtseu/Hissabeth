@@ -2286,6 +2286,7 @@ export default {
                 thin_lens: 'thin lenses {elements}',
                 thin_plate: 'thin plates {elements}',
                 paraxial: 'paraxial',
+                in_phase_launch: 'sources launched in phase {elements}',
             },
             omission: { band_enclosure: 'band maximum not enclosed' },
             residual: 'Residual {value} {unit}',

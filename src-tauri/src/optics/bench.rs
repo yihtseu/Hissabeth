@@ -4277,6 +4277,39 @@ mod tests {
         (system, bench)
     }
     #[test]
+    fn rooting_a_lens_group_exit_path_keeps_the_group_interior() {
+        use super::super::Surface;
+        let (mut system, mut bench) = group_scene();
+        system.surfaces = vec![
+            Surface::sphere(0., 8., "1.5:60", 12.5),
+            Surface::sphere(0., 0., "AIR", 12.5),
+        ];
+        bench.sources[0].position[1] = 200.;
+        bench.sources[0].wavelength = 587.562;
+        for (id, from) in [
+            ("through_group", Port::new("S1", "out")),
+            ("from_group", Port::new("G", "out")),
+        ] {
+            bench.branches.push(Branch {
+                id: id.into(),
+                from,
+                to: Port::new("D", "in"),
+                via: vec![],
+                style: None,
+            });
+        }
+        let trace = bench.trace(&system).unwrap();
+        let [through, exit] = [0, 1].map(|i| &trace.branches[i].paths[0]);
+        assert!((exit.opl_mm - 52.).abs() <= 1e-9);
+        // Measured from the launch, the exit arm regains the 50 mm approach and
+        // the 8 mm of n = 1.5 glass inside the group: 50 + 12 + 52.
+        let rooted = exit.rooted_at(&bench, &trace.segments, None);
+        assert!((rooted.opl_mm - 114.).abs() <= 1e-9, "{}", rooted.opl_mm);
+        assert!((rooted.length_mm - 110.).abs() <= 1e-9);
+        assert_eq!(rooted.segment_indices, through.segment_indices);
+        assert_eq!(rooted.ports, through.ports);
+    }
+    #[test]
     fn lens_group_propagation_integrates_glass_and_air_with_linked_segments() {
         use super::super::Surface;
         let (mut system, mut bench) = group_scene();

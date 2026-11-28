@@ -107,7 +107,10 @@ pub struct Assertion {
     /// second about their shared exit direction (rad or mrad).
     pub kind: AssertionKind,
     /// Two distinct branch IDs (the same ID twice for an absolute `parity`).
-    /// Equal OPL takes the first branch minus the second.
+    /// Equal OPL takes the first branch minus the second, both measured from
+    /// the last segment the two arms share (the source launch when they share
+    /// none); arms of two sources need a shared coherence group and count from
+    /// launches taken to be in phase.
     pub branches: [String; 2],
     pub target: f64,
     pub unit: AssertionUnit,
@@ -356,13 +359,6 @@ impl Bench {
                 }
                 AssertionKind::EqualOpl => {
                     matches!(assertion.unit, AssertionUnit::Mm | AssertionUnit::Um)
-                        && a.from.element == b.from.element
-                        && a.from.port != b.from.port
-                        && a.to.element == b.to.element
-                        && self
-                            .elements
-                            .iter()
-                            .any(|e| e.id == a.from.element && e.ports().len() > 1)
                 }
                 AssertionKind::Colinear => {
                     matches!(
@@ -527,7 +523,7 @@ pub struct BranchReport {
     pub(in crate::optics) stage_ids: Vec<String>,
 }
 
-#[derive(schemars::JsonSchema, Debug, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize)]
 pub struct BranchPath {
     pub source: String,
     pub wavelength_nm: f64,
@@ -682,13 +678,8 @@ impl PathIndex {
                         .collect()
                 };
                 let mut paths = paths;
-                for pass in paths.iter_mut().flat_map(|path| path.glass.iter_mut()) {
-                    pass.thickness_mm = bench
-                        .elements
-                        .iter()
-                        .find(|e| e.id == pass.element)
-                        .and_then(|e| e.substrate.as_ref())
-                        .map_or(0., |s| s.thickness_mm);
+                for path in &mut paths {
+                    path.fill_thickness(bench);
                 }
                 let interruption = paths.is_empty().then(|| {
                     PathBreak::new(&branch.from.element, &branch.from.port, "start_not_reached")
@@ -801,6 +792,74 @@ impl PathIndex {
 }
 
 impl BranchPath {
+    /// The segments `start` descends from, `start` first, back to the source launch.
+    pub(in crate::optics) fn ancestry(segments: &[Segment], start: Option<usize>) -> Vec<usize> {
+        std::iter::successors(start, |&at| {
+            segments[at]
+                .flight
+                .as_ref()
+                .and_then(|f| f.previous_segment)
+        })
+        .collect()
+    }
+
+    /// The last segment before the path's own first one: the arrival at the
+    /// start element, or past it when the start element (a lens group) has
+    /// internal propagation the path leaves out.
+    pub(in crate::optics) fn attachment(&self, segments: &[Segment]) -> Option<usize> {
+        match self.segment_indices.first() {
+            Some(&first) => segments[first]
+                .flight
+                .as_ref()
+                .and_then(|f| f.previous_segment),
+            None => self.start_segment,
+        }
+    }
+
+    fn fill_thickness(&mut self, bench: &Bench) {
+        for pass in &mut self.glass {
+            pass.thickness_mm = bench
+                .elements
+                .iter()
+                .find(|e| e.id == pass.element)
+                .and_then(|e| e.substrate.as_ref())
+                .map_or(0., |s| s.thickness_mm);
+        }
+    }
+
+    /// The same path measured from `origin`, a segment its attachment descends
+    /// from (`None` is the source launch): the propagation in between is prepended.
+    pub(in crate::optics) fn rooted_at(
+        &self,
+        bench: &Bench,
+        segments: &[Segment],
+        origin: Option<usize>,
+    ) -> BranchPath {
+        let mut rooted = BranchPath {
+            start_segment: origin,
+            length_mm: 0.,
+            opl_mm: 0.,
+            phase_rad: 0.,
+            glass: Vec::new(),
+            ports: Vec::new(),
+            segment_indices: Vec::new(),
+            ..self.clone()
+        };
+        if let Some(attachment) = self.attachment(segments).filter(|&at| Some(at) != origin) {
+            rooted.append_flights(segments, origin, attachment);
+            rooted.fill_thickness(bench);
+        }
+        rooted.length_mm += self.length_mm;
+        rooted.opl_mm += self.opl_mm;
+        rooted.phase_rad += self.phase_rad;
+        rooted.glass.extend(self.glass.iter().cloned());
+        for port in &self.ports {
+            rooted.push_port(port.clone());
+        }
+        rooted.segment_indices.extend(&self.segment_indices);
+        rooted
+    }
+
     fn push_port(&mut self, port: Port) {
         if self.ports.last() != Some(&port) {
             self.ports.push(port);
