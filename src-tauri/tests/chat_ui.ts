@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
 import { readFile, mkdir, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { resolve, extname } from 'node:path';
 import { defaultPreferences } from './ui_preferences';
 import { reviewOf } from '../../scripts/chat-figures';
@@ -66,6 +67,14 @@ try {
         if (command === 'chat_runtime') return { node: '/node', agents: [{ name: 'codex', installed: true }, { name: 'claude', installed: true }] };
         if (command === 'chat_reset') return;
         // Stands in for the app's chat_figure command (tested in chat.rs).
+        // Stands in for chat.rs storing an attached image under its hash.
+        if (command === 'fixture_store_image') {
+            const bytes = Buffer.from(args.data, 'base64');
+            const file = `${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}.${args.mime.split('/')[1].replace('jpeg', 'jpg')}`;
+            await mkdir(resolve(workspace, 'chat-figures'), { recursive: true });
+            await writeFile(resolve(workspace, 'chat-figures', file), bytes);
+            return { mime: args.mime, filename: args.filename, bytes: bytes.length, file };
+        }
         if (command === 'chat_figure') return (await readFile(resolve(workspace, 'chat-figures', args.file))).toString('base64');
         throw Error('Unexpected command: ' + command);
     });
@@ -89,8 +98,9 @@ try {
                     if (args.request.prompt === 'fail to start') throw Error('Fixture launch failure');
                     const records = JSON.parse(localStorage.getItem('fixture.history') || '[]');
                     let record = records.find((record: any) => record.id === args.request.conversationId);
-                    if (!record) { record = { id: args.request.id, provider: args.request.provider, model: args.request.model, title: args.request.prompt, updatedAt: Date.now(), messages: [], outcome: '', error: '' }; records.push(record); }
-                    record.messages.push({ id: args.request.id, kind: 'user', text: args.request.prompt });
+                    const images = await Promise.all((args.request.images ?? []).map((image: any) => window.__host('fixture_store_image', image)));
+                    if (!record) { record = { id: args.request.id, provider: args.request.provider, model: args.request.model, title: args.request.prompt || images[0]?.filename, updatedAt: Date.now(), messages: [], outcome: '', error: '' }; records.push(record); }
+                    record.messages.push({ id: args.request.id, kind: 'user', text: args.request.prompt, ...(images.length ? { images } : {}) });
                     window.__activeRecord = record.id;
                     window.__activeTurn = args.request.id;
                     localStorage.setItem('fixture.history', JSON.stringify(records));
@@ -123,6 +133,7 @@ try {
     const savedBench = (await optical('bench_get')).bench;
     const failing = structuredClone(savedBench);
     failing.assertions[0].target += 50;
+    const hardwarePng = (await optical('bench_export_blueprint', { bench: savedBench, format: 'png', px_per_mm: 0.5 })).content as string;
     const wrap = (result: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
     const labReview = reviewOf(wrap(await optical('bench_lab_check', { bench: failing })), workspace);
     const hardware: Record<string, any>[] = [];
@@ -325,6 +336,174 @@ try {
     await expect(page.locator('.chat-checks .chat-checks-badge')).toHaveText('Lab check failed');
     for (const figure of hardware)
         await expect.poll(() => page.locator(`.chat-figure[data-file="${figure.file}"] img`).evaluate((img: HTMLImageElement) => img.naturalWidth), { timeout: 20000 }).toBeGreaterThan(0);
+    // Reference images: pasted, dropped and picked into the composer, sent
+    // without text, kept in history from their stored copies.
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await page.evaluate(async () => {
+        const image = async (type: string, colour: string, name: string) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 40; canvas.height = 30;
+            const context = canvas.getContext('2d')!;
+            context.fillStyle = colour; context.fillRect(0, 0, 40, 30);
+            const blob = await new Promise<Blob>(done => canvas.toBlob(b => done(b!), type));
+            return new File([blob], name, { type });
+        };
+        const pasted = new DataTransfer();
+        pasted.items.add(await image('image/png', '#c33', 'sketch.png'));
+        document.querySelector('#agent-message')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: pasted, bubbles: true, cancelable: true }));
+        const dropped = new DataTransfer();
+        dropped.items.add(await image('image/webp', '#33c', 'photo.webp'));
+        dropped.items.add(new File(['notes'], 'notes.txt', { type: 'text/plain' }));
+        const box = document.querySelector('.composer-box')!;
+        box.dispatchEvent(new DragEvent('dragover', { dataTransfer: dropped, bubbles: true, cancelable: true }));
+        box.dispatchEvent(new DragEvent('drop', { dataTransfer: dropped, bubbles: true, cancelable: true }));
+    });
+    // WebView2 only delivers HTML drag and drop with Tauri's native handler off.
+    const tauriConfig = JSON.parse(await readFile(resolve(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+    assert.equal(tauriConfig.app.windows[0].dragDropEnabled, false);
+    const thumbnails = page.getByRole('list', { name: 'Attached images', exact: true }).locator('li');
+    await expect(thumbnails).toHaveCount(2);
+    await expect(page.locator('.chat-footer-banner')).toContainText('Not attached: notes.txt');
+    // A 2x1 GIF, picked together with a PNG that is then removed.
+    const gif = Buffer.from('R0lGODlhAgABAIAAAP8AAAAAACwAAAAAAgABAAACAoRRADs=', 'base64');
+    await page.locator('.chat-composer input[type="file"]').setInputFiles([
+        { name: 'extra.png', mimeType: 'image/png', buffer: Buffer.from(hardwarePng, 'base64') },
+        { name: 'scan.gif', mimeType: 'image/gif', buffer: gif },
+    ]);
+    await expect(thumbnails).toHaveCount(4);
+    await page.getByRole('button', { name: 'Remove extra.png', exact: true }).click();
+    await expect(thumbnails).toHaveCount(3);
+    await expect(composer).toHaveValue('');
+    await expect(send).toBeEnabled();
+    await send.click();
+    await expect(thumbnails).toHaveCount(0);
+    const sent = await page.evaluate(() => window.__chatRequests.at(-1));
+    assert.equal(sent.prompt, '');
+    assert.deepEqual(sent.images.map((image: any) => [image.mime, image.filename]), [['image/png', 'sketch.png'], ['image/webp', 'photo.webp'], ['image/gif', 'scan.gif']]);
+    assert(sent.images.every((image: any) => /^[A-Za-z0-9+/]+=*$/.test(image.data)));
+    const userImages = page.locator('.chat-entry.user .chat-figure img');
+    await expect(userImages).toHaveCount(3);
+    await expect.poll(() => userImages.nth(2).evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(2);
+    await expect.poll(() => userImages.first().evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(40);
+    await expect(page.locator('.chat-entry.user .chat-figure').first().getByRole('button', { name: 'Locate on bench', exact: true })).toHaveCount(0);
+    // The agent drafts the bench from the image and leaves a placeholder pending.
+    const drafted = structuredClone(savedBench);
+    // An element off the delay stage, so its X is the user's to set.
+    const free = drafted.elements.find((e: any) => !drafted.stages?.some((stage: any) => stage.members.includes(e.id))).id;
+    // And a delay stage member, whose X follows the stage reference pose.
+    const staged = drafted.stages[0].members[0];
+    drafted.pending = [
+        { target: free, field: 'position_x', note: 'Rail scale not legible' },
+        { target: staged, field: 'position_x', note: 'Stage carriage hidden' },
+    ];
+    const pendingReview = reviewOf(wrap(await optical('bench_lab_check', { bench: drafted })), workspace);
+    await page.evaluate(checks => {
+        window.__emit({ kind: 'tool', id: 'pending', name: 'bench_lab_check', status: 'completed', detail: '{}', checks });
+        window.__emit({ kind: 'done' });
+    }, pendingReview.checks);
+    const pendingItems = page.locator('.chat-checks li[data-kind="issue"]').filter({ hasText: 'pending_input' });
+    await expect(pendingItems).toHaveCount(2);
+    const pendingItem = pendingItems.filter({ hasText: `${free} position_x` });
+    await expect(pendingItem).toContainText(`${free} position_x is a placeholder`);
+    await expect(pendingItem).toContainText('Rail scale not legible');
+    await expect(page.locator('.chat-checks').last().locator('.chat-checks-badge')).toHaveText('Lab check failed');
+    await optical('bench_set', { bench: drafted, revision: (await optical('system_get')).revision });
+    await page.reload();
+    await ensureHistoryOpen();
+    await page.locator('.chat-history button').filter({ hasText: 'sketch.png' }).click();
+    await expect(userImages).toHaveCount(3);
+    for (const [i, width] of [40, 40, 2].entries())
+        await expect.poll(() => userImages.nth(i).evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(width);
+    assert(await page.locator('.chat-entry.user .chat-figure').first().getAttribute('data-file'), 'history images come from their stored file');
+    // The bench shows the placeholder as a pending input; confirming sets it.
+    await page.locator('.chat-checks li[data-kind="issue"]').filter({ hasText: `${free} position_x` }).getByRole('button', { name: `Locate ${free} on bench` }).click();
+    const pendingRow = page.locator(`.bench-pending-row[data-pending="${free}:position_x"]`);
+    await expect(pendingRow).toContainText('Rail scale not legible');
+    const placeholderX = drafted.elements.find((e: any) => e.id === free).position[0];
+    await expect(pendingRow.getByRole('spinbutton')).toHaveValue(String(placeholderX));
+    await page.locator('.bench-inspector').screenshot({ path: resolve(target, 'bench-pending.png') });
+    await pendingRow.getByRole('spinbutton').fill(String(placeholderX + 5));
+    await pendingRow.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(pendingRow).toHaveCount(0);
+    await expect(page.locator('.bench-inspector label').filter({ hasText: 'X (mm)' }).locator('input')).toHaveValue(String(placeholderX + 5));
+    const stagedRow = page.locator(`.bench-pending-row[data-pending="${staged}:position_x"]`);
+    const stagedX = drafted.elements.find((e: any) => e.id === staged).position[0];
+    await stagedRow.getByRole('spinbutton').fill(String(stagedX + 7));
+    await stagedRow.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    // Saved, both values hold in the engine (the stage recomputes its members).
+    const before = (await optical('system_get')).revision;
+    await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+    await expect.poll(async () => (await optical('system_get')).revision).toBeGreaterThan(before);
+    const savedDraft = (await optical('bench_get')).bench;
+    assert.equal(savedDraft.pending, undefined);
+    assert.equal(savedDraft.elements.find((e: any) => e.id === free).position[0], placeholderX + 5);
+    assert(Math.abs(savedDraft.elements.find((e: any) => e.id === staged).position[0] - (stagedX + 7)) < 1e-9, 'stage member keeps the confirmed X');
+    await page.reload();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    // Deleting an element with a pending input drops the input with it.
+    const extra = { ...structuredClone(savedDraft.elements.find((e: any) => e.id === free)), id: 'EXTRA', label: 'Extra', position: [50, 50, 75] };
+    await optical('bench_set', { bench: { ...savedDraft, elements: [...savedDraft.elements, extra], pending: [{ target: 'EXTRA', field: 'aperture' }] }, revision: (await optical('system_get')).revision });
+    const extraRow = page.locator('.bench-pending-row[data-pending="EXTRA:aperture"]');
+    await expect(extraRow).toBeVisible();
+    await extraRow.getByRole('button', { name: /EXTRA/ }).click();
+    await page.locator('.bench-inspector .panel-head').getByRole('button', { name: 'Remove', exact: true }).click();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    const beforeRemove = (await optical('system_get')).revision;
+    await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+    await expect.poll(async () => (await optical('system_get')).revision).toBeGreaterThan(beforeRemove);
+    const removed = (await optical('bench_get')).bench;
+    assert.equal(removed.pending, undefined);
+    assert(!removed.elements.some((e: any) => e.id === 'EXTRA'));
+    await page.reload();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    // A pending Z on a height layer member is the layer's height.
+    const layered = structuredClone(removed);
+    const onLayer = layered.elements.find((e: any) => e.id === free);
+    layered.layers = [{ id: 'L', height_mm: onLayer.position[2] }];
+    onLayer.layer = 'L';
+    layered.pending = [{ target: free, field: 'position_z' }];
+    await optical('bench_set', { bench: layered, revision: (await optical('system_get')).revision });
+    const layerRow = page.locator(`.bench-pending-row[data-pending="${free}:position_z"]`);
+    await expect(layerRow).toContainText('Sets the height of layer L');
+    await layerRow.getByRole('spinbutton').fill('80');
+    await layerRow.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    const beforeLayer = (await optical('system_get')).revision;
+    await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+    await expect.poll(async () => (await optical('system_get')).revision).toBeGreaterThan(beforeLayer);
+    const raised = (await optical('bench_get')).bench;
+    assert.deepEqual([raised.layers[0].height_mm, raised.elements.find((e: any) => e.id === free).position[2], raised.pending], [80, 80, undefined]);
+    // Solving keeps the confirmed height: the layer places its element at 80 mm
+    // (off the 75 mm beam plane, so aiming reports the conflict it creates).
+    const aimed = await optical('bench_auto_aim', {});
+    assert.equal(aimed.bench.elements.find((e: any) => e.id === free).position[2], 80);
+    await page.reload();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    // A periscope's upper mirror takes its height from its layer: confirming it
+    // raises the layer, and aiming keeps it (above the lower mirror).
+    const unaimed = JSON.parse(await readFile(resolve(root, 'src-tauri/tests/fixtures/periscope_bench.json'), 'utf8'));
+    const solved = await optical('bench_auto_aim', { bench: unaimed });
+    assert.equal(solved.ok, true, JSON.stringify(solved.conflicts));
+    const periscope = solved.bench;
+    periscope.pending = [{ target: 'PU', field: 'position_z' }];
+    await optical('bench_set', { bench: periscope, revision: (await optical('system_get')).revision });
+    const mirrorRow = page.locator('.bench-pending-row[data-pending="PU:position_z"]');
+    await expect(mirrorRow).toContainText('Sets the height of layer H2');
+    await mirrorRow.getByRole('spinbutton').fill('155');
+    await mirrorRow.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    const beforeMirror = (await optical('system_get')).revision;
+    await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+    await expect.poll(async () => (await optical('system_get')).revision).toBeGreaterThan(beforeMirror);
+    const mirrored = (await optical('bench_get')).bench;
+    assert.deepEqual([mirrored.layers[1].height_mm, mirrored.elements.find((e: any) => e.id === 'PU').position[2], mirrored.pending], [155, 155, undefined]);
+    const lifted = await optical('bench_auto_aim', {});
+    assert.equal(lifted.ok, true, JSON.stringify(lifted.conflicts));
+    assert.deepEqual(lifted.bench.elements.find((e: any) => e.id === 'PU').position, [300, 200, 155]);
+    await page.reload();
+    await expect(page.locator('.bench-pending')).toHaveCount(0);
+    await page.screenshot({ path: resolve(target, 'chat-reference.png') });
     await ensureHistoryOpen();
     await page.locator('.chat-history button').filter({hasText:'Inspect the saved project'}).click();
     const dockBox = (await page.locator('.chat-panel').boundingBox())!;

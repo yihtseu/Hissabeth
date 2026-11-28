@@ -301,7 +301,7 @@ pub fn registry() -> &'static [CommandSpec] {
                 bench_lab_check,
                 Read,
                 None,
-                "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, drawing color shared with bench_drawing), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. Set require_pass=true to fail the command when the check reports errors."
+                "Read the delay stages (position_mm, optional pzt_um), named branch paths (opl_mm, stage_ids, drawing color shared with bench_drawing), assertions and lab diagnostics for one project revision. Checks optical terminations, Gaussian aperture clearance, mount collisions and hole access. Evaluate equal_opl as the first named branch minus the second in mm or um. Evaluate colinear at a common splitter, returning spot separation in mm and output angular separation in mrad. The assertion unit selects which measure is compared with target and tolerance. Recommends dump positions for escaped beams. A bench with pending inputs (placeholder parameters awaiting the user's value, each reported as a pending_input warning) does not pass. Set require_pass=true to fail the command when the check reports errors or pending inputs."
             ),
             tool!(
                 bench_drawing,

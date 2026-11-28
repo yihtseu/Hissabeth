@@ -3,6 +3,7 @@ import { listModels } from './agent-models';
 import { reviewOf, toolName } from './chat-figures';
 import { Codex } from '@openai/codex-sdk';
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
@@ -19,6 +20,11 @@ const instructions =
     'When bench_lab_check fails, revise and re-solve instead of only reporting: read each failing assertion (residual against tolerance, its two branches, the comparison element in at), each branch or assertion break (element, port, reason) and each error issue (element_id, branch); change the draft accordingly (move or rotate the named element, adjust a stage, fix a connection or via), check the draft with bench_lab_check {bench} (bench_auto_aim can re-aim mirrors), apply it with bench_set, and repeat until passed or the remaining failures need a decision from the user; then export the drawing again so the user can review the result. ' +
     'Use bench_field for interference, speckle, masks, SLMs and tip-tilt: give the source field sampling and a polarization, then read a branch end or superpose every branch at one input port. ' +
     'Use bench_readout for modal cameras: give a detector a readout (ROI ports, a Hermite-Gauss, Laguerre-Gauss or custom mode basis, balanced pairs) and read per-port mode intensities and balanced quadratures; bench_template modal_hybrid is a four-port example. ' +
+    'When the user attaches a reference image (a sketch, photo, screenshot or drawing of a setup), read it as a design brief: identify each optical component (source, mirror, lens, splitter, waveplate, detector, stop), the beam connections between them, their labels and any dimensions, distances or angles it shows. ' +
+    'Build one bench draft from it (bench_template for a close layout, otherwise elements, sources and connections), keep the labels from the image, and name the beam paths it shows as branches; add assertions for the relations it states or implies (equal arm lengths, a recombining or colinear output). ' +
+    'Give positions from the image and leave orientations it does not fix as rotation null for the solver. Solve the draft with bench_auto_aim {bench} first, then check the solved draft with bench_lab_check {bench}, revise until the only remaining findings are pending inputs or need the user, and apply it with bench_set. ' +
+    'For every physical parameter the image does not give (a distance without a dimension, a focal length, wavelength, beam radius, aperture or substrate thickness), set a typical placeholder value and list it in the bench pending array as {target, field, note} with a note on where the user can find the value; lab check reports each one as a pending_input warning and does not pass until the user enters it in the app. ' +
+    'Then export the drawing with bench_export_blueprint for review, and end the reply with a "Pending inputs" list, one line per pending entry in the form "- target field: placeholder unit (note)", or say that none are pending. ' +
     'Report actual results and tool errors. Respond in the language of the user.';
 
 export interface BridgeRequest {
@@ -28,6 +34,8 @@ export interface BridgeRequest {
     executable: string;
     model: string;
     prompt: string;
+    /** Attached reference images, stored by the app under chat-figures. */
+    images?: { path: string; mime: string }[];
     session?: string | null;
 }
 type ChatGPTRequest = {
@@ -81,7 +89,7 @@ export async function runTurn(
             ? client.resumeThread(request.session, options)
             : client.startThread(options);
         let complete = false;
-        const { events } = await thread.runStreamed(request.prompt, { signal });
+        const { events } = await thread.runStreamed(codexInput(request), { signal });
         for await (const event of events) {
             if (event.type === 'thread.started')
                 emit({ kind: 'session', session: event.thread_id });
@@ -121,7 +129,7 @@ export async function runTurn(
         const text = new Map();
         let messageId = '';
         const stream = sdk.query({
-            prompt: request.prompt,
+            prompt: claudeInput(request),
             options: {
                 pathToClaudeCodeExecutable: request.executable,
                 cwd: request.workspace,
@@ -211,6 +219,47 @@ export async function runTurn(
             stream.close();
         }
     } else throw new Error('Unknown provider');
+}
+
+/** The Codex turn input: the text, then each image as a local file. */
+export function codexInput(
+    request: Pick<BridgeRequest, 'prompt' | 'images'>,
+): string | ({ type: 'text'; text: string } | { type: 'local_image'; path: string })[] {
+    if (!request.images?.length) return request.prompt;
+    return [
+        ...(request.prompt ? [{ type: 'text' as const, text: request.prompt }] : []),
+        ...request.images.map((image) => ({ type: 'local_image' as const, path: image.path })),
+    ];
+}
+
+type ImageMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+/** The Claude turn input: a plain prompt, or one user message carrying each
+ * image as a base64 block before the text. */
+export function claudeInput(
+    request: Pick<BridgeRequest, 'prompt' | 'images'>,
+    read: (path: string) => Buffer = readFileSync,
+): Parameters<typeof query>[0]['prompt'] {
+    const images = request.images;
+    if (!images?.length) return request.prompt;
+    const content = [
+        ...images.map((image) => ({
+            type: 'image' as const,
+            source: {
+                type: 'base64' as const,
+                media_type: image.mime as ImageMime,
+                data: read(image.path).toString('base64'),
+            },
+        })),
+        ...(request.prompt ? [{ type: 'text' as const, text: request.prompt }] : []),
+    ];
+    return (async function* () {
+        yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content },
+            parent_tool_use_id: null,
+            session_id: '',
+        };
+    })();
 }
 
 // Inline TOML replaces the server table for this invocation, including inherited aliases.

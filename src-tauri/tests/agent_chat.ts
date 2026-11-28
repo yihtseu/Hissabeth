@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTurn, type BridgeRequest } from '../../scripts/agent-bridge';
 import { CHECK_ITEMS, FIGURE_LIMIT, FIGURE_MAX, checksOf, figureOf, storeFigure, toolName } from '../../scripts/chat-figures';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -74,6 +74,52 @@ test('Claude streams without duplicate text, scopes tools, carries session and r
         return stream;
     }
     await assert.rejects(runTurn({ ...request, provider: 'claude' }, new AbortController().signal, () => {}, { query: failedQuery } as unknown as Sdk), /Model unavailable/);
+});
+
+test('attached reference images reach Codex as local files and Claude as base64 blocks', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chat-images-'));
+    try {
+        const png = Buffer.from('89504e470d0a1a0a626f6479', 'hex');
+        const path = join(dir, 'ref.png');
+        writeFileSync(path, png);
+        const images = [{ path, mime: 'image/png' }];
+        let codexInput: unknown;
+        class Codex {
+            startThread() { return { runStreamed: async (input: unknown) => {
+                codexInput = input;
+                return { events: (async function* () { yield { type: 'turn.completed' }; })() };
+            } }; }
+        }
+        await runTurn({ ...request, images }, new AbortController().signal, () => {}, { Codex } as unknown as Sdk);
+        assert.deepEqual(codexInput, [{ type: 'text', text: request.prompt }, { type: 'local_image', path }]);
+        // An image alone is sent without an empty text item.
+        await runTurn({ ...request, prompt: '', images }, new AbortController().signal, () => {}, { Codex } as unknown as Sdk);
+        assert.deepEqual(codexInput, [{ type: 'local_image', path }]);
+        await runTurn(request, new AbortController().signal, () => {}, { Codex } as unknown as Sdk);
+        assert.equal(codexInput, request.prompt);
+        const messages: any[] = [];
+        function query(input: any) {
+            const stream = (async function* () {
+                if (typeof input.prompt === 'string') messages.push(input.prompt);
+                else for await (const message of input.prompt) messages.push(message);
+                yield { type: 'result', subtype: 'success', is_error: false };
+            })();
+            (stream as unknown as { close: () => void }).close = () => {};
+            return stream;
+        }
+        await runTurn({ ...request, provider: 'claude', images }, new AbortController().signal, () => {}, { query } as unknown as Sdk);
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0].type, 'user');
+        assert.equal(messages[0].parent_tool_use_id, null);
+        assert.deepEqual(messages[0].message, { role: 'user', content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } },
+            { type: 'text', text: request.prompt },
+        ] });
+        await runTurn({ ...request, provider: 'claude' }, new AbortController().signal, () => {}, { query } as unknown as Sdk);
+        assert.equal(messages[1], request.prompt);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('cancellation reaches both SDKs', async () => {

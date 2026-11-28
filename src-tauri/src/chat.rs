@@ -123,6 +123,82 @@ pub struct Request {
     conversation_id: Option<String>,
     prompt: String,
     model: String,
+    /// Reference images attached to the message.
+    #[serde(default)]
+    images: Vec<Image>,
+}
+
+/// An image attached to a chat message, as base64.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Image {
+    mime: String,
+    filename: String,
+    data: String,
+}
+/// Images per message and decoded bytes per image (the Claude API limit).
+const IMAGES: usize = 6;
+const IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Checks the attached images and stores each under its content hash in
+/// `dir`, the directory `figure` reads. Returns the history record and the
+/// bridge input of each image.
+fn store_images(dir: &std::path::Path, images: &[Image]) -> Result<Vec<(Value, Value)>, String> {
+    use base64::Engine;
+    use sha2::Digest;
+    if images.len() > IMAGES {
+        return Err(format!("Attach at most {IMAGES} images to one message"));
+    }
+    images
+        .iter()
+        .map(|image| {
+            let ext = match image.mime.as_str() {
+                "image/png" => "png",
+                "image/jpeg" => "jpg",
+                "image/webp" => "webp",
+                "image/gif" => "gif",
+                _ => {
+                    return Err(format!("Attach PNG, JPEG, WebP or GIF images, not {:?}", image.mime));
+                }
+            };
+            let name: String = image
+                .filename
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(128)
+                .collect();
+            if image.data.len() > IMAGE_BYTES.div_ceil(3) * 4 {
+                return Err(format!("Image {name} is larger than {} MB", IMAGE_BYTES >> 20));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&image.data)
+                .map_err(|_| format!("Image {name} is not valid base64"))?;
+            // The content must be the type it claims, so the model and the
+            // panel never receive anything else under an image name.
+            let signed = match ext {
+                "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "jpg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+                "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+                _ => bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+            };
+            if bytes.is_empty() || bytes.len() > IMAGE_BYTES || !signed {
+                return Err(format!(
+                    "Image {name} is not a {} image of at most {} MB",
+                    ext.to_uppercase(),
+                    IMAGE_BYTES >> 20
+                ));
+            }
+            let hash = sha2::Sha256::digest(&bytes);
+            let file = format!("{}.{ext}", hash[..16].iter().map(|b| format!("{b:02x}")).collect::<String>());
+            std::fs::create_dir_all(dir).map_err(|e| format!("Store image {name}: {e}"))?;
+            let path = dir.join(&file);
+            std::fs::write(&path, &bytes).map_err(|e| format!("Store image {name}: {e}"))?;
+            Ok((
+                json!({"mime":image.mime, "filename":name, "bytes":bytes.len(), "file":file}),
+                json!({"mime":image.mime, "path":path}),
+            ))
+        })
+        .collect()
 }
 
 /// A drawing the agent bridge stored for the conversation (see
@@ -136,7 +212,7 @@ fn read_figure(dir: &std::path::Path, file: &str) -> Result<String, String> {
     let valid = file.split_once('.').is_some_and(|(hash, ext)| {
         hash.len() == 32
             && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-            && matches!(ext, "svg" | "png" | "jpg" | "webp")
+            && matches!(ext, "svg" | "png" | "jpg" | "webp" | "gif")
     });
     if !valid {
         return Err(format!("Invalid chat figure name {file:?}"));
@@ -242,8 +318,11 @@ pub fn start(
     request: Request,
     channel: Channel<Value>,
 ) -> Result<(), String> {
-    if request.prompt.trim().is_empty() || request.prompt.len() > 65536 {
+    if (request.prompt.trim().is_empty() && request.images.is_empty()) || request.prompt.len() > 65536 {
         return Err("Enter a message of at most 65536 bytes".into());
+    }
+    if request.provider == Provider::Chatgpt && !request.images.is_empty() {
+        return Err("ChatGPT chat takes text only; use Codex or Claude to read a reference image".into());
     }
     if request.id.is_empty() || request.id.len() > 128 || request.model.len() > 256 {
         return Err("Invalid chat request".into());
@@ -282,6 +361,9 @@ pub fn start(
         return Err("Start a new conversation to change agent or model".into());
     }
     let session = previous.as_ref().and_then(|record| record.session.clone());
+    let (images, inputs): (Vec<_>, Vec<_>) = store_images(&workspace.join("chat-figures"), &request.images)?
+        .into_iter()
+        .unzip();
     let payload = if request.provider == Provider::Chatgpt {
         if chat.account_changing {
             return Err("Finish the ChatGPT account change first".into());
@@ -307,7 +389,7 @@ pub fn start(
         let executable = agents::executable(provider)
             .ok_or_else(|| format!("Install the {provider} CLI first"))?;
         let app_executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        json!({"provider":provider,"model":request.model,"prompt":request.prompt,"session":session,
+        json!({"provider":provider,"model":request.model,"prompt":request.prompt,"images":inputs,"session":session,
             "app":app_executable,"workspace":workspace,"executable":executable})
     };
     let mut command = Command::new(node);
@@ -334,6 +416,7 @@ pub fn start(
             .trim()
             .lines()
             .next()
+            .or_else(|| images.first().and_then(|image| image["filename"].as_str()))
             .unwrap_or("")
             .chars()
             .take(80)
@@ -344,9 +427,11 @@ pub fn start(
         outcome: String::new(),
         error: String::new(),
     });
-    record
-        .messages
-        .push(json!({"id":request.id,"kind":"user","text":request.prompt}));
+    let mut message = json!({"id":request.id,"kind":"user","text":request.prompt});
+    if !images.is_empty() {
+        message["images"] = images.into();
+    }
+    record.messages.push(message);
     record.updated_at = now();
     record.outcome.clear();
     record.error.clear();
@@ -572,7 +657,42 @@ pub fn shutdown(state: &State) {
 
 #[cfg(test)]
 mod tests {
-    use super::read_figure;
+    use super::{Image, read_figure, store_images};
+    use serde_json::json;
+
+    #[test]
+    fn attached_images_are_checked_and_stored_under_their_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\nbody";
+        let image = |mime: &str, data: &[u8]| Image {
+            mime: mime.into(),
+            filename: "ref\u{7}.png".into(),
+            data: crate::optics::blueprint_render::base64(data),
+        };
+        let stored = store_images(dir.path(), &[image("image/png", png)]).unwrap();
+        let (record, input) = &stored[0];
+        let file = record["file"].as_str().unwrap();
+        assert_eq!(record, &json!({"mime":"image/png","filename":"ref.png","bytes":png.len(),"file":file}));
+        assert_eq!(input["path"], json!(dir.path().join(file)));
+        // The stored copy is what the chat panel reads back.
+        assert_eq!(read_figure(dir.path(), file).unwrap(), crate::optics::blueprint_render::base64(png));
+        let webp = b"RIFF\0\0\0\0WEBPVP8 ";
+        assert!(store_images(dir.path(), &[image("image/webp", webp)]).unwrap()[0].0["file"].as_str().unwrap().ends_with(".webp"));
+        let gif = b"GIF89a\x01\0\x01\0";
+        assert!(store_images(dir.path(), &[image("image/gif", gif)]).unwrap()[0].0["file"].as_str().unwrap().ends_with(".gif"));
+        for (bad, why) in [
+            (image("image/svg+xml", b"<svg/>"), "Attach PNG"),
+            (image("image/jpeg", png), "not a JPG"),
+            (image("image/gif", b"GIF90a"), "not a GIF"),
+            (image("image/png", b""), "not a PNG"),
+            (Image { data: "@@".into(), ..image("image/png", png) }, "not valid base64"),
+            (image("image/png", &[png.as_slice(), &vec![0; 5 << 20]].concat()), "larger than 5 MB"),
+        ] {
+            assert!(store_images(dir.path(), &[bad]).unwrap_err().contains(why), "{why}");
+        }
+        let many: Vec<_> = (0..7).map(|_| image("image/png", png)).collect();
+        assert!(store_images(dir.path(), &many).unwrap_err().contains("at most 6"));
+    }
 
     #[test]
     fn figures_are_read_only_by_their_stored_name() {

@@ -4,6 +4,7 @@ import { usePreferredDark } from '@vueuse/core';
 import {
     ArrowUp,
     ChevronRight,
+    ImagePlus,
     MessageSquare,
     Plug,
     Plus,
@@ -27,6 +28,45 @@ const emit = defineEmits<{ settings: []; close: []; locate: [target: BenchTarget
 const chat = useChatStore();
 const feed = ref<HTMLElement>();
 const composer = ref<HTMLTextAreaElement>();
+const picker = ref<HTMLInputElement>();
+const dropping = ref(false);
+/** Thumbnails for the images waiting in the composer. */
+const pending = computed(() =>
+    chat.attachments.map((item) => ({ ...item, source: `data:${item.mime};base64,${item.data}` })),
+);
+function imageFiles(list: DataTransferItemList | FileList | null | undefined): File[] {
+    if (!list) return [];
+    if (list instanceof FileList) return [...list];
+    return [...list]
+        .filter((item) => item.kind === 'file')
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => !!file);
+}
+function paste(event: ClipboardEvent): void {
+    const files = imageFiles(event.clipboardData?.items);
+    if (!files.length) return;
+    event.preventDefault();
+    void chat.attach(files);
+}
+function dragover(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    dropping.value = true;
+}
+function drop(event: DragEvent): void {
+    dropping.value = false;
+    const files = imageFiles(event.dataTransfer?.files);
+    if (!files.length) return;
+    event.preventDefault();
+    void chat.attach(files);
+}
+function picked(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    void chat.attach(imageFiles(input.files)).finally(() => {
+        input.value = '';
+    });
+}
 const follows = ref(true);
 const customModel = ref(false);
 const modelChoice = computed(() =>
@@ -475,7 +515,13 @@ onMounted(async () => {
                         :final="!chat.busy || entry.id !== lastEntryId"
                         :is-dark="isDark"
                     />
-                    <div v-else class="chat-text">{{ entry.text }}</div>
+                    <div v-else-if="entry.text" class="chat-text">{{ entry.text }}</div>
+                    <ChatFigure
+                        v-for="(image, index) in entry.kind === 'user' ? entry.images : []"
+                        :key="index"
+                        class="chat-user-image"
+                        :figure="image"
+                    />
                 </template>
                 <details v-else class="chat-tool">
                     <summary class="chat-tool-summary">
@@ -519,7 +565,30 @@ onMounted(async () => {
             </p>
             <form class="chat-composer" @submit.prevent="send">
                 <label class="sr-only" for="agent-message">{{ tr('chat.message') }}</label>
-                <div class="composer-box">
+                <div
+                    class="composer-box"
+                    :class="{ 'is-dropping': dropping }"
+                    @dragover="dragover"
+                    @dragleave="dropping = false"
+                    @drop="drop"
+                >
+                    <ul
+                        v-if="pending.length"
+                        class="chat-attachments"
+                        :aria-label="tr('chat.attachments')"
+                    >
+                        <li v-for="item in pending" :key="item.id" :title="item.filename">
+                            <img :src="item.source" :alt="item.filename" />
+                            <button
+                                type="button"
+                                class="chat-attachment-remove"
+                                :aria-label="tr('chat.attachRemove', { name: item.filename })"
+                                @click="chat.detach(item.id)"
+                            >
+                                <X :size="10" aria-hidden="true" />
+                            </button>
+                        </li>
+                    </ul>
                     <textarea
                         id="agent-message"
                         ref="composer"
@@ -530,8 +599,29 @@ onMounted(async () => {
                         rows="3"
                         maxlength="16000"
                         @keydown="keydown"
+                        @paste="paste"
                     />
                     <div class="chat-actions">
+                        <input
+                            ref="picker"
+                            type="file"
+                            class="sr-only"
+                            accept="image/png,image/jpeg,image/webp,image/gif"
+                            multiple
+                            tabindex="-1"
+                            :aria-label="tr('chat.attach')"
+                            @change="picked"
+                        />
+                        <button
+                            type="button"
+                            class="chat-attach-btn"
+                            :disabled="isChatGPT"
+                            :aria-label="tr('chat.attach')"
+                            :title="tr(isChatGPT ? 'chat.attachChatGPT' : 'chat.attachHint')"
+                            @click="picker?.click()"
+                        >
+                            <ImagePlus :size="14" aria-hidden="true" />
+                        </button>
                         <small class="chat-keys">{{ tr('chat.keys') }}</small>
                         <button
                             v-if="chat.busy"
@@ -547,7 +637,9 @@ onMounted(async () => {
                             v-else
                             type="submit"
                             class="primary chat-send-btn"
-                            :disabled="blocked || !chat.draft.trim()"
+                            :disabled="
+                                blocked || (!chat.draft.trim() && !(pending.length && !isChatGPT))
+                            "
                         >
                             <ArrowUp :size="13" aria-hidden="true" />
                             {{ tr('chat.send') }}
@@ -1237,6 +1329,66 @@ div.chat-text {
 .composer-box textarea:focus-visible {
     outline: none;
 }
+.chat-user-image :deep(.chat-figure-view) {
+    height: 140px;
+}
+.composer-box.is-dropping {
+    border-color: var(--accent);
+    border-style: dashed;
+    background: var(--accent-soft);
+}
+.chat-attachments {
+    list-style: none;
+    margin: 0;
+    padding: 8px 8px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.chat-attachments li {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: #fff;
+}
+.chat-attachments img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.chat-attachment-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    min-height: 0;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: rgb(0 0 0 / 60%);
+    color: #fff;
+    border: 0;
+}
+.chat-attach-btn {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    min-height: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+}
+.chat-attach-btn:hover:not(:disabled) {
+    color: var(--text);
+}
 .chat-actions {
     display: flex;
     gap: 8px;
@@ -1245,6 +1397,7 @@ div.chat-text {
     padding: 4px 8px 7px 11px;
 }
 .chat-keys {
+    margin-right: auto;
     font-size: 11px;
     color: var(--muted);
     line-height: 1.3;

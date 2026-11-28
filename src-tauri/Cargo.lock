@@ -1523,6 +1523,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hissabeth"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "getrandom 0.4.3",
  "libc",
  "resvg",
@@ -1530,6 +1531,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "sha2",
  "svg2pdf",
  "tauri",
  "tauri-build",

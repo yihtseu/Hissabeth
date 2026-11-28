@@ -275,8 +275,124 @@ export interface Bench {
     relays?: BenchRelay[];
     /** Model notes placed on the drawing by element/source or named branch. */
     annotations?: BenchAnnotation[];
+    /** Placeholder parameters awaiting the user's value (from a reference image). */
+    pending?: BenchPendingInput[];
     max_interactions: number;
     min_power: number;
+}
+/** A numeric parameter a pending input marks (mirrors bench.rs PendingField). */
+export type BenchPendingField =
+    | 'position_x'
+    | 'position_y'
+    | 'position_z'
+    | 'aperture'
+    | 'body_radius'
+    | 'focal_length'
+    | 'reflectance'
+    | 'transmittance'
+    | 'index'
+    | 'retardance_waves'
+    | 'fast_axis_deg'
+    | 'extinction_ratio'
+    | 'substrate_thickness_mm'
+    | 'substrate_wedge_deg'
+    | 'wavelength'
+    | 'power'
+    | 'beam_radius'
+    | 'waist';
+/** A placeholder on an element or source the user still has to supply. */
+export interface BenchPendingInput {
+    target: string;
+    field: BenchPendingField;
+    note?: string;
+}
+export const PENDING_UNITS: Record<BenchPendingField, string> = {
+    position_x: 'mm',
+    position_y: 'mm',
+    position_z: 'mm',
+    aperture: 'mm',
+    body_radius: 'mm',
+    focal_length: 'mm',
+    reflectance: '',
+    transmittance: '',
+    index: '',
+    retardance_waves: 'waves',
+    fast_axis_deg: 'deg',
+    extinction_ratio: '',
+    substrate_thickness_mm: 'mm',
+    substrate_wedge_deg: 'deg',
+    wavelength: 'nm',
+    power: 'W',
+    beam_radius: 'mm',
+    waist: 'mm',
+};
+const AXES = { position_x: 0, position_y: 1, position_z: 2 } as const;
+type Numbers = Record<string, number | null | undefined>;
+/** The placeholder the bench holds for a pending input, if any. */
+export function pendingValue(bench: Bench, input: BenchPendingInput): number | undefined {
+    const item =
+        bench.sources.find((s) => s.id === input.target) ??
+        bench.elements.find((e) => e.id === input.target);
+    if (!item) return undefined;
+    if (input.field in AXES) return item.position[AXES[input.field as keyof typeof AXES]];
+    if (input.field === 'substrate_thickness_mm' || input.field === 'substrate_wedge_deg') {
+        const substrate = 'substrate' in item ? item.substrate : undefined;
+        if (!substrate) return undefined;
+        return input.field === 'substrate_thickness_mm'
+            ? substrate.thickness_mm
+            : (substrate.wedge_deg ?? 0);
+    }
+    return (item as unknown as Numbers)[input.field] ?? undefined;
+}
+/** The height layer that fixes a pending Z: the target's layer. Auto-aim
+ * places every layer member at the layer height, periscope mirrors included. */
+export function pendingLayer(bench: Bench, input: BenchPendingInput): BenchLayer | undefined {
+    if (input.field !== 'position_z') return undefined;
+    const element = bench.elements.find((e) => e.id === input.target);
+    return element?.layer ? bench.layers?.find((layer) => layer.id === element.layer) : undefined;
+}
+/** Moves one coordinate of a source or element. A stage member's pose is its
+ * reference pose moved along the stage, and saving recomputes it, so the
+ * reference pose takes the change. */
+function moveTo(
+    bench: Bench,
+    item: { id: string; position: Vec3 },
+    axis: number,
+    value: number,
+): void {
+    const pose = bench.stages?.find((stage) => stage.members.includes(item.id))?.reference_pose[
+        item.id
+    ];
+    if (pose) pose.position[axis] += value - item.position[axis];
+    item.position[axis] = value;
+}
+/** Sets the value of a pending input and drops the entry. Returns false when
+ * the target or field no longer exists. */
+export function supplyPending(bench: Bench, index: number, value: number): boolean {
+    const input = bench.pending?.[index];
+    if (!input || !Number.isFinite(value)) return false;
+    const item =
+        bench.sources.find((s) => s.id === input.target) ??
+        bench.elements.find((e) => e.id === input.target);
+    if (!item) return false;
+    const layer = pendingLayer(bench, input);
+    if (layer) {
+        // A layer fixes the Z of its elements, so the confirmed height is the
+        // layer's and moves all of them.
+        layer.height_mm = value;
+        for (const element of bench.elements)
+            if (element.layer === layer.id) moveTo(bench, element, 2, value);
+    } else if (input.field in AXES)
+        moveTo(bench, item, AXES[input.field as keyof typeof AXES], value);
+    else if (input.field === 'substrate_thickness_mm' || input.field === 'substrate_wedge_deg') {
+        const substrate = 'substrate' in item ? item.substrate : undefined;
+        if (!substrate) return false;
+        if (input.field === 'substrate_thickness_mm') substrate.thickness_mm = value;
+        else substrate.wedge_deg = value;
+    } else (item as unknown as Numbers)[input.field] = value;
+    bench.pending!.splice(index, 1);
+    if (!bench.pending!.length) delete bench.pending;
+    return true;
 }
 /** A drawing note: 1–256 characters on one element/source or one named branch. */
 export interface BenchAnnotation {

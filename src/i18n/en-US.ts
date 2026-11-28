@@ -98,6 +98,15 @@ export default {
         figureFullscreen: 'Full screen',
         figureDownload: 'Download drawing',
         figureClose: 'Close full screen',
+        attach: 'Attach reference images',
+        attachHint: 'Paste, drop or attach PNG, JPEG, WebP or GIF reference images',
+        attachRemove: 'Remove {name}',
+        attachDrop: 'Drop images to attach',
+        attachChatGPT:
+            'ChatGPT chat takes text only; switch to Codex or Claude to send a reference image.',
+        attachRefused:
+            'Not attached: {names}. Attach up to {count} PNG, JPEG, WebP or GIF images of at most 5 MB.',
+        attachments: 'Attached images',
         figureLocate: 'Locate on bench',
         figureRevision: 'Revision {revision}',
         figureDraft: 'Draft on revision {revision}',
@@ -2136,6 +2145,11 @@ export default {
         saveZmx: 'Choose a Hissabeth project filename. To write ZMX, use Export.',
     },
     benchLab: {
+        pendingTitle: 'Pending inputs ({count})',
+        pendingHelp:
+            'Placeholders the agent could not read from the reference image. Enter each value and confirm; lab check flags the rest.',
+        pendingConfirm: 'Confirm',
+        pendingLayer: 'Sets the height of layer {layer} and every element on it',
         tabAudit: 'Lab readiness & clearance',
         tabAlignment: 'Alignment & beam-walking',
         tabCatalog: 'Hardware catalog',

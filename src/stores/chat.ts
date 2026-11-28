@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, reactive, ref } from 'vue';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { errorMessage } from '../api';
+import { tr } from '../i18n';
 import type { AgentInfo } from '../types';
 import type { AgentTarget } from '../preferences';
 
@@ -73,6 +74,28 @@ export interface ChatEntry {
     detail?: string;
     figure?: ChatFigure;
     checks?: ChatChecks;
+    /** Reference images attached to a user message: `data` while the message
+     * is sent, `file` the copy the app stored for history. */
+    images?: ChatFigure[];
+}
+/** An image waiting in the composer. */
+export interface ChatAttachment {
+    id: string;
+    mime: string;
+    filename: string;
+    bytes: number;
+    data: string;
+}
+/** Image types, count and size the app accepts per message (chat.rs). */
+export const ATTACHMENT_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+export const ATTACHMENT_COUNT = 6;
+export const ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+function base64(bytes: Uint8Array): string {
+    let text = '';
+    for (let i = 0; i < bytes.length; i += 0x8000)
+        text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(text);
 }
 export interface Conversation {
     id: string;
@@ -116,6 +139,7 @@ export const useChatStore = defineStore('chat', () => {
     const conversations = ref<Conversation[]>([]);
     const selectedId = ref('');
     const drafts = reactive<Record<string, string>>({});
+    const attachmentDrafts = reactive<Record<string, ChatAttachment[]>>({});
     const error = ref('');
     const storageError = ref('');
     const loaded = ref(false);
@@ -139,6 +163,45 @@ export const useChatStore = defineStore('chat', () => {
             drafts[draftKey.value] = value;
         },
     });
+    const attachments = computed(() => attachmentDrafts[draftKey.value] ?? []);
+    /** Adds image files to the composer; other files and anything past the
+     * count or size limit are refused with a message. */
+    async function attach(files: Iterable<File>): Promise<void> {
+        const key = draftKey.value;
+        const list = [...files];
+        if (!list.length) return;
+        if (provider.value === 'chatgpt') {
+            error.value = tr('chat.attachChatGPT');
+            return;
+        }
+        const room = ATTACHMENT_COUNT - (attachmentDrafts[key]?.length ?? 0);
+        const accepted = list
+            .filter((file) => ATTACHMENT_TYPES.includes(file.type) && file.size <= ATTACHMENT_BYTES)
+            .slice(0, Math.max(0, room));
+        const refused = list
+            .filter((file) => !accepted.includes(file))
+            .map((file) => file.name || file.type);
+        const added = await Promise.all(
+            accepted.map(async (file) => ({
+                id: crypto.randomUUID(),
+                mime: file.type,
+                filename: file.name || `pasted.${file.type.split('/')[1]}`,
+                bytes: file.size,
+                data: base64(new Uint8Array(await file.arrayBuffer())),
+            })),
+        );
+        // A second attach may have finished while these files were read.
+        const all = [...(attachmentDrafts[key] ?? []), ...added];
+        refused.push(...all.slice(ATTACHMENT_COUNT).map((item) => item.filename));
+        attachmentDrafts[key] = all.slice(0, ATTACHMENT_COUNT);
+        error.value = refused.length
+            ? tr('chat.attachRefused', { names: refused.join(', '), count: ATTACHMENT_COUNT })
+            : '';
+    }
+    function detach(id: string): void {
+        const key = draftKey.value;
+        attachmentDrafts[key] = (attachmentDrafts[key] ?? []).filter((item) => item.id !== id);
+    }
     const ready = computed(
         () =>
             loaded.value &&
@@ -262,7 +325,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     async function send(): Promise<void> {
         const prompt = draft.value.trim();
-        if (!prompt || busy.value || !ready.value) return;
+        const images = provider.value === 'chatgpt' ? [] : attachments.value;
+        if ((!prompt && !images.length) || busy.value || !ready.value) return;
         const turnId = crypto.randomUUID();
         const previousId = selectedId.value;
         const previousDraftKey = draftKey.value;
@@ -271,7 +335,7 @@ export const useChatStore = defineStore('chat', () => {
             id: turnId,
             provider: provider.value,
             model: model.value.trim(),
-            title: prompt.split('\n')[0].slice(0, 80),
+            title: (prompt.split('\n')[0] || images[0]?.filename || '').slice(0, 80),
             updatedAt: Date.now(),
             messages: [],
             outcome: '',
@@ -281,7 +345,21 @@ export const useChatStore = defineStore('chat', () => {
         // Use the reactive record so streaming updates reach the component immediately.
         selectedId.value = record.id;
         const entries = selected.value!.messages;
-        entries.push({ id: turnId, kind: 'user', text: prompt });
+        entries.push({
+            id: turnId,
+            kind: 'user',
+            text: prompt,
+            ...(images.length
+                ? {
+                      images: images.map(({ mime, filename, bytes, data }) => ({
+                          mime,
+                          filename,
+                          bytes,
+                          data,
+                      })),
+                  }
+                : {}),
+        });
         selected.value!.updatedAt = Date.now();
         selected.value!.outcome = '';
         selected.value!.error = '';
@@ -289,6 +367,7 @@ export const useChatStore = defineStore('chat', () => {
         stopping.value = false;
         error.value = '';
         drafts[previousDraftKey] = '';
+        attachmentDrafts[previousDraftKey] = [];
         const channel = new Channel<ChatEvent>();
         // Tauri Channel delivers events through this SDK-defined setter.
         // eslint-disable-next-line unicorn/prefer-add-event-listener
@@ -324,12 +403,15 @@ export const useChatStore = defineStore('chat', () => {
                     provider: record.provider,
                     model: record.model,
                     prompt,
+                    images: images.map(({ mime, filename, data }) => ({ mime, filename, data })),
                 },
                 channel,
             });
         } catch (failure) {
             error.value = errorMessage(failure);
             if (!drafts[previousDraftKey]) drafts[previousDraftKey] = prompt;
+            if (!attachmentDrafts[previousDraftKey]?.length)
+                attachmentDrafts[previousDraftKey] = images;
             entries.splice(
                 entries.findIndex((entry) => entry.id === turnId),
                 1,
@@ -367,6 +449,9 @@ export const useChatStore = defineStore('chat', () => {
         selected,
         history,
         draft,
+        attachments,
+        attach,
+        detach,
         error,
         storageError,
         loaded,

@@ -33,6 +33,10 @@ import {
     type Vec3,
     type BlueprintFormat,
     type Layout3dOptions,
+    PENDING_UNITS,
+    pendingLayer,
+    pendingValue,
+    supplyPending,
 } from '../bench';
 import { profileCurve } from '../profile';
 import { canonicalJson, clone } from '../validation';
@@ -432,6 +436,32 @@ onBeforeUnmount(() => {
     clearTimeout(planZoomTimer);
 });
 
+/** Placeholders a reference image left for the user, with the value typed so far. */
+const pendingInputs = computed(() =>
+    (scene.value?.pending ?? []).map((input, index) => {
+        const unit = PENDING_UNITS[input.field];
+        return {
+            target: input.target,
+            note: input.note,
+            index,
+            key: `${input.target}:${input.field}`,
+            label: `${input.target} · ${input.field}${unit ? ` (${unit})` : ''}`,
+            value: pendingValue(scene.value!, input),
+            layer: pendingLayer(scene.value!, input)?.id,
+        };
+    }),
+);
+const pendingEntries = ref<Record<string, string>>({});
+function supplyInput(index: number, key: string, fallback: number | undefined): void {
+    if (saving.value) return;
+    const typed = pendingEntries.value[key];
+    const value = typed === undefined || typed === '' ? fallback : Number(typed);
+    const bench = ensureDraft();
+    if (!bench || value === undefined || !supplyPending(bench, index, value)) return;
+    delete pendingEntries.value[key];
+    schedulePreview();
+}
+
 function ensureDraft(): Bench | null {
     if (!draft.value && props.system.bench) draft.value = clone(props.system.bench);
     return draft.value;
@@ -634,6 +664,13 @@ function deleteSelectedElement(): void {
     const removedId = b.elements[idx]!.id;
     b.elements.splice(idx, 1);
     b.connections = b.connections.filter((c) => c.from !== removedId && c.to !== removedId);
+    // Its pending inputs go with it; the bench rejects a pending unknown target.
+    if (b.pending) {
+        b.pending = b.pending.filter((input) => input.target !== removedId);
+        if (!b.pending.length) delete b.pending;
+    }
+    for (const key of Object.keys(pendingEntries.value))
+        if (key.startsWith(`${removedId}:`)) delete pendingEntries.value[key];
     selected.value = '';
     schedulePreview();
 }
@@ -1833,6 +1870,53 @@ defineExpose({ saveBench, discardBench, locate });
 
                 <!-- EDITABLE LAB INSPECTOR -->
                 <section class="bench-inspector" :aria-label="tr('bench.selection')">
+                    <section
+                        v-if="pendingInputs.length"
+                        class="bench-pending"
+                        :aria-label="tr('benchLab.pendingTitle')"
+                    >
+                        <strong>{{
+                            tr('benchLab.pendingTitle', { count: pendingInputs.length })
+                        }}</strong>
+                        <p class="note">{{ tr('benchLab.pendingHelp') }}</p>
+                        <form
+                            v-for="input in pendingInputs"
+                            :key="input.key"
+                            class="bench-pending-row"
+                            :data-pending="input.key"
+                            @submit.prevent="supplyInput(input.index, input.key, input.value)"
+                        >
+                            <button
+                                type="button"
+                                class="bench-pending-target"
+                                :title="input.note"
+                                @click="selected = input.target"
+                            >
+                                {{ input.label }}
+                            </button>
+                            <small v-if="input.note" class="bench-pending-note">{{
+                                input.note
+                            }}</small>
+                            <small v-if="input.layer" class="bench-pending-note">{{
+                                tr('benchLab.pendingLayer', { layer: input.layer })
+                            }}</small>
+                            <input
+                                type="number"
+                                step="any"
+                                :aria-label="input.label"
+                                :placeholder="input.value === undefined ? '' : String(input.value)"
+                                :value="pendingEntries[input.key] ?? input.value"
+                                @input="
+                                    pendingEntries[input.key] = (
+                                        $event.target as HTMLInputElement
+                                    ).value
+                                "
+                            />
+                            <button type="submit" class="small" :disabled="saving">
+                                {{ tr('benchLab.pendingConfirm') }}
+                            </button>
+                        </form>
+                    </section>
                     <div class="panel-head flush">
                         <strong>{{ entity ? selected : tr('bench.selection') }}</strong>
                         <button
@@ -2725,6 +2809,42 @@ defineExpose({ saveBench, discardBench, locate });
     border-left: 1px solid var(--border);
     padding: 10px;
     min-width: 0;
+}
+.bench-pending {
+    margin: 0 0 10px;
+    padding: 0 0 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+}
+.bench-pending .note {
+    margin: 2px 0 6px;
+    color: var(--muted);
+    font-size: 11px;
+}
+.bench-pending-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 5px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+.bench-pending-target {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-align: left;
+    overflow-wrap: break-word;
+    justify-content: flex-start;
+    grid-column: 1 / -1;
+}
+.bench-pending-note {
+    grid-column: 1 / -1;
+    color: var(--muted);
+    font-size: 11px;
 }
 .bench-inspector label {
     display: grid;

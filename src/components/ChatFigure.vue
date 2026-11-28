@@ -8,7 +8,7 @@ import type { ChatFigure } from '../stores/chat';
 const props = defineProps<{ figure: ChatFigure; tool?: string }>();
 const emit = defineEmits<{ locate: [] }>();
 
-const SHOWN = new Set(['image/svg+xml', 'image/png', 'image/jpeg', 'image/webp']);
+const SHOWN = new Set(['image/svg+xml', 'image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 // A drawing too large to inline is read back from the copy the bridge stored.
@@ -116,6 +116,7 @@ const transform = computed(
             <span class="chat-figure-name" :title="figure.filename">{{ figure.filename }}</span>
             <span v-if="origin" class="chat-figure-origin">{{ origin }}</span>
             <button
+                v-if="tool"
                 type="button"
                 class="small"
                 :aria-label="tr('chat.figureLocate')"

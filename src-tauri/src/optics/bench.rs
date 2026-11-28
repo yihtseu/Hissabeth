@@ -72,6 +72,12 @@ pub struct Bench {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 64))]
     pub annotations: Vec<Annotation>,
+    /// Parameters the draft holds as placeholders until the user supplies
+    /// them, such as values a reference drawing does not show. The field keeps
+    /// its placeholder value; the entry marks it as awaiting input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 128))]
+    pub pending: Vec<PendingInput>,
     #[schemars(range(min = 1, max = 128))]
     pub max_interactions: usize,
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -85,6 +91,105 @@ pub struct Annotation {
     #[schemars(length(min = 1, max = 256))]
     pub text: String,
 }
+/// A physical parameter awaiting the user's value.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingInput {
+    /// Element or source ID.
+    pub target: String,
+    pub field: PendingField,
+    /// What the value is for or where to read it, up to 256 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub note: Option<String>,
+}
+/// A numeric element or source parameter. Source-only: wavelength, power,
+/// beam_radius, waist; substrate_* need an element substrate; position_* and
+/// the rest apply to elements, and position_* to sources too.
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingField {
+    PositionX,
+    PositionY,
+    PositionZ,
+    Aperture,
+    BodyRadius,
+    FocalLength,
+    Reflectance,
+    Transmittance,
+    Index,
+    RetardanceWaves,
+    FastAxisDeg,
+    ExtinctionRatio,
+    SubstrateThicknessMm,
+    SubstrateWedgeDeg,
+    Wavelength,
+    Power,
+    BeamRadius,
+    Waist,
+}
+impl PendingField {
+    /// The unit of the field's value, empty for a ratio or index.
+    pub fn unit(self) -> &'static str {
+        use PendingField::*;
+        match self {
+            PositionX | PositionY | PositionZ | Aperture | BodyRadius | FocalLength | SubstrateThicknessMm | BeamRadius | Waist => "mm",
+            FastAxisDeg | SubstrateWedgeDeg => "deg",
+            RetardanceWaves => "waves",
+            Wavelength => "nm",
+            Power => "W",
+            Reflectance | Transmittance | Index | ExtinctionRatio => "",
+        }
+    }
+    /// The placeholder the bench holds for `target`, if it is set.
+    pub fn value(self, bench: &Bench, target: &str) -> Option<f64> {
+        use PendingField::*;
+        let axis = match self {
+            PositionX => 0,
+            PositionY => 1,
+            _ => 2,
+        };
+        if let Some(s) = bench.sources.iter().find(|s| s.id == target) {
+            return match self {
+                PositionX | PositionY | PositionZ => Some(s.position[axis]),
+                Wavelength => Some(s.wavelength),
+                Power => Some(s.power),
+                BeamRadius => Some(s.beam_radius),
+                Waist => s.waist,
+                _ => None,
+            };
+        }
+        let e = bench.elements.iter().find(|e| e.id == target)?;
+        match self {
+            PositionX | PositionY | PositionZ => Some(e.position[axis]),
+            Aperture => Some(e.aperture),
+            BodyRadius => Some(e.body_radius),
+            FocalLength => Some(e.focal_length),
+            Reflectance => Some(e.reflectance),
+            Transmittance => Some(e.transmittance),
+            Index => e.index,
+            RetardanceWaves => e.retardance_waves,
+            FastAxisDeg => e.fast_axis_deg,
+            ExtinctionRatio => e.extinction_ratio,
+            SubstrateThicknessMm => e.substrate.as_ref().map(|s| s.thickness_mm),
+            SubstrateWedgeDeg => e.substrate.as_ref().map(|s| s.wedge_deg.unwrap_or(0.)),
+            Wavelength | Power | BeamRadius | Waist => None,
+        }
+    }
+    fn on_source(self) -> bool {
+        use PendingField::*;
+        matches!(self, PositionX | PositionY | PositionZ | Wavelength | Power | BeamRadius | Waist)
+    }
+    fn on_element(self, e: &Element) -> bool {
+        use PendingField::*;
+        match self {
+            Wavelength | Power | BeamRadius | Waist => false,
+            SubstrateThicknessMm | SubstrateWedgeDeg => e.substrate.is_some(),
+            _ => true,
+        }
+    }
+}
+
 /// What an annotation points at: `{"element": ID}` (an element or source) or `{"branch": ID}`.
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1708,6 +1813,40 @@ impl Bench {
             if !known || note.text.trim().is_empty() || note.text.chars().count() > 256 {
                 return Err(format!(
                     "Invalid annotation {index}: give 1–256 characters of text and a target of {{\"element\": an element or source ID}} or {{\"branch\": a named branch ID}}"
+                ));
+            }
+        }
+        let mut marked = HashSet::new();
+        for (index, input) in self.pending.iter().enumerate() {
+            let applies = match element(&input.target) {
+                Some(e) => input.field.on_element(e),
+                None => self.sources.iter().any(|s| s.id == input.target) && input.field.on_source(),
+            };
+            if self.pending.len() > 128
+                || !applies
+                || input.note.as_ref().is_some_and(|n| n.chars().count() > 256)
+                || !marked.insert((input.target.as_str(), input.field))
+            {
+                return Err(format!(
+                    "Invalid pending input {index}: name an element or source once per field, with a field it has (wavelength, power, beam_radius and waist are source fields; substrate_* need an element substrate) and a note of at most 256 characters"
+                ));
+            }
+            // Auto-aim places periscope mirrors itself: the upper one above the
+            // lower one, and both at their layer height or at the height of the
+            // beam they meet. Only a layer height is the user's to enter.
+            let derived = element(&input.target).is_some_and(|e| {
+                let upper = self.periscopes.iter().any(|p| p.upper == e.id);
+                let lower = self.periscopes.iter().any(|p| p.lower == e.id);
+                match input.field {
+                    PendingField::PositionX | PendingField::PositionY => upper,
+                    PendingField::PositionZ => (upper || lower) && self.layer_height(e).is_none(),
+                    _ => false,
+                }
+            });
+            if derived {
+                return Err(format!(
+                    "Invalid pending input {index}: auto-aim places periscope mirror {} (the upper mirror above the lower one, Z from its layer or the beam it meets); mark the lower mirror's X/Y, or put the mirror on a layer and mark its position_z",
+                    input.target
                 ));
             }
         }
@@ -3489,6 +3628,7 @@ pub fn example() -> Bench {
         folds: vec![],
         relays: vec![],
         annotations: vec![],
+        pending: vec![],
         max_interactions: 32,
         min_power: 1e-8,
     }

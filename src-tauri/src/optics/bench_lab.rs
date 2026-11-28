@@ -1599,7 +1599,10 @@ struct Clamping {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct LabCheck {
     readiness_score: u32,
+    /// No errors and no pending inputs.
     passed: bool,
+    /// Pending inputs on the bench, each also a pending_input warning.
+    pending: u32,
     counts: IssueCounts,
     issues: Vec<Issue>,
     #[serde(flatten)]
@@ -2037,7 +2040,10 @@ impl LabCheck {
         if self.passed {
             Ok(())
         } else {
-            Err(format!("Bench lab check failed with {} errors", self.counts.errors))
+            Err(format!(
+                "Bench lab check failed with {} errors and {} pending inputs",
+                self.counts.errors, self.pending
+            ))
         }
     }
 }
@@ -2050,6 +2056,13 @@ fn lab_report(
 ) -> Result<LabCheck, String> {
     let grid = Grid::new(bench)?;
     let mut issues = Vec::new();
+    // Placeholders awaiting the user's value keep the bench off lab-ready.
+    for input in &bench.pending {
+        let field = serde_json::to_value(input.field).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+        let value = input.field.value(bench, &input.target).map_or_else(|| "unset".to_owned(), |v| format!("{v} {}", input.field.unit()));
+        let note = input.note.as_deref().map_or_else(String::new, |n| format!(": {n}"));
+        issues.push(issue("warning", "pending_input", Some(&input.target), None, format!("{} {field} is a placeholder ({}) awaiting input{note}", input.target, value.trim_end())));
+    }
     let mut dumps = Vec::new();
     let mut optical = HashSet::new();
     let mut branch_segments = HashMap::new();
@@ -2276,7 +2289,9 @@ fn lab_report(
     let readiness_score = 100u32.saturating_sub(20 * errors + 7 * warnings);
     Ok(LabCheck {
         readiness_score,
-        passed: errors == 0,
+        // A placeholder awaiting the user's value keeps the bench from passing.
+        passed: errors == 0 && bench.pending.is_empty(),
+        pending: bench.pending.len() as u32,
         counts: IssueCounts {
             errors,
             warnings,
@@ -3500,7 +3515,7 @@ pub(crate) fn export_blueprint_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optics::bench::{Annotation, AnnotationTarget, BranchStyle, HeightLayer, Periscope, Region, RegionShape, Relay, RelayCheck, RelayCheckKind, Zone, ZoneRect, rotate};
+    use crate::optics::bench::{Annotation, AnnotationTarget, BranchStyle, PendingField, PendingInput, HeightLayer, Periscope, Region, RegionShape, Relay, RelayCheck, RelayCheckKind, Zone, ZoneRect, rotate};
     #[test]
     fn unexpected_hit_on_a_region_plate_is_reported_not_an_internal_error() {
         let mut bench = template("three_arm").unwrap();
@@ -5174,6 +5189,56 @@ mod tests {
     }
 
     #[test]
+    fn periscope_heights_are_pending_only_through_their_layer() {
+        let system = System::default();
+        let on = |mut e: Element, layer: Option<&str>| {
+            e.layer = layer.map(Into::into);
+            e
+        };
+        let mut bench = layered_bench(
+            vec![
+                on(aimed("PL", MIRROR, [300., 200., 60.]), Some("H1")),
+                on(aimed("PU", MIRROR, [310., 215., 100.]), Some("H2")),
+                on(mount_element("D", DETECTOR, [500., 200., 145.], [1., 0., 0.]), Some("H2")),
+            ],
+            &[("S1", "out", "PL"), ("PL", "reflected", "PU"), ("PU", "reflected", "D")],
+        );
+        bench.layers = vec![
+            HeightLayer { id: "H1".into(), height_mm: 75. },
+            HeightLayer { id: "H2".into(), height_mm: 145. },
+        ];
+        bench.periscopes = vec![Periscope { id: "P".into(), lower: "PL".into(), upper: "PU".into() }];
+        let pending = |target: &str, field| PendingInput { target: target.into(), field, note: None };
+        // Through its layer the upper mirror's height is the user's to enter;
+        // the app's confirmation moves the layer and its members (src/bench.ts),
+        // and aiming keeps that height.
+        let mut marked = bench.clone();
+        marked.pending = vec![pending("PU", PendingField::PositionZ), pending("PL", PendingField::PositionX)];
+        marked.validate_draft().unwrap();
+        let mut confirmed = bench.clone();
+        confirmed.layers[1].height_mm = 155.;
+        for e in confirmed.elements.iter_mut().filter(|e| e.layer.as_deref() == Some("H2")) {
+            e.position[2] = 155.;
+        }
+        let result = aim(&confirmed, false, None, &system).unwrap();
+        assert!(result.ok, "{:?}", result.conflicts);
+        assert_eq!(result.bench.elements.iter().find(|e| e.id == "PU").unwrap().position, [300., 200., 155.]);
+        // Aiming places the upper mirror over the lower one, and a mirror off
+        // any layer at the height of the beam it meets: no input can hold.
+        let mut off_layer = bench.clone();
+        off_layer.elements.iter_mut().find(|e| e.id == "PU").unwrap().layer = None;
+        for (scene, input) in [
+            (&bench, pending("PU", PendingField::PositionX)),
+            (&bench, pending("PU", PendingField::PositionY)),
+            (&off_layer, pending("PU", PendingField::PositionZ)),
+        ] {
+            let mut b = scene.clone();
+            b.pending = vec![input];
+            assert!(b.validate_draft().unwrap_err().contains("auto-aim places periscope mirror PU"));
+        }
+    }
+
+    #[test]
     fn periscope_raises_the_beam_between_layers_with_exact_clearance() {
         let system = System::default();
         let on = |mut e: Element, layer: &str| {
@@ -5815,6 +5880,53 @@ mod tests {
         assert!(plan.legend.iter().any(|e| e.kind == "layer" && e.key == "H2" && e.dashed));
         let svg = export_blueprint(&result.bench, &system, "svg").unwrap()["content"].as_str().unwrap().to_owned();
         assert!(svg.contains(r#"data-periscope="P" data-rise="70""#), "{svg}");
+    }
+
+    #[test]
+    fn pending_inputs_warn_with_their_placeholder_and_bad_entries_are_rejected() {
+        let system = System::default();
+        let mut bench = template("delay_line").unwrap();
+        let source = bench.sources[0].id.clone();
+        let input = |target: &str, field, note: Option<&str>| PendingInput { target: target.into(), field, note: note.map(Into::into) };
+        bench.pending = vec![
+            input("M3", PendingField::PositionX, Some("Read the rail scale")),
+            input(&source, PendingField::Wavelength, None),
+        ];
+        bench.validate().unwrap();
+        let check = lab_check(&bench, &system).unwrap();
+        let pending: Vec<_> = check["issues"].as_array().unwrap().iter().filter(|i| i["code"] == "pending_input").collect();
+        assert_eq!(pending.len(), 2);
+        assert_eq!((pending[0]["severity"].as_str(), pending[0]["element_id"].as_str()), (Some("warning"), Some("M3")));
+        let x = bench.elements.iter().find(|e| e.id == "M3").unwrap().position[0];
+        assert_eq!(pending[0]["message"], format!("M3 position_x is a placeholder ({x} mm) awaiting input: Read the rail scale"));
+        let wavelength = bench.sources[0].wavelength;
+        assert_eq!(pending[1]["message"], format!("{source} wavelength is a placeholder ({wavelength} nm) awaiting input"));
+        // A pending input never passes the bench, and clears once removed.
+        assert_eq!((check["passed"].as_bool(), check["pending"].as_u64()), (Some(false), Some(2)));
+        let report = super::check(&bench, &system).unwrap();
+        assert!(report.require_pass().unwrap_err().ends_with("0 errors and 2 pending inputs"));
+        let mut supplied = bench.clone();
+        supplied.pending.clear();
+        assert_eq!(lab_check(&supplied, &system).unwrap()["passed"], true);
+        let parsed: PendingInput = serde_json::from_value(json!({"target":"M3","field":"position_x","note":"Read the rail scale"})).unwrap();
+        assert_eq!(parsed, bench.pending[0]);
+        assert!(serde_json::from_value::<PendingInput>(json!({"target":"M3","field":"colour"})).is_err());
+        assert!(serde_json::from_value::<PendingInput>(json!({"target":"M3","field":"aperture","value":3})).is_err());
+        let plain = bench.elements.iter().find(|e| e.substrate.is_none()).unwrap().id.clone();
+        for bad in [
+            input("nope", PendingField::Aperture, None),
+            input("M3", PendingField::Wavelength, None),
+            input(&source, PendingField::FocalLength, None),
+            input(&plain, PendingField::SubstrateThicknessMm, None),
+            input("M3", PendingField::Aperture, Some(&"x".repeat(257))),
+        ] {
+            let mut b = bench.clone();
+            b.pending = vec![bad];
+            assert!(b.validate().unwrap_err().contains("Invalid pending input 0"));
+        }
+        let mut twice = bench.clone();
+        twice.pending.push(input("M3", PendingField::PositionX, None));
+        assert!(twice.validate().unwrap_err().contains("Invalid pending input 2"));
     }
 
     #[test]
