@@ -2,6 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTurn, type BridgeRequest } from '../../scripts/agent-bridge';
+import { CHECK_ITEMS, FIGURE_LIMIT, FIGURE_MAX, checksOf, figureOf, storeFigure, toolName } from '../../scripts/chat-figures';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type Sdk = NonNullable<Parameters<typeof runTurn>[3]>;
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -85,4 +89,118 @@ test('cancellation reaches both SDKs', async () => {
     }
     await runTurn({ ...request, provider: 'claude' }, controller.signal, () => {}, { query } as unknown as Sdk);
     assert.equal(closed, true);
+});
+
+test('tool results carry their drawing as a chat figure from either SDK', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>';
+    const exported = { content: [{ type: 'text', text: JSON.stringify({ revision: 3, saved: true, format: 'layout3d', filename: 'hissabeth-layout3d.svg', mime: 'image/svg+xml', content: svg }) }] };
+    const events: Record<string, any>[] = [];
+    class Codex {
+        startThread() { return { runStreamed: async () => ({ events: (async function* () {
+            yield { type: 'item.started', item: { type: 'mcp_tool_call', id: 'draw', tool: 'bench_export_blueprint', status: 'in_progress', arguments: { format: 'layout3d' } } };
+            yield { type: 'item.completed', item: { type: 'mcp_tool_call', id: 'draw', tool: 'bench_export_blueprint', status: 'completed', arguments: { format: 'layout3d' }, result: exported } };
+            yield { type: 'turn.completed' };
+        })() }) }; }
+    }
+    const workspace = mkdtempSync(join(tmpdir(), 'chat-figures-'));
+    try {
+    await runTurn({ ...request, workspace }, new AbortController().signal, event => events.push(event), { Codex } as unknown as Sdk);
+    assert.equal(events[0]!.figure, undefined);
+    const { file, ...shown } = events[1]!.figure;
+    assert.deepEqual(shown, { mime: 'image/svg+xml', filename: 'hissabeth-layout3d.svg', bytes: svg.length, data: Buffer.from(svg).toString('base64'), revision: 3, saved: true });
+    // The stored copy is named by its content hash.
+    assert.match(file, /^[0-9a-f]{32}\.svg$/);
+    assert.equal(readFileSync(join(workspace, 'chat-figures', file), 'utf8'), svg);
+    // Claude: the MCP prefix is dropped and an artifact_fetch image arrives in the SDK's image block.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const claude: Record<string, any>[] = [];
+    function query() {
+        const stream = (async function* () {
+            yield { type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', id: 'f', name: 'mcp__hissabeth__artifact_fetch', input: { id: 'job' } }] } };
+            yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'f', is_error: false, content: [
+                { type: 'text', text: JSON.stringify({ id: 'job', filename: 'hissabeth-layout3d.png', mime: 'image/png' }) },
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } },
+            ] }] } };
+            yield { type: 'result', subtype: 'success', is_error: false };
+        })();
+        (stream as unknown as { close: () => void }).close = () => {};
+        return stream;
+    }
+    await runTurn({ ...request, workspace, provider: 'claude' }, new AbortController().signal, event => claude.push(event), { query } as unknown as Sdk);
+    assert.equal(claude[0]!.name, 'artifact_fetch');
+    assert.equal(claude[1]!.figure.filename, 'hissabeth-layout3d.png');
+    assert.equal(claude[1]!.figure.data, png);
+    assert.equal(claude[1]!.figure.bytes, 70);
+    assert.deepEqual(readFileSync(join(workspace, 'chat-figures', claude[1]!.figure.file)), Buffer.from(png, 'base64'));
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('large drawings are stored, not inlined, and lab checks become an assertion summary', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'chat-figures-'));
+    try {
+        const dir = join(workspace, 'chat-figures');
+        const big = figureOf([{ type: 'image', data: 'A'.repeat(FIGURE_LIMIT + 4), mimeType: 'image/png' }])!;
+        assert.equal(big.data?.length, FIGURE_LIMIT + 4);
+        const stored = storeFigure(big, dir);
+        assert.equal(stored.data, undefined);
+        assert.equal(stored.omitted, undefined);
+        assert.equal(readFileSync(join(dir, stored.file!)).length, big.bytes);
+        // Small drawings keep their inline copy as well; without a store a large one is a note.
+        assert.equal(storeFigure(figureOf([{ type: 'image', data: 'AAAA', mimeType: 'image/png' }])!, dir).data, 'AAAA');
+        assert.deepEqual(storeFigure(big, undefined), { mime: 'image/png', filename: 'figure.png', bytes: big.bytes, omitted: 'too_large' });
+        assert.equal(storeFigure(big, join(workspace, 'missing\0dir')).omitted, 'too_large');
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
+    const report = {
+        saved: false, revision: 7, readiness_score: 60, passed: false, counts: { errors: 3, warnings: 1, info: 2 },
+        assertions: [
+            { assertion: 'equal_arms', kind: 'opl_difference', branches: ['arm_a', 'arm_b'], at: { element: 'bs2', port: 'in' }, unit: 'mm', target: 0, tolerance: 0.01, residual: 0.42, status: 'fail' },
+            { assertion: 'combiner_angle', kind: 'angle', branches: ['arm_a', 'arm_b'], at: { element: 'bs2', port: 'in' }, unit: 'mrad', target: 0, tolerance: 1, residual: null, status: 'unreachable', break: { element: 'm3', port: 'in', reason: 'clipped', detail: 'outside clear aperture' } },
+            { assertion: 'parity', kind: 'parity', branches: ['arm_a', 'arm_a'], at: { element: 'cam', port: 'in' }, unit: 'count', target: 0, tolerance: 0, residual: 0, status: 'pass' },
+        ],
+        branches: [{ id: 'arm_b', stage_ids: [], color: '#000', paths: [], break: { element: 'm3', port: 'in', reason: 'clipped' } }, { id: 'arm_a', stage_ids: [], color: '#111', paths: [] }],
+        issues: [
+            { severity: 'error', code: 'assertion_failed', element_id: 'bs2', branch: null, message: 'equal_arms: residual 0.42 exceeds tolerance 0.01' },
+            { severity: 'warning', code: 'mount_collision', element_id: 'm1', branch: null, message: 'm1 collides with m2' },
+            { severity: 'error', code: 'clear_aperture', element_id: 'm3', branch: 'arm_b', message: '3ω beam exceeds the clear aperture of m3' },
+            { severity: 'info', code: 'note', element_id: null, branch: null, message: 'ignored' },
+        ],
+    };
+    const checks = checksOf({ content: [{ type: 'text', text: JSON.stringify(report) }] })!;
+    assert.deepEqual({ ...checks, items: undefined }, { passed: false, readiness: 60, assertions: { pass: 1, fail: 1, unreachable: 1 }, errors: 3, warnings: 1, items: undefined, more: 0, revision: 7, saved: false });
+    assert.deepEqual(checks.items.map(item => [item.kind, item.label, item.severity, item.element, item.branch]), [
+        ['assertion', 'equal_arms', 'error', 'bs2', 'arm_a'],
+        ['assertion', 'combiner_angle', 'error', 'm3', 'arm_a'],
+        ['branch', 'arm_b', 'error', 'm3', 'arm_b'],
+        ['issue', 'clear_aperture', 'error', 'm3', 'arm_b'],
+        ['issue', 'mount_collision', 'warning', 'm1', undefined],
+    ]);
+    assert.match(checks.items[0]!.detail, /residual 0\.42 mm, tolerance ±0\.01/);
+    assert.match(checks.items[1]!.detail, /m3:in clipped \(outside clear aperture\)/);
+    // Long failure lists are cut to CHECK_ITEMS with a count of the rest.
+    const many = { ...report, issues: Array.from({ length: 40 }, (_, i) => ({ severity: 'error', code: 'c' + i, element_id: 'e', branch: null, message: 'm' })) };
+    const cut = checksOf(JSON.stringify(many))!;
+    assert.equal(cut.items.length, CHECK_ITEMS);
+    assert.equal(cut.more, 43 - CHECK_ITEMS);
+    // Other tool results carry no summary.
+    assert.equal(checksOf(JSON.stringify({ revision: 1, assertions: [] })), undefined);
+});
+
+test('chat figures keep only displayable, well-formed and bounded images', () => {
+    const meta = (fields: object) => [{ type: 'text', text: JSON.stringify(fields) }];
+    // MCP image and embedded SVG resource content (artifact_fetch over Codex).
+    assert.equal(figureOf({ content: [...meta({ filename: 'a.png' }), { type: 'image', data: 'AAAA', mimeType: 'image/png' }] })?.filename, 'a.png');
+    const resource = figureOf([{ type: 'resource', resource: { uri: 'artifact://j/plan.svg', mimeType: 'image/svg+xml', text: '<svg/>' } }]);
+    assert.deepEqual(resource, { mime: 'image/svg+xml', filename: 'plan.svg', bytes: 6, data: Buffer.from('<svg/>').toString('base64') });
+    // PDF, DXF and plain text stay in the raw result.
+    assert.equal(figureOf([{ type: 'resource', resource: { uri: 'artifact://j/p.pdf', mimeType: 'application/pdf', blob: 'JVBERi0=' } }]), undefined);
+    assert.equal(figureOf(meta({ filename: 'p.pdf', mime: 'application/pdf', content: 'JVBERi0=', encoding: 'base64' })), undefined);
+    assert.equal(figureOf('revision 2'), undefined);
+    // Data that is not base64 never reaches a data URL.
+    assert.equal(figureOf([{ type: 'image', data: 'AA"><script>', mimeType: 'image/png' }]), undefined);
+    assert.equal(figureOf([{ type: 'image', data: 'AAAA', mimeType: 'text/html' }]), undefined);
+    // Beyond the hard cap: kept as a note without data.
+    const big = figureOf([{ type: 'image', data: 'A'.repeat(FIGURE_MAX + 4), mimeType: 'image/png' }]);
+    assert.equal(big?.omitted, 'too_large');
+    assert.equal(big?.data, undefined);
+    assert.equal(toolName('mcp__hissabeth__bench_lab_check'), 'bench_lab_check');
 });

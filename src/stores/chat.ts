@@ -25,6 +25,45 @@ export interface AgentModel {
     description: string;
 }
 
+// Mirrors scripts/chat-figures.ts, which the bridge runs outside the app bundle.
+/** A drawing a tool returned: base64 `data` inlined when small, `file` the
+ * stored copy read with `chat_figure`; `omitted` when neither was kept. */
+export interface ChatFigure {
+    mime: string;
+    filename: string;
+    bytes: number;
+    data?: string;
+    file?: string;
+    omitted?: 'too_large';
+    revision?: number;
+    saved?: boolean;
+}
+/** One failed assertion, interrupted branch or lab issue. */
+export interface ChatCheckItem {
+    kind: 'assertion' | 'branch' | 'issue';
+    label: string;
+    detail: string;
+    severity: 'error' | 'warning';
+    element?: string;
+    branch?: string;
+}
+/** The summary of a bench_lab_check result. */
+export interface ChatChecks {
+    passed: boolean;
+    readiness: number;
+    assertions: { pass: number; fail: number; unreachable: number };
+    errors: number;
+    warnings: number;
+    items: ChatCheckItem[];
+    more: number;
+    revision?: number;
+    saved?: boolean;
+}
+/** Where a chat review card points on the bench. */
+export interface BenchTarget {
+    element?: string;
+    branch?: string;
+}
 export interface ChatEntry {
     id: string;
     kind: 'user' | 'text' | 'tool';
@@ -32,6 +71,8 @@ export interface ChatEntry {
     name?: string;
     status?: string;
     detail?: string;
+    figure?: ChatFigure;
+    checks?: ChatChecks;
 }
 export interface Conversation {
     id: string;
@@ -50,6 +91,8 @@ interface ChatEvent {
     name?: string;
     status?: string;
     detail?: string;
+    figure?: ChatFigure;
+    checks?: ChatChecks;
 }
 interface HistorySnapshot {
     conversations: Conversation[];

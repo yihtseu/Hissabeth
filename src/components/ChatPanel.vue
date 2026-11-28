@@ -11,17 +11,19 @@ import {
     Square,
     X,
 } from 'lucide-vue-next';
+import ChatFigure from './ChatFigure.vue';
+import ChatChecks from './ChatChecks.vue';
 import MarkdownRender from 'markstream-vue';
 import 'markstream-vue/index.css';
 import { tr } from '../i18n';
 import { usePreferencesStore } from '../stores/preferences';
-import { chatProviderNames, useChatStore } from '../stores/chat';
+import { chatProviderNames, useChatStore, type BenchTarget } from '../stores/chat';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import chatgptBlack from '../assets/chatgpt-button-black-21.svg';
 import chatgptWhite from '../assets/chatgpt-button-white-21.svg';
 
 const props = defineProps<{ online: boolean; dirty: boolean; locked: boolean; visible: boolean }>();
-const emit = defineEmits<{ settings: []; close: [] }>();
+const emit = defineEmits<{ settings: []; close: []; locate: [target: BenchTarget] }>();
 const chat = useChatStore();
 const feed = ref<HTMLElement>();
 const composer = ref<HTMLTextAreaElement>();
@@ -488,6 +490,17 @@ onMounted(async () => {
                     </summary>
                     <pre class="chat-tool-detail">{{ entry.detail }}</pre>
                 </details>
+                <ChatChecks
+                    v-if="entry.kind === 'tool' && entry.checks"
+                    :checks="entry.checks"
+                    @locate="emit('locate', $event)"
+                />
+                <ChatFigure
+                    v-if="entry.kind === 'tool' && entry.figure"
+                    :figure="entry.figure"
+                    :tool="entry.name"
+                    @locate="emit('locate', {})"
+                />
             </article>
         </div>
 

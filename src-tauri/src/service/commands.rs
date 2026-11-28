@@ -406,7 +406,7 @@ pub(super) fn bench_export_blueprint(
     let saved = args.bench.is_none();
     bench_report(target, args.bench, |b, s, revision| {
         bench_lab::export_blueprint_file(
-            b, s, &args.format, args.px_per_mm, Some(bench_lab::BlueprintRevision { revision, saved }),
+            b, s, &args.format, args.px_per_mm, args.layout3d.requested(), Some(bench_lab::BlueprintRevision { revision, saved }),
         )
     })
 }
@@ -422,9 +422,10 @@ pub(super) fn artifact_start(
         target.system(|s, revision| Ok((selected(s, &draft)?.clone(), s.clone(), revision)))?;
     let format = args.format.clone();
     let px_per_mm = args.params.px_per_mm;
+    let layout3d = args.params.layout3d;
     artifacts::start(&store, &args.kind, &args.format, revision, saved, move || {
         let drawing = bench_lab::export_blueprint_file(
-            &bench, &system, &format, px_per_mm, Some(bench_lab::BlueprintRevision { revision, saved }),
+            &bench, &system, &format, px_per_mm, layout3d.requested(), Some(bench_lab::BlueprintRevision { revision, saved }),
         )?;
         let (filename, mime, bytes) = drawing.into_file();
         Ok(artifacts::Output { filename, mime: mime.into(), bytes })

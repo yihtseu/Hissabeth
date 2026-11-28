@@ -43,6 +43,12 @@ const group = computed(() =>
 defineExpose({
     saveBench: () => benchView.value?.saveBench(),
     discardBench: () => benchView.value?.discardBench(),
+    /** Opens the bench plan (from the section view) and shows a chat review's target. */
+    locate: async (target: { element?: string; branch?: string }) => {
+        if (mode.value === 'section') mode.value = '2d';
+        await nextTick();
+        return benchView.value?.locate(target) ?? false;
+    },
 });
 </script>
 <template>

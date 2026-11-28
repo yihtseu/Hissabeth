@@ -177,7 +177,7 @@ interface ToolMap {
             format: import('./bench').BlueprintFormat;
             /** PNG pixels per drawing millimetre; png only. */
             px_per_mm?: number;
-        };
+        } & import('./bench').Layout3dOptions;
         result: import('./bench').BenchBlueprintExport;
     };
     /** Start a background deliverable; poll artifact_status, then fetch or export it. */
@@ -185,7 +185,10 @@ interface ToolMap {
         args: {
             kind: 'blueprint';
             format: import('./bench').BlueprintFormat;
-            params?: { bench?: import('./bench').BenchInput; px_per_mm?: number };
+            params?: {
+                bench?: import('./bench').BenchInput;
+                px_per_mm?: number;
+            } & import('./bench').Layout3dOptions;
         };
         result: { id: string };
     };

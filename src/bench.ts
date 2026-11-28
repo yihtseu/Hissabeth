@@ -654,7 +654,29 @@ export interface BenchAlignmentGuide {
     safety_notes: string[];
 }
 /** Blueprint file formats of bench_export_blueprint and artifact_start. */
-export type BlueprintFormat = 'svg' | 'pdf' | 'png' | 'dxf' | 'stl' | 'alignment_md';
+export type BlueprintFormat = 'svg' | 'pdf' | 'png' | 'dxf' | 'stl' | 'alignment_md' | 'layout3d';
+/**
+ * Options of the shaded 3-D layout, given beside `format`: they set up format
+ * layout3d, and with pdf/png any of them (or layout3d true) delivers the 3-D
+ * layout instead of the plan.
+ */
+export interface Layout3dOptions {
+    layout3d?: boolean;
+    /** Same angles as the workbench 3D mode; exclusive with preset. */
+    view?: { azimuth_deg: number; elevation_deg: number; zoom?: number; pan_mm?: [number, number] };
+    preset?: 'iso' | 'top' | 'side';
+    rays_per_source?: number;
+    color_by?: 'branch' | 'wavelength' | 'field';
+    background?: 'gradient' | 'white';
+    show?: { table?: boolean; holes?: boolean; mounts?: boolean };
+    stroke?: boolean;
+    thickness_mm?: Record<string, number>;
+    /** Surface radii (positive convex, 0 flat; front on +X) and centre thickness by lens id. */
+    lens_shape?: Record<
+        string,
+        { front_radius_mm?: number; back_radius_mm?: number; center_thickness_mm?: number }
+    >;
+}
 export interface BenchBlueprintExport {
     revision: number;
     saved: boolean;

@@ -113,6 +113,10 @@ mod desktop {
         chat::cancel(state.inner(), &id)
     }
     #[tauri::command]
+    fn chat_figure(file: String) -> Result<String, String> {
+        chat::figure(&file)
+    }
+    #[tauri::command]
     fn chat_history(state: tauri::State<'_, chat::State>) -> Result<Value, String> {
         chat::history(state.inner())
     }
@@ -251,6 +255,7 @@ mod desktop {
                 chat_start,
                 chat_cancel,
                 chat_history,
+                chat_figure,
                 optical_call,
                 detect_agents,
                 configure_agents,

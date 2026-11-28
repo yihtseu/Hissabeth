@@ -125,6 +125,25 @@ pub struct Request {
     model: String,
 }
 
+/// A drawing the agent bridge stored for the conversation (see
+/// scripts/chat-figures.ts), returned as base64.
+pub fn figure(file: &str) -> Result<String, String> {
+    read_figure(&service::data_dir().join("chat-figures"), file)
+}
+fn read_figure(dir: &std::path::Path, file: &str) -> Result<String, String> {
+    // Only names the bridge writes: 32 lowercase hex digits of the content
+    // hash and an image extension, so no path can leave the directory.
+    let valid = file.split_once('.').is_some_and(|(hash, ext)| {
+        hash.len() == 32
+            && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && matches!(ext, "svg" | "png" | "jpg" | "webp")
+    });
+    if !valid {
+        return Err(format!("Invalid chat figure name {file:?}"));
+    }
+    let bytes = std::fs::read(dir.join(file)).map_err(|e| format!("Read chat figure {file}: {e}"))?;
+    Ok(crate::optics::blueprint_render::base64(&bytes))
+}
 pub fn runtime() -> Value {
     json!({"node": agents::executable("node"), "agents": agents::detect()})
 }
@@ -548,5 +567,24 @@ pub fn shutdown(state: &State) {
         && let Ok(mut child) = active.child.lock()
     {
         kill_tree(&mut child);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_figure;
+
+    #[test]
+    fn figures_are_read_only_by_their_stored_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.svg", "0123456789abcdef".repeat(2));
+        std::fs::write(dir.path().join(&name), b"<svg/>").unwrap();
+        assert_eq!(read_figure(dir.path(), &name).unwrap(), "PHN2Zy8+");
+        std::fs::write(dir.path().join("secret.txt"), b"x").unwrap();
+        for bad in ["../secret.txt", "secret.txt", "0123456789ABCDEF0123456789ABCDEF.svg",
+            "0123456789abcdef0123456789abcdef.svg/../../x", "0123456789abcdef0123456789abcdef.html"] {
+            assert!(read_figure(dir.path(), bad).unwrap_err().starts_with("Invalid"), "{bad}");
+        }
+        assert!(read_figure(dir.path(), &name.replace(".svg", ".png")).is_err());
     }
 }

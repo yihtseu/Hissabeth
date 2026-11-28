@@ -29,6 +29,8 @@ pub(crate) mod field;
 mod relay;
 #[path = "bench_drawing.rs"]
 pub(crate) mod drawing;
+#[path = "bench_layout3d.rs"]
+pub(crate) mod layout3d;
 use alignment_solver::{AimResidual, Combiner, Separation, measure};
 
 const FORK_REACH: f64 = 22.;
@@ -2491,7 +2493,7 @@ pub(crate) fn alignment(bench: &Bench, system: &System) -> Result<Guide, String>
     guide(bench, &gaussian)
 }
 
-pub(crate) const FORMATS: &[&str] = &["svg", "pdf", "png", "dxf", "stl", "alignment_md"];
+pub(crate) const FORMATS: &[&str] = &["svg", "pdf", "png", "dxf", "stl", "alignment_md", "layout3d"];
 
 fn xml(text: &str) -> String {
     let mut safe = String::new();
@@ -3400,16 +3402,20 @@ pub(crate) fn export_blueprint_report(
     format: &str,
     version: Option<BlueprintRevision>,
 ) -> Result<Blueprint, String> {
-    export_blueprint_file(bench, system, format, None, version)
+    export_blueprint_file(bench, system, format, None, None, version)
 }
 
 /// A blueprint file. `px_per_mm` sets the PNG resolution (default
 /// [`blueprint_render::DEFAULT_PX_PER_MM`]) and is refused for other formats.
+/// `layout3d` options (when they ask for it) select the shaded 3-D layout for
+/// the pdf and png formats, set up format layout3d (else the defaults) and
+/// are refused for others.
 pub(crate) fn export_blueprint_file(
     bench: &Bench,
     system: &System,
     format: &str,
     px_per_mm: Option<f64>,
+    layout3d: Option<&layout3d::Layout3dOptions>,
     version: Option<BlueprintRevision>,
 ) -> Result<Blueprint, String> {
     if !FORMATS.contains(&format) {
@@ -3421,8 +3427,24 @@ pub(crate) fn export_blueprint_file(
     if px_per_mm.is_some() && format != "png" {
         return Err(format!("px_per_mm applies only to png, not {format}"));
     }
+    if layout3d.is_some() && !matches!(format, "layout3d" | "pdf" | "png") {
+        return Err(format!("layout3d options apply only to layout3d, pdf and png, not {format}"));
+    }
+    let stem = if layout3d.is_some() || format == "layout3d" { "hissabeth-layout3d" } else { "hissabeth-bench" };
+    if format == "layout3d" {
+        let options = layout3d.cloned().unwrap_or_default();
+        return Ok(Blueprint {
+            format: format.to_owned(),
+            filename: format!("{stem}.svg"),
+            mime: "image/svg+xml",
+            content: layout3d::render(bench, system, &options, version)?.svg(),
+            encoding: None,
+            binary: None,
+        });
+    }
     if matches!(format, "pdf" | "png") {
-        let svg = export_blueprint_file(bench, system, "svg", None, version)?.content;
+        let source = if layout3d.is_some() { "layout3d" } else { "svg" };
+        let svg = export_blueprint_file(bench, system, source, None, layout3d, version)?.content;
         let (bytes, mime) = if format == "pdf" {
             (blueprint_render::pdf(&svg, true)?, "application/pdf")
         } else {
@@ -3430,7 +3452,7 @@ pub(crate) fn export_blueprint_file(
         };
         return Ok(Blueprint {
             format: format.to_owned(),
-            filename: format!("hissabeth-bench.{format}"),
+            filename: format!("{stem}.{format}"),
             mime,
             content: blueprint_render::base64(&bytes),
             encoding: Some("base64"),

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import {
+    Box,
     Crosshair,
     Download,
     Grid3x3,
@@ -31,6 +32,7 @@ import {
     type BenchTrace,
     type Vec3,
     type BlueprintFormat,
+    type Layout3dOptions,
 } from '../bench';
 import { profileCurve } from '../profile';
 import { canonicalJson, clone } from '../validation';
@@ -194,7 +196,8 @@ const hoverCoord = ref<{ x: number; y: number; col: number; row: number } | null
 const connPort = ref('reflected');
 const connTo = ref('');
 const templateChoice = ref('mach_zehnder');
-const exportFormat = ref<BlueprintFormat | 'csv'>('svg');
+/** Export choice: a blueprint format, coordinates CSV, or the 3-D layout as PDF or PNG. */
+const exportFormat = ref<BlueprintFormat | 'csv' | 'layout3d-pdf' | 'layout3d-png'>('svg');
 /** PNG resolution in pixels per drawing millimetre (4 px/mm ≈ 102 dpi). */
 const exportPxPerMm = ref(4);
 
@@ -324,6 +327,69 @@ async function runDrawing(): Promise<void> {
     }
 }
 
+/** Engine 3-D layout shown beside the interactive 3D view, at its view. */
+const showRender = ref(true);
+const renderUrl = ref('');
+/** The draft and view the shown render was drawn for. */
+const renderFor = shallowRef<{ input: typeof labInput.value; view: string }>();
+let renderToken = 0;
+let renderTimer: ReturnType<typeof setTimeout> | undefined;
+/** Width of the engine page's drawing area (mm) over the 1000-unit view box. */
+const PAGE_MM_PER_UNIT = 396 / 1000;
+const round = (n: number) => Number(n.toFixed(2));
+/**
+ * The interactive view as layout3d options: yaw wrapped into ±180°, the same
+ * zoom over the fitted scale, and the pan as the same fraction of the drawing
+ * width.
+ */
+function currentView(): Layout3dOptions {
+    const azimuth = ((((yaw.value + 180) % 360) + 360) % 360) - 180;
+    return {
+        view: {
+            azimuth_deg: round(azimuth),
+            elevation_deg: round(pitch.value),
+            zoom: Number(Math.min(50, Math.max(0.05, zoom.value)).toPrecision(4)),
+            pan_mm: [
+                round(pan.value[0] * PAGE_MM_PER_UNIT),
+                round(pan.value[1] * PAGE_MM_PER_UNIT),
+            ],
+        },
+    };
+}
+const viewKey = computed(() => JSON.stringify(currentView()));
+/** The shown render no longer matches the draft or the view. */
+const renderStale = computed(
+    () => renderFor.value?.input !== labInput.value || renderFor.value?.view !== viewKey.value,
+);
+async function runRender(): Promise<void> {
+    const request = ++renderToken;
+    const input = labInput.value;
+    const view = viewKey.value;
+    if (props.mode !== '3d' || !showRender.value || !input.bench || !props.online) return;
+    try {
+        const out = await callTool('bench_export_blueprint', {
+            ...(benchDirty.value ? { bench: input.bench } : {}),
+            format: 'layout3d',
+            ...currentView(),
+        });
+        if (!alive || request !== renderToken || input !== labInput.value) return;
+        URL.revokeObjectURL(renderUrl.value);
+        renderUrl.value = URL.createObjectURL(new Blob([out.content], { type: out.mime }));
+        renderFor.value = { input, view };
+    } catch {
+        // Keep the last render, marked stale; the lab check reports why the bench cannot be drawn.
+    }
+}
+function scheduleRender(): void {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => void runRender(), 250);
+}
+// Every draft change (edits, discard, a new revision) replaces labInput.
+watch(
+    () => [labInput.value, props.online, props.mode, showRender.value, viewKey.value],
+    scheduleRender,
+);
+
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let stagePreviewTimer: ReturnType<typeof setTimeout> | undefined;
 function schedulePreview(stageMotion = false): void {
@@ -358,6 +424,9 @@ onBeforeUnmount(() => {
     token++;
     labToken++;
     planToken++;
+    renderToken++;
+    clearTimeout(renderTimer);
+    URL.revokeObjectURL(renderUrl.value);
     clearTimeout(debounceTimer);
     clearTimeout(stagePreviewTimer);
     clearTimeout(planZoomTimer);
@@ -1134,10 +1203,17 @@ async function exportDeliverable(): Promise<void> {
             );
             return;
         }
-        const format = exportFormat.value;
+        const choice = exportFormat.value;
+        const layout = choice === 'layout3d' || choice.startsWith('layout3d-');
+        const format: BlueprintFormat =
+            choice === 'layout3d-pdf' ? 'pdf' : choice === 'layout3d-png' ? 'png' : choice;
+        // The 3-D layout follows the 3D view; from 2D it uses the iso preset.
+        const layoutOptions: Layout3dOptions =
+            props.mode === '3d' ? { layout3d: true, ...currentView() } : { layout3d: true };
         const params = {
             ...(benchDirty.value ? { bench: input.bench } : {}),
             ...(format === 'png' ? { px_per_mm: exportPxPerMm.value } : {}),
+            ...(layout ? layoutOptions : {}),
         };
         const { id } = await callTool('artifact_start', {
             kind: 'blueprint',
@@ -1150,7 +1226,7 @@ async function exportDeliverable(): Promise<void> {
             return;
         }
         // Drawings carry their revision in the title block; refuse one that no longer matches.
-        const drawing = format === 'svg' || format === 'pdf' || format === 'png';
+        const drawing = ['svg', 'pdf', 'png', 'layout3d'].includes(format);
         if (drawing && (input !== labInput.value || status.revision !== input.revision)) {
             error.value = tr('benchLab.revisionChanged');
             return;
@@ -1165,7 +1241,25 @@ async function exportDeliverable(): Promise<void> {
 }
 
 // Exposed so the surrounding layout (and the app toolbar) can drive the unified bench draft.
-defineExpose({ saveBench, discardBench });
+/** Shows a place a chat review points at: selects the element (or the start of
+ * the named branch) and narrows the ray filter to the branch when the trace
+ * has a split path of that name. Returns whether anything was found. */
+function locate(target: { element?: string; branch?: string }): boolean {
+    const named = scene.value?.branches?.find((b) => b.id === target.branch);
+    const id = [target.element, named?.from.element].find(
+        (candidate) => candidate && allEntities.value.some((e) => e.id === candidate),
+    );
+    if (id) selected.value = id;
+    const wanted = target.branch;
+    const traced =
+        !!wanted &&
+        !!trace.value?.terminations.some(
+            (t) => t.branch === wanted || t.branch.startsWith(wanted + '/'),
+        );
+    branch.value = traced ? wanted : '';
+    return !!id || traced;
+}
+defineExpose({ saveBench, discardBench, locate });
 </script>
 
 <template>
@@ -1249,12 +1343,18 @@ defineExpose({ saveBench, discardBench });
                     <option value="svg">Blueprint SVG (1:1)</option>
                     <option value="pdf">Blueprint PDF (print at 100%)</option>
                     <option value="png">Blueprint PNG</option>
+                    <option value="layout3d">3D layout SVG</option>
+                    <option value="layout3d-pdf">3D layout PDF</option>
+                    <option value="layout3d-png">3D layout PNG</option>
                     <option value="dxf">AutoCAD DXF</option>
                     <option value="stl">3D CAD STL</option>
                     <option value="alignment_md">Lab SOP (Markdown)</option>
                     <option value="csv">Coordinates CSV</option>
                 </select>
-                <label v-if="exportFormat === 'png'" class="export-resolution">
+                <label
+                    v-if="exportFormat === 'png' || exportFormat === 'layout3d-png'"
+                    class="export-resolution"
+                >
                     <input
                         v-model.number="exportPxPerMm"
                         type="number"
@@ -1326,7 +1426,28 @@ defineExpose({ saveBench, discardBench });
                         >
                             <RefreshCw :size="12" />
                         </button>
+                        <button
+                            v-if="mode === '3d'"
+                            type="button"
+                            class="small"
+                            :aria-pressed="showRender"
+                            :title="tr('benchLab.render3dHint')"
+                            @click="showRender = !showRender"
+                        >
+                            <Box :size="12" />
+                        </button>
                     </div>
+                    <figure
+                        v-if="mode === '3d' && showRender && renderUrl"
+                        class="render3d"
+                        :class="{ stale: renderStale }"
+                        :title="tr('benchLab.render3dHint')"
+                    >
+                        <img :src="renderUrl" :alt="tr('benchLab.render3d')" />
+                        <figcaption>
+                            {{ tr(renderStale ? 'benchLab.render3dStale' : 'benchLab.render3d') }}
+                        </figcaption>
+                    </figure>
                     <div v-if="hoverCoord && mode === '2d'" class="stage-hud-coord">
                         X {{ hoverCoord.x.toFixed(1) }} · Y {{ hoverCoord.y.toFixed(1) }} mm ·
                         <b>C{{ hoverCoord.col }}, R{{ hoverCoord.row }}</b>
@@ -2185,6 +2306,31 @@ defineExpose({ saveBench, discardBench });
     border: 0;
     padding: 4px 6px;
     min-height: 24px;
+}
+.render3d {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 5;
+    width: min(42%, 360px);
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    overflow: hidden;
+    pointer-events: none;
+}
+.render3d img {
+    display: block;
+    width: 100%;
+}
+.render3d.stale img {
+    opacity: 0.45;
+}
+.render3d figcaption {
+    padding: 2px 6px;
+    font-size: 11px;
+    color: var(--muted);
 }
 .stage-hud-coord {
     position: absolute;

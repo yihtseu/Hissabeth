@@ -200,6 +200,23 @@ try {
         await expect(lab.getByRole('status')).toContainText(`Revision ${saved.revision} · Saved bench`);
         const opl = saved.branches.find((branch: { id: string }) => branch.id === 'arm_delay').paths[0].opl_mm;
         assert(Math.abs(opl - 730.002) <= 1e-9, `Saved delay arm OPL: ${opl}`);
+        // 3D mode shows the engine layout3d render at the interactive yaw and pitch, and follows rotation.
+        await page.getByRole('button',{name:'3D bench',exact:true}).click();
+        const renderText=()=>page.locator('.render3d img').evaluate(async(img:HTMLImageElement)=>(await fetch(img.src)).text());
+        await expect.poll(renderText,{timeout:20000}).toContain('azimuth -25° · elevation 35°');
+        const view=page.locator('.bench-viewport');const area=(await view.boundingBox())!;
+        await page.mouse.move(area.x+area.width*.5,area.y+area.height*.5);await page.mouse.down({button:'right'});
+        await page.mouse.move(area.x+area.width*.5+40,area.y+area.height*.5);await page.mouse.up({button:'right'});
+        await expect.poll(renderText,{timeout:20000}).toContain('azimuth -11° · elevation 35°');
+        assert((await renderText()).includes('width="420mm"'));
+        // Zooming re-renders at the new view; the old render is marked stale meanwhile.
+        const before=await renderText();
+        await page.mouse.wheel(0,-100);
+        await expect.poll(renderText,{timeout:20000}).not.toBe(before);
+        await expect(page.locator('.render3d.stale')).toHaveCount(0);
+        await expect(page.locator('.render3d figcaption')).toHaveText('Engine render');
+        await page.getByRole('button',{name:'2D table',exact:true}).click();
+        await expect(page.locator('.render3d')).toHaveCount(0);
         assert.deepEqual(errors, []);
         console.log('PASS: delay stage preview, revisioned lab readings, and SVG agree after coarse and PZT motion');
     } else if(process.argv.includes('--lifecycle')) {

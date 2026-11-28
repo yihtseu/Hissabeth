@@ -1,5 +1,6 @@
 import { chatGPTAccount, chatGPTModels, chatGPTTurn, type ChatGPTMessage } from './chatgpt';
 import { listModels } from './agent-models';
+import { reviewOf, toolName } from './chat-figures';
 import { Codex } from '@openai/codex-sdk';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createInterface } from 'node:readline';
@@ -14,6 +15,8 @@ const instructions =
     'For a real lens group on the bench, use kind lens_group. It references the current sequential prescription, its position locates the first vertex, and local +X maps to the prescription +Z axis. ' +
     'Use bench_trace to inspect its continued path and power. For free-space benches, use bench_catalog for hardware, bench_template for mounted layouts, and bench_auto_aim to orient optics and snap mounts to the hole grid. ' +
     'Before treating a bench as lab-ready, use bench_lab_check to review 3ω clear aperture, clamping fork access, mount collisions, and beam dump positions. Use bench_alignment_guide for installation order and bench_export_blueprint for drawings and alignment SOPs. ' +
+    'SVG and PNG drawings that bench_export_blueprint or artifact_fetch return (including format layout3d, the shaded 3D layout) are shown to the user in the chat, so export one when the user should review a layout; bench_lab_check results are shown as a pass/fail summary the user can locate on the bench. ' +
+    'When bench_lab_check fails, revise and re-solve instead of only reporting: read each failing assertion (residual against tolerance, its two branches, the comparison element in at), each branch or assertion break (element, port, reason) and each error issue (element_id, branch); change the draft accordingly (move or rotate the named element, adjust a stage, fix a connection or via), check the draft with bench_lab_check {bench} (bench_auto_aim can re-aim mirrors), apply it with bench_set, and repeat until passed or the remaining failures need a decision from the user; then export the drawing again so the user can review the result. ' +
     'Use bench_field for interference, speckle, masks, SLMs and tip-tilt: give the source field sampling and a polarization, then read a branch end or superpose every branch at one input port. ' +
     'Use bench_readout for modal cameras: give a detector a readout (ROI ports, a Hermite-Gauss, Laguerre-Gauss or custom mode basis, balanced pairs) and read per-port mode intensities and balanced quadratures; bench_template modal_hybrid is a four-port example. ' +
     'Report actual results and tool errors. Respond in the language of the user.';
@@ -103,6 +106,7 @@ export async function runTurn(
                             null,
                             2,
                         ).slice(0, 24000),
+                        ...reviewOf(item.result, request.workspace),
                     });
             } else if (event.type === 'turn.completed') complete = true;
         }
@@ -169,7 +173,7 @@ export async function runTurn(
                             emit({
                                 kind: 'tool',
                                 id: block.id,
-                                name: block.name,
+                                name: toolName(block.name),
                                 status: 'in_progress',
                                 detail: JSON.stringify(block.input, null, 2).slice(0, 24000),
                             });
@@ -183,6 +187,9 @@ export async function runTurn(
                                 id: block.tool_use_id,
                                 status: block.is_error ? 'failed' : 'completed',
                                 detail: JSON.stringify(block.content, null, 2).slice(0, 24000),
+                                ...(block.is_error
+                                    ? {}
+                                    : reviewOf(block.content, request.workspace)),
                             });
                         }
                 }

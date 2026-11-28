@@ -657,6 +657,39 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn layout3d_reaches_mcp_as_svg_and_as_a_png_artifact() {
+            let (_dir, w) = workspace();
+            michelson(&w);
+            let args = json!({"format":"layout3d","view":{"azimuth_deg":-25,"elevation_deg":35},"rays_per_source":19,"color_by":"wavelength"});
+            let svg = ok(&mcp(&w, "bench_export_blueprint", args.clone()));
+            assert_eq!((svg["filename"].as_str(), svg["mime"].as_str()), (Some("hissabeth-layout3d.svg"), Some("image/svg+xml")), "{svg}");
+            let content = svg["content"].as_str().unwrap();
+            assert!(content.contains(r#"width="420mm""#) && content.contains("azimuth -25° · elevation 35° · 19 rays per source"), "{content}");
+            assert_eq!(dispatch(&Caller::Gui, &w, "bench_export_blueprint", args, None).unwrap()["content"], svg["content"]);
+            // Without options, layout3d uses the iso preset.
+            let iso = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"layout3d"}), None).unwrap();
+            assert!(iso["content"].as_str().unwrap().contains("azimuth -45°"));
+            let top = ok(&mcp(&w, "bench_export_blueprint", json!({"format":"layout3d","preset":"top","rays_per_source":6})));
+            assert!(top["content"].as_str().unwrap().contains("azimuth 0° · elevation 90° · 6 rays per source"), "{top}");
+            // layout3d true asks for the default 3-D layout as pdf; without it pdf is the plan.
+            let pdf = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf","layout3d":true}), None).unwrap();
+            assert_eq!(pdf["filename"], "hissabeth-layout3d.pdf");
+            let plan = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"pdf"}), None).unwrap();
+            assert_eq!(plan["filename"], "hissabeth-bench.pdf");
+            let id = ok(&mcp(&w, "artifact_start", json!({"kind":"blueprint","format":"png","params":{"px_per_mm":1,"preset":"top","background":"white"}})))["id"].clone();
+            let status = wait(&w, id.as_str().unwrap());
+            assert_eq!((status["state"].as_str(), status["filename"].as_str()), (Some("done"), Some("hissabeth-layout3d.png")), "{status}");
+            assert_eq!(mcp(&w, "artifact_fetch", json!({"id": id}))["content"][1]["type"], "image");
+            // Options are checked by the schema and refused for plan-only formats.
+            for bad in [json!({"format":"layout3d","preset":"oblique"}), json!({"format":"layout3d","colour":"red"})] {
+                let unknown = mcp(&w, "bench_export_blueprint", bad);
+                assert_eq!(unknown["isError"], true, "{unknown}");
+            }
+            let refused = dispatch(&Caller::Gui, &w, "bench_export_blueprint", json!({"format":"dxf","preset":"top"}), None).unwrap_err();
+            assert!(refused.contains("layout3d options apply only to layout3d, pdf and png"), "{refused}");
+        }
+
+        #[test]
         fn png_artifacts_arrive_as_mcp_image_content() {
             let (_dir, w) = workspace();
             let bytes = png(3, 2, [255, 0, 0, 255]);

@@ -7,6 +7,7 @@ import { createConnection } from 'node:net';
 import { readFile, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import { defaultPreferences } from './ui_preferences';
+import { reviewOf } from '../../scripts/chat-figures';
 const root = resolve(import.meta.dirname, '../..');
 const target = resolve(root, 'src-tauri/target');
 const workspace = resolve(target, 'chat-ui-workspace');
@@ -64,6 +65,8 @@ try {
         if (command === 'optical_call') return optical(args.name, args.args);
         if (command === 'chat_runtime') return { node: '/node', agents: [{ name: 'codex', installed: true }, { name: 'claude', installed: true }] };
         if (command === 'chat_reset') return;
+        // Stands in for the app's chat_figure command (tested in chat.rs).
+        if (command === 'chat_figure') return (await readFile(resolve(workspace, 'chat-figures', args.file))).toString('base64');
         throw Error('Unexpected command: ' + command);
     });
     await page.addInitScript(() => {
@@ -113,6 +116,28 @@ try {
         };
         window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
     });
+    // A saved bench for "locate on bench", and the real drawings and checks the
+    // bridge would turn into review cards.
+    const revision = (await optical('system_get')).revision;
+    await optical('bench_template', { name: 'delay_line', apply: true, revision });
+    const savedBench = (await optical('bench_get')).bench;
+    const failing = structuredClone(savedBench);
+    failing.assertions[0].target += 50;
+    const wrap = (result: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
+    const labReview = reviewOf(wrap(await optical('bench_lab_check', { bench: failing })), workspace);
+    const hardware: Record<string, any>[] = [];
+    for (const name of ['michelson', 'periscope_routing']) {
+        const bench = (await optical('bench_template', { name })).bench;
+        if (name === 'periscope_routing') bench.periscopes = [{ id: 'P1', lower: 'M1', upper: 'M2' }];
+        const exported = await optical('bench_export_blueprint', { bench, format: 'layout3d', show: { table: true, holes: true, mounts: true }, stroke: true, background: 'white' });
+        const { figure } = reviewOf(wrap(exported), workspace);
+        // Hardware drawings exceed the inline limit: kept as a stored file only.
+        assert(exported.content.length > 1_400_000, `${name} hardware drawing is ${exported.content.length} bytes`);
+        assert.equal(figure!.data, undefined);
+        assert.equal(figure!.omitted, undefined);
+        assert.equal(figure!.saved, false);
+        hardware.push({ ...figure!, filename: `${name}-hardware.svg`, size: Buffer.byteLength(exported.content) });
+    }
     await page.goto(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
     const composer = page.getByRole('textbox', { name: 'Message', exact: true });
     const send = page.getByRole('button', { name: 'Send', exact: true });
@@ -232,12 +257,76 @@ try {
     await expect(mdEntry.locator('.markstream-vue code')).toContainText('code');
     await expect(mdEntry.locator('.markstream-vue li')).toHaveCount(2);
     await page.evaluate(() => window.__emit({ kind: 'done' }));
+    // Drawings returned by tools: shown through <img> (SVG scripts and
+    // handlers inert), zoomable, full screen, downloadable; oversize ones
+    // leave a note.
+    await page.getByRole('button', { name: 'New conversation', exact: true }).click();
+    await composer.fill('drawing review'); await send.click();
+    const drawing = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" onload="window.__pwned=1"><script>window.__pwned=1</script><rect width="200" height="100" fill="#3a7"/></svg>';
+    await page.evaluate(([svg, checks, hardware]) => {
+        window.__emit({ kind: 'tool', id: 'draw', name: 'bench_export_blueprint', status: 'in_progress', detail: '{}' });
+        window.__emit({ kind: 'tool', id: 'draw', status: 'completed', detail: '{}', figure: { mime: 'image/svg+xml', filename: 'hissabeth-layout3d.svg', bytes: svg.length, data: btoa(svg) } });
+        window.__emit({ kind: 'tool', id: 'big', name: 'artifact_fetch', status: 'completed', detail: '{}', figure: { mime: 'image/png', filename: 'huge.png', bytes: 3 * 1024 * 1024, omitted: 'too_large' } });
+        window.__emit({ kind: 'tool', id: 'lab', name: 'bench_lab_check', status: 'completed', detail: '{}', checks });
+        (hardware as any[]).forEach((figure, i) => window.__emit({ kind: 'tool', id: 'hw' + i, name: 'bench_export_blueprint', status: 'completed', detail: '{}', figure }));
+        window.__emit({ kind: 'done' });
+    }, [drawing, labReview.checks, hardware.map(({ size, ...figure }) => figure)] as const);
+    // Lab check summary: failed badge, the failing assertion with its residual, and locate.
+    const checksCard = page.locator('.chat-checks');
+    await expect(checksCard.locator('.chat-checks-badge')).toHaveText('Lab check failed');
+    await expect(checksCard).toContainText('1 failed');
+    await expect(checksCard).toContainText('Draft on revision');
+    await page.locator('.chat-panel').screenshot({ path: resolve(target, 'chat-review.png') });
+    const failed = checksCard.locator('li[data-kind="assertion"]').filter({ hasText: 'delay_opl' });
+    await expect(failed).toContainText('residual');
+    const at = labReview.checks!.items.find(item => item.label === 'delay_opl')!;
+    assert(at.element && at.branch, 'the failing assertion names an element and branch');
+    await failed.getByRole('button', { name: `Locate ${at.element} on bench` }).click();
+    await expect(page.locator('.bench-element-list button[aria-pressed="true"]')).toContainText(at.element);
+    // Real hardware drawings: read back from their stored files, viewable and downloadable whole.
+    for (const figure of hardware) {
+        const big = page.locator(`.chat-figure[data-file="${figure.file}"]`);
+        await expect.poll(() => big.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth), { timeout: 20000 }).toBeGreaterThan(0);
+        const download = page.waitForEvent('download');
+        await big.getByRole('button', { name: 'Download drawing', exact: true }).click();
+        const file = await download;
+        assert.equal(file.suggestedFilename(), figure.filename);
+        assert.equal((await readFile((await file.path())!)).length, figure.size);
+    }
+    // A drawing card's own locate opens the bench too.
+    await page.locator(`.chat-figure[data-file="${hardware[0]!.file}"]`).getByRole('button', { name: 'Locate on bench', exact: true }).click();
+    await expect(page.locator('.bench-element-list')).toBeVisible();
+    const card = page.locator('.chat-figure[data-tool="bench_export_blueprint"]:not([data-file])');
+    await expect(card.locator('img')).toBeVisible();
+    await expect.poll(() => card.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(200);
+    await card.locator('.chat-figure-view').hover();
+    await page.mouse.wheel(0, -200);
+    await expect.poll(() => card.locator('img').getAttribute('style')).toMatch(/scale\((?!1\))/);
+    const saved = page.waitForEvent('download');
+    await card.getByRole('button', { name: 'Download drawing', exact: true }).first().click();
+    assert.equal((await saved).suggestedFilename(), 'hissabeth-layout3d.svg');
+    await card.getByRole('button', { name: 'Full screen', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'hissabeth-layout3d.svg' });
+    await expect(dialog.locator('img')).toBeVisible();
+    await page.screenshot({ path: resolve(target, 'chat-figure-full.png') });
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator('.chat-figure[data-tool="artifact_fetch"] figcaption')).toContainText('huge.png (3.0 MB) is too large');
+    assert.equal(await page.evaluate(() => (window as any).__pwned), undefined);
     await page.reload();
-    await expect(page.locator('.chat-history button')).toHaveCount(3);
+    await expect(page.locator('.chat-history button')).toHaveCount(4);
     await ensureHistoryOpen();
     await page.locator('.chat-history button').filter({hasText:'Inspect the saved project'}).click();
     await expect(page.locator('.chat-entry.text')).toContainText('Saved revision 3');
     await expect(page.getByRole('combobox', {name:'Agent',exact:true})).toHaveValue('codex');
+    await ensureHistoryOpen();
+    await page.locator('.chat-history button').filter({hasText:'drawing review'}).click();
+    await expect(page.locator('.chat-figure[data-tool="bench_export_blueprint"]:not([data-file]) img')).toBeVisible();
+    await expect(page.locator('.chat-checks .chat-checks-badge')).toHaveText('Lab check failed');
+    for (const figure of hardware)
+        await expect.poll(() => page.locator(`.chat-figure[data-file="${figure.file}"] img`).evaluate((img: HTMLImageElement) => img.naturalWidth), { timeout: 20000 }).toBeGreaterThan(0);
+    await ensureHistoryOpen();
+    await page.locator('.chat-history button').filter({hasText:'Inspect the saved project'}).click();
     const dockBox = (await page.locator('.chat-panel').boundingBox())!;
     const mainBox = (await page.locator('#main').boundingBox())!;
     assert(dockBox.x >= mainBox.x + mainBox.width - 2, 'Assistant must follow the optical workspace');
@@ -251,7 +340,7 @@ try {
     }
     assert.deepEqual(errors, []);
     await writeFile(resolve(target, 'chat-ui-requests.json'), JSON.stringify(await page.evaluate(() => window.__chatRequests), null, 2));
-    console.log('PASS: right conversation dock, history list and reload, provider isolation, streamed items, tool details, close/reopen draft retention, new conversation, cancellation, startup/stream errors, 1440/768/480 layouts');
+    console.log('PASS: right conversation dock, history list and reload, provider isolation, streamed items, tool details, drawing cards (inert SVG, zoom, full screen, download, oversize note, stored hardware drawings, lab check summary, locate on bench, reload), close/reopen draft retention, new conversation, cancellation, startup/stream errors, 1440/768/480 layouts');
     }
 } finally {
     await browser?.close();

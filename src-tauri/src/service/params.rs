@@ -168,6 +168,8 @@ pub(super) struct BenchExportBlueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 40.0))]
     pub px_per_mm: Option<f64>,
+    #[serde(flatten)]
+    pub layout3d: bench_lab::layout3d::Layout3dOptions,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -192,6 +194,8 @@ pub(super) struct ArtifactParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 40.0))]
     pub px_per_mm: Option<f64>,
+    #[serde(flatten)]
+    pub layout3d: bench_lab::layout3d::Layout3dOptions,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]

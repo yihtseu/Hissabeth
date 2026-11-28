@@ -81,6 +81,7 @@ import OptimizePanel from './components/OptimizePanel.vue';
 import PrescriptionView from './components/PrescriptionView.vue';
 import AnalysisNavigator, { type AnalysisView } from './components/AnalysisNavigator.vue';
 import ChatPanel from './components/ChatPanel.vue';
+import type { BenchTarget } from './stores/chat';
 import MetricsBar from './components/MetricsBar.vue';
 import SurfaceTable from './components/SurfaceTable.vue';
 import SystemEditor from './components/SystemEditor.vue';
@@ -212,8 +213,15 @@ const layoutRef = ref<InstanceType<typeof OpticalLayoutView> | null>(null);
 type LayoutApi = InstanceType<typeof OpticalLayoutView> & {
     saveBench?: () => Promise<unknown>;
     discardBench?: () => void;
+    locate?: (target: BenchTarget) => Promise<boolean>;
 };
 const layoutApi = computed(() => (layoutRef.value ?? null) as LayoutApi | null);
+/** A chat review card's "locate on bench": open the bench and show its target. */
+async function locateOnBench(target: BenchTarget): Promise<void> {
+    tab.value = 'Layout';
+    await nextTick();
+    await layoutApi.value?.locate?.(target);
+}
 /** Bench-side unsaved state, notified by the layout view through the v-model:bench-dirty contract. */
 const benchDirty = ref(false);
 const canSaveBench = computed(
@@ -1282,6 +1290,7 @@ function onTabKey(e: KeyboardEvent, index: number): void {
                         :locked="wb.busy.value || wb.stale.value || wb.refreshPending.value"
                         @settings="openSettings('agents')"
                         @close="chatOpen = false"
+                        @locate="locateOnBench"
                     />
                 </Pane>
             </Splitpanes>
