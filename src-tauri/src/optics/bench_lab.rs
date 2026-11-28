@@ -431,6 +431,8 @@ fn mount_element(id: &str, hardware: Hardware, position: V3, normal: V3) -> Elem
         layer: None,
         action: None,
         readout: None,
+        role: None,
+        metadata: Default::default(),
     }
 }
 

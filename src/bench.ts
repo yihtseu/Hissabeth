@@ -96,6 +96,21 @@ export interface BenchElement {
     action?: BenchAction | null;
     /** Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs. */
     readout?: BenchReadout | null;
+    /** What the element does in the experiment, e.g. "reference_arm_mirror". Descriptive only. */
+    role?: string | null;
+    /** Free extension properties (at most 32), keyed like roles. Descriptive only. */
+    metadata?: Record<string, BenchMetaValue>;
+}
+/** A flag, a finite number or text up to 256 characters. */
+export type BenchMetaValue = boolean | number | string;
+/** 1–64 lowercase letters, digits, `_`, `.` and `-`, starting with a letter or digit. */
+export const META_KEY = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+/** An inspector entry read as a flag, a finite number, or else text. */
+export function metaValue(raw: string): BenchMetaValue {
+    const text = raw.trim();
+    if (text === 'true' || text === 'false') return text === 'true';
+    const number = Number(text);
+    return text !== '' && Number.isFinite(number) ? number : raw;
 }
 export interface BenchReadout {
     /** 1–16 ROIs: [y, z, width, height] in mm along the detector-local y and z axes. */

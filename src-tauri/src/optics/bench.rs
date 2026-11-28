@@ -389,6 +389,34 @@ pub struct Element {
     /// Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readout: Option<Readout>,
+    /// What the element does in the experiment, e.g. "reference_arm_mirror".
+    /// Descriptive only: the trace never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[a-z0-9][a-z0-9_.-]*$"))]
+    pub role: Option<String>,
+    /// Free extension properties (part numbers, lots, notes), keyed like roles.
+    /// Descriptive only: the trace never reads them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("maxProperties" = 32))]
+    pub metadata: BTreeMap<String, MetaValue>,
+}
+
+/// One extension property value: a flag, a finite number or text up to 256 characters.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MetaValue {
+    Flag(bool),
+    Number(f64),
+    Text(#[schemars(length(max = 256))] String),
+}
+
+/// Whether `key` is a role or metadata key: 1–64 characters of lowercase
+/// letters, digits, `_`, `.` and `-`, starting with a letter or digit.
+fn valid_slug(key: &str) -> bool {
+    (1..=64).contains(&key.len())
+        && key.bytes().enumerate().all(|(i, b)| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && matches!(b, b'_' | b'.' | b'-'))
+        })
 }
 
 #[derive(schemars::JsonSchema, Deserialize)]
@@ -474,6 +502,16 @@ struct ElementInput {
     /// Modal camera readout of a detector: ROI ports, a mode basis and balanced pairs.
     #[serde(default)]
     readout: Option<Readout>,
+    /// What the element does in the experiment, e.g. "reference_arm_mirror".
+    /// Descriptive only: the trace never reads it.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[a-z0-9][a-z0-9_.-]*$"))]
+    role: Option<String>,
+    /// Free extension properties (part numbers, lots, notes), keyed like roles.
+    /// Descriptive only: the trace never reads them.
+    #[serde(default)]
+    #[schemars(extend("maxProperties" = 32))]
+    metadata: BTreeMap<String, MetaValue>,
 }
 
 impl From<ElementInput> for Element {
@@ -517,6 +555,8 @@ impl From<ElementInput> for Element {
             layer: input.layer,
             action: input.action,
             readout: input.readout,
+            role: input.role,
+            metadata: input.metadata,
         }
     }
 }
@@ -1509,6 +1549,32 @@ impl Bench {
             }
         }
         for e in &self.elements {
+            if e.role.as_deref().is_some_and(|role| !valid_slug(role)) {
+                return Err(format!(
+                    "Element {} role must be 1-64 lowercase letters, digits, '_', '.' or '-', starting with a letter or digit",
+                    e.id
+                ));
+            }
+            if e.metadata.len() > 32 {
+                return Err(format!("Element {} has more than 32 metadata entries", e.id));
+            }
+            for (key, value) in &e.metadata {
+                if !valid_slug(key) {
+                    return Err(format!(
+                        "Element {} metadata key {key:?} must be 1-64 lowercase letters, digits, '_', '.' or '-', starting with a letter or digit",
+                        e.id
+                    ));
+                }
+                match value {
+                    MetaValue::Number(x) if !x.is_finite() => {
+                        return Err(format!("Element {} metadata {key} must be a finite number", e.id));
+                    }
+                    MetaValue::Text(text) if text.chars().count() > 256 => {
+                        return Err(format!("Element {} metadata {key} text is longer than 256 characters", e.id));
+                    }
+                    _ => {}
+                }
+            }
             if e.label.len() > 256
                 || e.rotation.is_some_and(|rotation| !valid_vec(rotation))
                 || !e.aperture.is_finite()
@@ -3378,7 +3444,7 @@ impl Bench {
             }
             let part=e.mount.as_ref().map(|m|m.part.as_str()).unwrap_or("unspecified");
             *bom.entry(format!("{:?} / {}",e.kind,part)).or_default()+=1;
-            AssemblyElement { id: e.id.clone(), label: e.label.clone(), kind: e.kind, position: p, rotation: e.rotation(), normal: rotate([1.,0.,0.],e.rotation()), hole: holes, hole_offset: [p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch], mount: e.mount.clone(), lens_model: match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None } }
+            AssemblyElement { id: e.id.clone(), label: e.label.clone(), kind: e.kind, position: p, rotation: e.rotation(), normal: rotate([1.,0.,0.],e.rotation()), hole: holes, hole_offset: [p[0]-holes[0]*self.hole_pitch,p[1]-holes[1]*self.hole_pitch], mount: e.mount.clone(), lens_model: match e.kind { Kind::Lens => Some("ideal thin lens; slope approximation"), Kind::LensGroup => Some("current sequential prescription; real surfaces; scalar group transmission"), _ => None }, role: e.role.clone(), metadata: e.metadata.clone() }
         }).collect();
         for (i, a) in self.elements.iter().enumerate() {
             for b in &self.elements[i + 1..] {
@@ -3480,6 +3546,10 @@ struct AssemblyElement {
     hole_offset: [f64; 2],
     mount: Option<Mount>,
     lens_model: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    metadata: BTreeMap<String, MetaValue>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -3562,6 +3632,8 @@ pub fn example() -> Bench {
         layer: None,
         action: None,
         readout: None,
+        role: None,
+        metadata: BTreeMap::new(),
     };
     Bench {
         name: "Split laser experiment".into(),
@@ -5009,6 +5081,57 @@ mod tests {
         let t = b.trace(&System::default()).unwrap();
         accounted(&t);
         close(t.power.truncated, 1.);
+    }
+    #[test]
+    fn elements_carry_a_role_and_metadata_without_loosening_unknown_fields() {
+        let mut value = serde_json::to_value(example()).unwrap();
+        value["elements"][1]["role"] = json!("reference_arm.mirror-1");
+        value["elements"][1]["metadata"] = json!({"part": "BB1-E02", "lot": 7, "spare": true});
+        let bench: Bench = serde_json::from_value(value.clone()).unwrap();
+        bench.validate().unwrap();
+        let m1 = &bench.elements[1];
+        assert_eq!(m1.role.as_deref(), Some("reference_arm.mirror-1"));
+        assert_eq!(m1.metadata["part"], MetaValue::Text("BB1-E02".into()));
+        assert_eq!(m1.metadata["lot"], MetaValue::Number(7.));
+        assert_eq!(m1.metadata["spare"], MetaValue::Flag(true));
+        // Round trip, and absent on elements without them.
+        let again = serde_json::to_value(&bench).unwrap();
+        assert_eq!(again["elements"][1]["role"], value["elements"][1]["role"]);
+        assert_eq!(again["elements"][1]["metadata"], json!({"lot": 7.0, "part": "BB1-E02", "spare": true}));
+        assert!(again["elements"][0].get("role").is_none() && again["elements"][0].get("metadata").is_none());
+        // Assembly lists them per item, omitting them where empty.
+        let assembly = bench.assembly();
+        assert_eq!(assembly["items"][1]["role"], "reference_arm.mirror-1");
+        assert_eq!(assembly["items"][1]["metadata"]["part"], "BB1-E02");
+        assert!(assembly["items"][0].get("role").is_none() && assembly["items"][0].get("metadata").is_none());
+        // Other unknown element fields are still refused.
+        let mut unknown = value.clone();
+        unknown["elements"][1]["purpose"] = json!("reference");
+        assert!(serde_json::from_value::<Bench>(unknown).unwrap_err().to_string().contains("unknown field `purpose`"));
+        // Metadata values are flags, numbers or text only.
+        let mut nested = value.clone();
+        nested["elements"][1]["metadata"]["nested"] = json!({"a": 1});
+        assert!(serde_json::from_value::<Bench>(nested).is_err());
+        let invalid = |edit: &dyn Fn(&mut Element)| {
+            let mut b = bench.clone();
+            edit(&mut b.elements[1]);
+            b.validate().unwrap_err()
+        };
+        for role in ["", "Reference", "_arm", "arm space", &"a".repeat(65)] {
+            let error = invalid(&|e| e.role = Some(role.into()));
+            assert!(error.contains("Element M1 role"), "{role:?}: {error}");
+        }
+        assert!(invalid(&|e| e.metadata.insert("Part".into(), MetaValue::Flag(true)).map_or((), drop))
+            .contains(r#"metadata key "Part""#));
+        assert!(invalid(&|e| e.metadata.insert("gain".into(), MetaValue::Number(f64::NAN)).map_or((), drop))
+            .contains("metadata gain must be a finite number"));
+        assert!(invalid(&|e| e.metadata.insert("note".into(), MetaValue::Text("é".repeat(257))).map_or((), drop))
+            .contains("metadata note text is longer than 256"));
+        let mut b = bench.clone();
+        b.elements[1].metadata.insert("note".into(), MetaValue::Text("é".repeat(256)));
+        b.validate().unwrap();
+        assert!(invalid(&|e| e.metadata = (0..33).map(|i| (format!("k{i}"), MetaValue::Flag(false))).collect())
+            .contains("more than 32 metadata entries"));
     }
     #[test]
     fn forty_components_and_assembly_geometry() {

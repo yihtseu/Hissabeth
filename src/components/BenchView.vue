@@ -6,6 +6,7 @@ import {
     Download,
     Grid3x3,
     List,
+    Minus,
     Maximize2,
     Plus,
     RefreshCw,
@@ -26,6 +27,8 @@ import {
     type BenchCatalogItem,
     type BenchDrawing,
     type BenchElement,
+    META_KEY,
+    metaValue,
     type BenchRegion,
     type BenchLabCheck,
     type BenchPolarization,
@@ -108,6 +111,45 @@ const zLocked = computed(() => {
     const e = entity.value;
     return !!e && 'kind' in e && !!e.layer && !periscopeMirrors.value.has(e.id);
 });
+function setRole(e: BenchElement, raw: string) {
+    const role = raw.trim().toLowerCase();
+    if (role) e.role = role;
+    else delete e.role;
+    schedulePreview();
+}
+/** Metadata rows keep their order while a key is renamed. */
+function setMetaKey(e: BenchElement, from: string, raw: string) {
+    const key = raw.trim().toLowerCase();
+    if (
+        !key ||
+        key === from ||
+        !e.metadata ||
+        Object.prototype.hasOwnProperty.call(e.metadata, key)
+    )
+        return;
+    e.metadata = Object.fromEntries(
+        Object.entries(e.metadata).map(([k, v]) => [k === from ? key : k, v]),
+    );
+    schedulePreview();
+}
+function setMetaValue(e: BenchElement, key: string, raw: string) {
+    e.metadata = { ...e.metadata, [key]: metaValue(raw) };
+    schedulePreview();
+}
+function addMeta(e: BenchElement) {
+    const used = e.metadata ?? {};
+    let n = 1;
+    while (Object.prototype.hasOwnProperty.call(used, `note${n === 1 ? '' : n}`)) n++;
+    e.metadata = { ...used, [`note${n === 1 ? '' : n}`]: '' };
+    schedulePreview();
+}
+function removeMeta(e: BenchElement, key: string) {
+    const rest = { ...e.metadata };
+    delete rest[key];
+    if (Object.keys(rest).length) e.metadata = rest;
+    else delete e.metadata;
+    schedulePreview();
+}
 function setLayer(e: BenchElement, id: string) {
     e.layer = id || null;
     const layer = scene.value?.layers?.find((l) => l.id === id);
@@ -2013,6 +2055,79 @@ defineExpose({ saveBench, discardBench, locate });
                                 <span>{{ tr('bench.kinds.' + entity.kind) }}</span>
                             </label>
                             <label>
+                                {{ tr('bench.role') }}
+                                <input
+                                    type="text"
+                                    class="bench-role"
+                                    maxlength="64"
+                                    :placeholder="tr('bench.rolePlaceholder')"
+                                    :value="entity.role ?? ''"
+                                    @change="
+                                        setRole(entity, ($event.target as HTMLInputElement).value)
+                                    "
+                                />
+                            </label>
+                            <div
+                                class="bench-metadata"
+                                role="group"
+                                :aria-label="tr('bench.metadata')"
+                            >
+                                <span>{{ tr('bench.metadata') }}</span>
+                                <div
+                                    v-for="(value, key) in entity.metadata ?? {}"
+                                    :key="key"
+                                    class="bench-metadata-row"
+                                >
+                                    <input
+                                        type="text"
+                                        maxlength="64"
+                                        :aria-label="tr('bench.metadataKey')"
+                                        :aria-invalid="!META_KEY.test(String(key))"
+                                        :value="key"
+                                        @change="
+                                            setMetaKey(
+                                                entity,
+                                                String(key),
+                                                ($event.target as HTMLInputElement).value,
+                                            )
+                                        "
+                                    />
+                                    <input
+                                        type="text"
+                                        maxlength="256"
+                                        :aria-label="
+                                            tr('bench.metadataValue', { key: String(key) })
+                                        "
+                                        :value="String(value)"
+                                        @change="
+                                            setMetaValue(
+                                                entity,
+                                                String(key),
+                                                ($event.target as HTMLInputElement).value,
+                                            )
+                                        "
+                                    />
+                                    <button
+                                        type="button"
+                                        class="small"
+                                        :aria-label="
+                                            tr('bench.metadataRemove', { key: String(key) })
+                                        "
+                                        @click="removeMeta(entity, String(key))"
+                                    >
+                                        <Minus :size="12" />
+                                    </button>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="small"
+                                    :disabled="Object.keys(entity.metadata ?? {}).length >= 32"
+                                    @click="addMeta(entity)"
+                                >
+                                    <Plus :size="12" /> {{ tr('bench.metadataAdd') }}
+                                </button>
+                            </div>
+                            <label>
                                 {{ tr('bench.autoRotation') }}
                                 <input
                                     type="checkbox"
@@ -2860,6 +2975,18 @@ defineExpose({ saveBench, discardBench, locate });
     align-items: center;
     margin-bottom: 6px;
     font-size: 12px;
+}
+.bench-metadata {
+    display: grid;
+    gap: 4px;
+}
+.bench-metadata-row {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto;
+    gap: 4px;
+}
+.bench-metadata-row input[aria-invalid='true'] {
+    border-color: var(--danger);
 }
 .bench-inspector input,
 .bench-inspector select {

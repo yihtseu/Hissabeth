@@ -203,6 +203,30 @@ try {
         assert(svgReadings.assertion?.includes('ΔOPL 605.002 mm'));
         assert(svgReadings.title?.includes(`Revision ${initialStage.revision} · bench draft`));
 
+        // Role and extension properties are edited in the inspector and saved with the bench.
+        await page.locator('.bench-element-list').getByRole('button', { name: /^BS1\b/ }).click();
+        const inspector = page.locator('.bench-inspector');
+        await inspector.getByRole('textbox', { name: 'Role', exact: true }).fill('Reference_Combiner');
+        await inspector.getByRole('textbox', { name: 'Role', exact: true }).press('Tab');
+        const properties = inspector.getByRole('group', { name: 'Extension properties' });
+        await properties.getByRole('button', { name: 'Add property' }).click();
+        await properties.getByRole('textbox', { name: 'Property name' }).fill('Part');
+        await properties.getByRole('textbox', { name: 'Property name' }).press('Tab');
+        await properties.getByRole('textbox', { name: 'Value of part', exact: true }).fill('BSW10');
+        await properties.getByRole('textbox', { name: 'Value of part', exact: true }).press('Tab');
+        await properties.getByRole('button', { name: 'Add property' }).click();
+        await properties.getByRole('textbox', { name: 'Value of note', exact: true }).fill('12.5');
+        await properties.getByRole('textbox', { name: 'Value of note', exact: true }).press('Tab');
+        await properties.getByRole('button', { name: 'Add property' }).click();
+        await properties.getByRole('textbox', { name: 'Value of note2', exact: true }).fill('true');
+        await properties.getByRole('textbox', { name: 'Value of note2', exact: true }).press('Tab');
+        await properties.getByRole('button', { name: 'Add property' }).click();
+        await properties.getByRole('button', { name: 'Remove property note3' }).click();
+        await expect(properties.getByRole('textbox', { name: 'Property name' })).toHaveCount(3);
+        // Descriptive fields stay editable on a stage member, whose position is locked.
+        await page.locator('.bench-element-list').getByRole('button', { name: /^M3\b/ }).click();
+        await inspector.getByRole('textbox', { name: 'Role', exact: true }).fill('delay_mirror');
+        await inspector.getByRole('textbox', { name: 'Role', exact: true }).press('Tab');
         assert.deepEqual(await optical('bench_get'), initialStage, 'Preview must preserve the saved stage');
         const save = page.getByRole('button', { name: 'Save bench', exact: true });
         holdNextLab = true;
@@ -216,6 +240,10 @@ try {
         await expect(outdated).toHaveCount(0);
         await expect(lab.getByRole('status')).toContainText(`Revision ${saved.revision} · Saved bench`);
         const opl = saved.branches.find((branch: { id: string }) => branch.id === 'arm_delay').paths[0].opl_mm;
+        const savedBs1 = (await optical('bench_get')).bench.elements.find((e: { id: string }) => e.id === 'BS1');
+        assert.equal(savedBs1.role, 'reference_combiner');
+        assert.deepEqual(savedBs1.metadata, { part: 'BSW10', note: 12.5, note2: true });
+        assert.equal((await optical('bench_get')).bench.elements.find((e: { id: string }) => e.id === 'M3').role, 'delay_mirror');
         assert(Math.abs(opl - 730.002) <= 1e-9, `Saved delay arm OPL: ${opl}`);
         // 3D mode shows the engine layout3d render at the interactive yaw and pitch, and follows rotation.
         await page.getByRole('button',{name:'3D bench',exact:true}).click();
@@ -234,6 +262,21 @@ try {
         await expect(page.locator('.render3d figcaption')).toHaveText('Engine render');
         await page.getByRole('button',{name:'2D table',exact:true}).click();
         await expect(page.locator('.render3d')).toHaveCount(0);
+        // A restarted engine and reloaded page read the role and typed properties back.
+        engine.kill();
+        await new Promise((r) => engine.once('exit', r));
+        await start();
+        await page.reload();
+        await page.locator('.bench-element-list').getByRole('button', { name: /^BS1\b/ }).click();
+        const reloaded = page.locator('.bench-inspector');
+        await expect(reloaded.getByRole('textbox', { name: 'Role', exact: true })).toHaveValue('reference_combiner');
+        const reloadedProperties = reloaded.getByRole('group', { name: 'Extension properties' });
+        await expect(reloadedProperties.getByRole('textbox', { name: 'Property name' })).toHaveCount(3);
+        await expect(reloadedProperties.getByRole('textbox', { name: 'Value of part', exact: true })).toHaveValue('BSW10');
+        await expect(reloadedProperties.getByRole('textbox', { name: 'Value of note', exact: true })).toHaveValue('12.5');
+        await expect(reloadedProperties.getByRole('textbox', { name: 'Value of note2', exact: true })).toHaveValue('true');
+        const reread = (await optical('bench_get')).bench.elements.find((e: { id: string }) => e.id === 'BS1');
+        assert.deepEqual(reread.metadata, { part: 'BSW10', note: 12.5, note2: true });
         assert.deepEqual(errors, []);
         console.log('PASS: delay stage preview, revisioned lab readings, and SVG agree after coarse and PZT motion');
     } else if(process.argv.includes('--lifecycle')) {
